@@ -17,46 +17,6 @@ pub struct StoredSms {
     pub pdu_hex: String,
 }
 
-/// Process a +CMTI notification: read the PDU, forward it, delete on success.
-///
-/// Returns `true` if the modem slot was deleted (forwarded OK or unparseable),
-/// `false` if forwarding failed and the slot should be retried on next boot.
-#[allow(clippy::too_many_arguments)]
-pub fn handle_new_sms(
-    mem: &str,
-    index: u16,
-    modem: &mut dyn ModemPort,
-    router: &mut ReplyRouter,
-    log: &mut LogRing,
-    concat: &mut ConcatReassembler,
-    messenger: &mut dyn MessageSink,
-    store: &mut dyn Store,
-) -> bool {
-    let Some(stored) = read_new_sms_pdu(mem, index, modem) else {
-        return false;
-    };
-
-    let delete = process_pdu_hex(
-        &stored.pdu_hex,
-        stored.index,
-        router,
-        log,
-        concat,
-        messenger,
-        store,
-    );
-    if delete {
-        delete_sms_slot(stored.index, modem);
-    } else {
-        log::warn!(
-            "[sms_handler] forward failed — SMS stays at mem={} slot={}",
-            stored.mem,
-            stored.index
-        );
-    }
-    delete
-}
-
 /// Read one SMS PDU from the modem slot reported by a +CMTI notification.
 pub fn read_new_sms_pdu(mem: &str, index: u16, modem: &mut dyn ModemPort) -> Option<StoredSms> {
     log::info!("[sms_handler] +CMTI: mem={} index={}", mem, index);
@@ -106,38 +66,6 @@ pub fn delete_sms_slot(index: u16, modem: &mut dyn ModemPort) {
     let _ = modem.send_at(&format!("+CMGD={}", index));
 }
 
-/// Sweep all stored SMS in one memory bank at boot time.
-pub fn sweep_one_storage(
-    mem: &str,
-    modem: &mut dyn ModemPort,
-    router: &mut ReplyRouter,
-    log: &mut LogRing,
-    concat: &mut ConcatReassembler,
-    messenger: &mut dyn MessageSink,
-    store: &mut dyn Store,
-) {
-    for stored in read_stored_sms(mem, modem) {
-        let delete = process_pdu_hex(
-            &stored.pdu_hex,
-            stored.index,
-            router,
-            log,
-            concat,
-            messenger,
-            store,
-        );
-        if delete {
-            delete_sms_slot(stored.index, modem);
-        } else {
-            log::warn!(
-                "[sms_handler] sweep forward failed — SMS stays at {} slot {}",
-                stored.mem,
-                stored.index
-            );
-        }
-    }
-}
-
 /// Read all stored SMS PDUs from one memory bank.
 pub fn read_stored_sms(mem: &str, modem: &mut dyn ModemPort) -> Vec<StoredSms> {
     let Some((cmd, resp)) = list_stored_sms(mem, modem) else {
@@ -150,9 +78,8 @@ pub fn read_stored_sms(mem: &str, modem: &mut dyn ModemPort) -> Vec<StoredSms> {
         resp.body
     );
 
-    let body = resp.body.clone();
     let mut stored = Vec::new();
-    let mut lines = body.lines().peekable();
+    let mut lines = resp.body.lines();
     while let Some(line) = lines.next() {
         if let Some(rest) = line.strip_prefix("+CMGL: ") {
             let slot: u16 = rest

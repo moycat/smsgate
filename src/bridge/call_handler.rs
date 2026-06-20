@@ -1,8 +1,6 @@
 //! Incoming call state machine: Idle → Ringing → Cooldown.
 
-use crate::im::MessageSink;
 use crate::modem::ModemPort;
-use crate::sms::sender::SmsSender;
 use std::time::{Duration, Instant};
 
 const CLIP_DEADLINE: Duration = Duration::from_millis(1500);
@@ -12,7 +10,6 @@ const COOLDOWN: Duration = Duration::from_secs(6);
 enum State {
     Idle,
     Ringing {
-        since: Instant,
         clip_deadline: Instant,
         number: Option<String>,
     },
@@ -31,35 +28,15 @@ impl CallHandler {
         CallHandler { state: State::Idle }
     }
 
-    /// Feed a URC line. Call this for every line from `modem.poll_urc()`.
-    pub fn handle_urc(
-        &mut self,
-        line: &str,
-        modem: &mut dyn ModemPort,
-        messenger: &mut dyn MessageSink,
-        sender: &mut SmsSender,
-    ) {
-        if let Some(text) = self.handle_urc_deferred(line, modem, sender) {
-            if let Err(e) = messenger.send_message(&text) {
-                log::error!("[call] IM notify failed: {}", e);
-            }
-        }
-    }
-
     /// Feed a URC line while deferring IM delivery until after the modem lock is released.
-    pub fn handle_urc_deferred(
-        &mut self,
-        line: &str,
-        modem: &mut dyn ModemPort,
-        sender: &mut SmsSender,
-    ) -> Option<String> {
+    pub fn handle_urc_deferred(&mut self, line: &str, modem: &mut dyn ModemPort) -> Option<String> {
         if line == "RING" || line.starts_with("RING") {
-            self.on_ring(modem, sender);
+            self.on_ring();
             return None;
         }
         if line.starts_with("+CLIP:") {
             if let Some(number) = crate::sms::codec::parse_clip_line(line) {
-                return self.on_clip(number, modem, sender);
+                return self.on_clip(number, modem);
             }
             return None;
         }
@@ -69,37 +46,18 @@ impl CallHandler {
         None
     }
 
-    /// Drive the state machine clock — call from main loop.
-    pub fn tick(
-        &mut self,
-        modem: &mut dyn ModemPort,
-        messenger: &mut dyn MessageSink,
-        sender: &mut SmsSender,
-    ) {
-        if let Some(text) = self.tick_deferred(modem, sender) {
-            if let Err(e) = messenger.send_message(&text) {
-                log::error!("[call] IM notify failed: {}", e);
-            }
-        }
-    }
-
     /// Drive the state machine clock while deferring IM delivery.
-    pub fn tick_deferred(
-        &mut self,
-        modem: &mut dyn ModemPort,
-        sender: &mut SmsSender,
-    ) -> Option<String> {
+    pub fn tick_deferred(&mut self, modem: &mut dyn ModemPort) -> Option<String> {
         match &self.state {
             State::Ringing {
                 clip_deadline,
                 number,
-                since: _,
             } => {
                 let deadline = *clip_deadline;
                 let num = number.clone();
                 if Instant::now() >= deadline {
                     // CLIP not received in time — commit with unknown number
-                    return self.commit_call(num, modem, sender);
+                    return Some(self.commit_call(num, modem));
                 }
             }
             State::Cooldown { until } => {
@@ -112,42 +70,31 @@ impl CallHandler {
         None
     }
 
-    fn on_ring(&mut self, _modem: &mut dyn ModemPort, _sender: &mut SmsSender) {
+    fn on_ring(&mut self) {
         if matches!(self.state, State::Cooldown { .. }) {
             return; // suppress duplicate ring in cooldown window
         }
         if matches!(self.state, State::Idle) {
             self.state = State::Ringing {
-                since: Instant::now(),
                 clip_deadline: Instant::now() + CLIP_DEADLINE,
                 number: None,
             };
         }
     }
 
-    fn on_clip(
-        &mut self,
-        number: String,
-        modem: &mut dyn ModemPort,
-        sender: &mut SmsSender,
-    ) -> Option<String> {
+    fn on_clip(&mut self, number: String, modem: &mut dyn ModemPort) -> Option<String> {
         if let State::Ringing { .. } = &mut self.state {
             let n = if number.is_empty() {
                 None
             } else {
                 Some(number)
             };
-            return self.commit_call(n, modem, sender);
+            return Some(self.commit_call(n, modem));
         }
         None
     }
 
-    fn commit_call(
-        &mut self,
-        number: Option<String>,
-        modem: &mut dyn ModemPort,
-        _sender: &mut SmsSender,
-    ) -> Option<String> {
+    fn commit_call(&mut self, number: Option<String>, modem: &mut dyn ModemPort) -> String {
         // Auto-hang-up
         if let Err(e) = modem.hang_up() {
             log::warn!("[call] hang_up failed: {}", e);
@@ -164,7 +111,7 @@ impl CallHandler {
         self.state = State::Cooldown {
             until: Instant::now() + COOLDOWN,
         };
-        Some(text)
+        text
     }
 }
 
