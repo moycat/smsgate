@@ -21,7 +21,6 @@ fn make_registry() -> CommandRegistry {
     r.register(Box::new(PauseCommand));
     r.register(Box::new(ResumeCommand));
     r.register(Box::new(RestartCommand));
-    r.register(Box::new(UpdateCommand));
     r
 }
 
@@ -60,7 +59,7 @@ fn registry_unknown_command_returns_none() {
 #[test]
 fn registry_command_count_not_exceeded() {
     let reg = make_registry();
-    assert_eq!(reg.command_list().len(), 10);
+    assert_eq!(reg.command_list().len(), 9);
 }
 
 #[test]
@@ -76,7 +75,6 @@ fn registry_command_list_includes_all() {
     assert!(names.contains(&"pause"));
     assert!(names.contains(&"resume"));
     assert!(names.contains(&"restart"));
-    assert!(names.contains(&"update"));
 }
 
 #[test]
@@ -314,42 +312,6 @@ fn registry_strips_bot_username_suffix() {
     let queue = SmsSender::new();
     let result = reg.dispatch("/help@mybot", &ctx(&store, &status, &log, &queue));
     assert!(result.is_some());
-}
-
-// When no OTA URL is configured the /update command should report "disabled".
-// Skip when the developer's config.toml has an OTA URL — the compile-time env
-// var CFG_OTA_URL is not empty and testing the opposite branch here is a no-op.
-#[test]
-fn update_command_disabled_when_no_url() {
-    if smsgate::ota::is_enabled() {
-        return; // OTA URL is set in developer's config.toml — skip
-    }
-    let store = MemStore::new();
-    let status = ModemStatus::default();
-    let log = LogRing::new();
-    let queue = SmsSender::new();
-    let result = UpdateCommand.handle("", &ctx(&store, &status, &log, &queue));
-    assert!(result.contains(i18n::update_disabled()), "expected disabled message: {}", result);
-}
-
-#[test]
-fn update_confirm_auto_mode_rejected() {
-    let store = MemStore::new();
-    let status = ModemStatus::default();
-    let log = LogRing::new();
-    let queue = SmsSender::new();
-    let result = UpdateCommand.handle("confirm", &ctx(&store, &status, &log, &queue));
-    assert!(result.contains(i18n::update_confirm_not_manual()), "expected auto-mode message: {}", result);
-}
-
-#[test]
-fn update_command_invalid_subcommand() {
-    let store = MemStore::new();
-    let status = ModemStatus::default();
-    let log = LogRing::new();
-    let queue = SmsSender::new();
-    let result = UpdateCommand.handle("foobar", &ctx(&store, &status, &log, &queue));
-    assert!(result.contains(i18n::update_usage()), "expected usage: {}", result);
 }
 
 #[test]

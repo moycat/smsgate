@@ -176,15 +176,11 @@ nothing in `bridge/`, `commands/`, or `sms/` imports a concrete implementation.
 | Trait | Defined in | Abstracts |
 |-------|-----------|-----------|
 | `ModemPort` | `modem/mod.rs` | AT commands, URC polling, PDU SMS send |
-| `MessageSink` | `im/mod.rs` | outbound delivery (Telegram, webhook, MQ, etc.) |
+| `MessageSink` | `im/mod.rs` | outbound delivery to Telegram |
 | `MessageSource` | `im/mod.rs` | inbound command polling (Telegram only) |
 | `Store` | `persist/mod.rs` | NVS key-value persistence |
 | `Board` | `boards/mod.rs` | pin layout, power-on sequence, builds `ModemPort` |
 | `Command` | `commands/mod.rs` | single bot command (name, description, handler) |
-
-`FanoutSink` wraps multiple `MessageSink`s and delivers to all of them.
-The first sink is the primary (its `MessageId` is used for reply routing);
-the rest are fire-and-forget.
 
 `Board` is used only during startup in `main.rs` to produce a `ModemPort`.
 After that, `Board` disappears from the call graph entirely.
@@ -196,40 +192,32 @@ in the parent `mod.rs`.
 NVS stores exactly four keys: `im_cursor` (i64), `reply_map` (blob), `block_list` (blob),
 `fwd_enabled` (bool). Configuration lives in compile-time `config.toml`, not NVS.
 
-### OTA Updates
+### Partition Table
 
-Dual-partition OTA via ESP-IDF (`partitions_ota.csv`). The `/update` command
-downloads firmware from the configured HTTPS URL, writes to the inactive slot,
-and reboots. Rollback is automatic if the new firmware fails to boot.
-Configure via `[ota]` in `config.toml`.
+The project uses ESP-IDF's built-in `PARTITION_TABLE_SINGLE_APP_LARGE` layout:
+single factory app, 1500 KiB app slot. The default ESP-IDF single-app table is
+only 1 MiB and is too small for the current TLS-enabled firmware.
 
-First flash must include the partition table:
+No partition CSV is tracked in this repository. ESP-IDF generates the partition
+table during `cargo +esp build` and writes it to:
+
 ```bash
-espflash flash smsgate --port <PORT> --partition-table partitions_ota.bin
+target/xtensa-esp32-espidf/release/partition-table.bin
 ```
 
-`partitions_ota.bin` is not tracked in git (generated artifact). Regenerate it from
-the CSV whenever the partition layout changes:
+Normal flashing does not require manually generating or passing a separate partition
+table file; `espflash flash` writes the bootloader, partition table, and app image
+from the build outputs:
+
 ```bash
-# Using ESP-IDF Python environment:
-python $IDF_PATH/components/partition_table/gen_esp32part.py partitions_ota.csv partitions_ota.bin
-# Or using the PlatformIO Python on Windows:
-"/c/Users/$USER/.platformio/penv/Scripts/python.exe" \
-  ~/.platformio/packages/framework-espidf/components/partition_table/gen_esp32part.py \
-  partitions_ota.csv partitions_ota.bin
+espflash flash target/xtensa-esp32-espidf/release/smsgate --port <PORT>
 ```
 
-### CI / OTA Release Notes
+### CI / Release Notes
 
-The checked-in CI workflow is `.github/workflows/ci.yml`, which runs host tests. Do not
-claim nightly release automation exists unless a nightly workflow is present under
-`.github/workflows/`.
+The checked-in CI workflow is `.github/workflows/ci.yml`, which runs host tests.
 
-`.github/scripts/gen_config.py` can generate release configuration with an OTA URL pointing
-to the repository's `nightly` release asset. Any workflow that builds and publishes OTA
-firmware should verify that the released `smsgate.bin` is an OTA-ready app image.
-
-Nightly or release workflows that use generated production configuration require these
+Workflows that use `.github/scripts/gen_config.py` for production configuration require these
 GitHub Secrets (Settings -> Secrets and variables -> Actions):
 
 | Secret | Example |
@@ -239,9 +227,6 @@ GitHub Secrets (Settings -> Secrets and variables -> Actions):
 | `TELEGRAM_BOT_TOKEN` | `123456:ABC-DEF...` |
 | `TELEGRAM_CHAT_ID` | `8024680950` |
 | `UI_LOCALE` *(optional)* | `zh` (default) or `en` |
-
-When OTA release automation is present, keep the firmware's configured OTA URL aligned with
-the asset that `/update` should fetch.
 
 ## Agent Workflow and Context Management
 
@@ -313,19 +298,19 @@ startup cosmetics.
 Keep `sdkconfig.defaults` aligned with the board and firmware behavior:
 
 - 4 MB flash size for the reference board.
-- Custom OTA partition table and rollback support.
+- ESP-IDF built-in single-app-large partition table.
 - TLS certificate bundle enabled and insecure TLS disabled.
 - Main task stack large enough for current firmware paths.
-- Watchdog timeouts high enough for modem, flash, TLS, and OTA operations while still catching
+- Watchdog timeouts high enough for modem, flash, and TLS operations while still catching
   stuck tasks.
 
-Long blocking operations such as modem HTTP, SMS send, flash erase/write, and OTA must yield
+Long blocking operations such as modem HTTP, SMS send, and flash erase/write must yield
 or reset watchdog state often enough for ESP-IDF watchdogs. Avoid long critical sections and
 avoid blocking interrupts around UART or flash work.
 
-The first flash after changing the partition layout must include the generated partition
-table. Regenerate `partitions_ota.bin` from `partitions_ota.csv`, flash it with the firmware,
-and verify rollback behavior before relying on OTA.
+After changing the partition layout, run a firmware build so ESP-IDF regenerates
+`target/xtensa-esp32-espidf/release/partition-table.bin`, then flash with `espflash flash`.
+Use `espflash write-bin` only for manual recovery workflows.
 
 For modem issues, check LilyGo/SIMCom firmware notes and known issues before changing the init
 sequence. Preserve the existing SMS storage behavior unless tests and hardware logs prove the
@@ -357,38 +342,6 @@ rm target/xtensa-esp32-espidf/release/build/esp-idf-sys-*/out/sdkconfig
 ```
 Then rebuild. The `sdkconfig.defaults` is applied as a *seed* (lower priority than existing
 sdkconfig), so deleting the cache is required for changes to take effect.
-
-## Partition CSV Build Ordering (Known Issue)
-
-`CONFIG_PARTITION_TABLE_CUSTOM_FILENAME` in `sdkconfig.defaults` is a relative path resolved
-against esp-idf-sys's `out/` directory (e.g. `C:\t\...\build\esp-idf-sys-<hash>\out\`).
-`build.rs` copies `partitions_ota.csv` there, but Cargo runs esp-idf-sys's build script
-**before** smsgate's — so on a fresh build the cmake ninja step tries to find the CSV before
-the copy has happened.
-
-**Normal builds (Cargo.lock pinned, no `cargo update`) are unaffected** — esp-idf-sys is cached
-and the copy runs cleanly on smsgate's build.rs.
-
-The failure only occurs the **first time** after `cargo update` bumps esp-idf-sys to a new
-version (new hash → new out dir → CSV missing). Symptom:
-```
-ninja: error: '…/esp-idf-sys-<hash>/out/partitions_ota.csv', needed by 'partition-table.bin', missing
-```
-
-**Recovery (Windows, `CARGO_TARGET_DIR=C:\t`):**
-```powershell
-Copy-Item partitions_ota.csv `
-  (Get-ChildItem C:\t\xtensa-esp32-espidf\release\build\esp-idf-sys-*\out | Select-Object -First 1).FullName
-```
-```bash
-# bash equivalent for Windows-style short target dir
-cp partitions_ota.csv C:/t/xtensa-esp32-espidf/release/build/esp-idf-sys-*/out/
-
-# macOS/Linux/default target dir
-cp partitions_ota.csv target/xtensa-esp32-espidf/release/build/esp-idf-sys-*/out/
-```
-Then re-run `cargo +esp build`. The copy is permanent for that esp-idf-sys hash; subsequent
-builds succeed automatically.
 
 ## Boot Sequence Timing
 

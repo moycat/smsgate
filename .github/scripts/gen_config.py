@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Generate config.toml from environment variables for CI/nightly builds.
+"""Generate config.toml from environment variables for CI builds.
 
 Usage:
     python3 .github/scripts/gen_config.py > config.toml
 
 Required environment variables:
     WIFI_SSID, WIFI_PASSWORD,
-    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
-    GITHUB_REPOSITORY (set automatically by GitHub Actions)
+    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 
 Optional:
     UI_LOCALE  — "en" (default) or "zh"
@@ -34,7 +33,6 @@ def require(name: str) -> str:
     return v
 
 
-repo = require("GITHUB_REPOSITORY")
 chat_id_str = env("TELEGRAM_CHAT_ID", "0")
 try:
     chat_id = int(chat_id_str)
@@ -67,10 +65,6 @@ lines = [
     "max_failures_before_reboot = 8",
     "poll_interval_ms           = 3000",
     "watchdog_timeout_sec       = 120",
-    "",
-    "[ota]",
-    f'url     = "https://github.com/{repo}/releases/download/nightly/smsgate.bin"',
-    'confirm = "auto"',
     "",
     "[ui]",
     f"locale = {toml_str(env('UI_LOCALE', 'en'))}",

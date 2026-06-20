@@ -16,8 +16,6 @@ pub const UNBLOCK_SENTINEL: &str = "__UNBLOCK__:";
 pub const PAUSE_SENTINEL: &str = "__PAUSE__:";
 pub const RESUME_SENTINEL: &str = "__RESUME__";
 pub const RESTART_SENTINEL: &str = "__RESTART__";
-pub const UPDATE_SENTINEL: &str = "__UPDATE__";
-pub const UPDATE_CONFIRM_SENTINEL: &str = "__UPDATE_CONFIRM__";
 // Keep `pub` (not `pub(crate)`) — integration tests import them.
 
 /// Read-only context available to a command handler.
@@ -48,7 +46,9 @@ pub struct CommandRegistry {
 
 impl CommandRegistry {
     pub fn new() -> Self {
-        CommandRegistry { commands: Vec::new() }
+        CommandRegistry {
+            commands: Vec::new(),
+        }
     }
 
     /// Register a command. Panics if cap is exceeded.
@@ -63,20 +63,25 @@ impl CommandRegistry {
     /// Dispatch a message text to the matching command. Returns reply or None.
     pub fn dispatch(&self, text: &str, ctx: &CommandContext) -> Option<String> {
         let text = text.trim_start_matches('/');
-        let (name, args) = text.split_once(|c: char| c.is_whitespace())
+        let (name, args) = text
+            .split_once(|c: char| c.is_whitespace())
             .unwrap_or((text, ""));
 
         // Strip bot username suffix (e.g. /help@mybot)
         let name = name.split('@').next().unwrap_or(name);
 
-        self.commands.iter()
+        self.commands
+            .iter()
             .find(|c| c.name() == name)
             .map(|c| c.handle(args.trim(), ctx))
     }
 
     /// Returns (name, description) pairs for registration with IM backend.
     pub fn command_list(&self) -> Vec<(&str, &str)> {
-        self.commands.iter().map(|c| (c.name(), c.description())).collect()
+        self.commands
+            .iter()
+            .map(|c| (c.name(), c.description()))
+            .collect()
     }
 
     /// Generate /help text.
@@ -90,5 +95,7 @@ impl CommandRegistry {
 }
 
 impl Default for CommandRegistry {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

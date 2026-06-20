@@ -28,12 +28,6 @@ impl Config {
     pub const POLL_INTERVAL_MS: u32 = parse_u32_const(env!("CFG_BRIDGE_POLL_INTERVAL_MS"));
     pub const WATCHDOG_TIMEOUT_SEC: u32 = parse_u32_const(env!("CFG_BRIDGE_WATCHDOG_SEC"));
     pub const GIT_COMMIT: &'static str = env!("CFG_GIT_COMMIT");
-    /// JSON array of extra sinks, e.g. `[{"type":"webhook","url":"https://..."}]`
-    pub const SINKS: &'static str = env!("CFG_SINKS");
-    /// HTTPS URL to the firmware .bin (empty = OTA disabled)
-    pub const OTA_URL: &'static str = env!("CFG_OTA_URL");
-    /// "auto" or "manual"
-    pub const OTA_CONFIRM: &'static str = env!("CFG_OTA_CONFIRM");
 }
 
 const fn parse_bool_env_true(s: &str) -> bool {
@@ -54,7 +48,11 @@ const fn parse_i64_const(s: &str) -> i64 {
     if bytes.is_empty() {
         return 0;
     }
-    let (neg, start) = if bytes[0] == b'-' { (true, 1) } else { (false, 0) };
+    let (neg, start) = if bytes[0] == b'-' {
+        (true, 1)
+    } else {
+        (false, 0)
+    };
     let mut i = start;
     let mut acc: i64 = 0;
     while i < bytes.len() {
@@ -64,7 +62,11 @@ const fn parse_i64_const(s: &str) -> i64 {
         }
         i += 1;
     }
-    if neg { -acc } else { acc }
+    if neg {
+        -acc
+    } else {
+        acc
+    }
 }
 
 const fn parse_u64_const(s: &str) -> u64 {

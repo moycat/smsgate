@@ -1,28 +1,18 @@
 //! IM message poll loop and command dispatcher.
 
+use crate::bridge::reply_router::ReplyRouter;
 use crate::commands::{
-    CommandContext, CommandRegistry,
-    SEND_SENTINEL, BLOCK_SENTINEL, UNBLOCK_SENTINEL,
-    PAUSE_SENTINEL, RESUME_SENTINEL, RESTART_SENTINEL,
-    UPDATE_SENTINEL, UPDATE_CONFIRM_SENTINEL,
+    CommandContext, CommandRegistry, BLOCK_SENTINEL, PAUSE_SENTINEL, RESTART_SENTINEL,
+    RESUME_SENTINEL, SEND_SENTINEL, UNBLOCK_SENTINEL,
 };
 use crate::im::{InboundMessage, MessageSink, MessengerError};
-use crate::persist::{keys, save_bool, Store};
-use crate::sms::sender::{CmdSendResult, SmsSender};
-use crate::bridge::reply_router::ReplyRouter;
 use crate::log_ring::LogRing;
 use crate::modem::ModemStatus;
-
-/// OTA action requested by a command.
-#[derive(Debug, Clone, PartialEq)]
-pub enum OtaAction {
-    None,
-    Update,
-    Confirm,
-}
+use crate::persist::{keys, save_bool, Store};
+use crate::sms::sender::{CmdSendResult, SmsSender};
 
 /// Process a batch of inbound IM messages: dispatch commands and route replies to SMS.
-/// Returns `(restart_requested, pause_mins, ota_action)`.
+/// Returns `(restart_requested, pause_mins)`.
 ///
 /// Polling is handled by a dedicated background thread; this function only processes
 /// messages that have already been received. Cursor persistence is the caller's responsibility.
@@ -38,10 +28,9 @@ pub fn poll_and_dispatch(
     uptime_ms: u32,
     free_heap_bytes: u32,
     wifi_info: &str,
-) -> Result<(bool, Option<u32>, OtaAction), MessengerError> {
+) -> Result<(bool, Option<u32>), MessengerError> {
     let mut restart_requested = false;
     let mut pause_mins: Option<u32> = None;
-    let mut ota_action = OtaAction::None;
 
     for msg in messages {
         let text = msg.text.trim();
@@ -58,10 +47,13 @@ pub fn poll_and_dispatch(
                 wifi_info,
             };
             if let Some(reply) = registry.dispatch(text, &ctx) {
-                let (clean, should_restart, maybe_pause, ota) = apply_sentinels(&reply, sender, store);
-                if should_restart { restart_requested = true; }
-                if maybe_pause.is_some() { pause_mins = maybe_pause; }
-                if ota != OtaAction::None { ota_action = ota; }
+                let (clean, should_restart, maybe_pause) = apply_sentinels(&reply, sender, store);
+                if should_restart {
+                    restart_requested = true;
+                }
+                if maybe_pause.is_some() {
+                    pause_mins = maybe_pause;
+                }
                 let display = clean.trim();
                 if !display.is_empty() {
                     if let Err(e) = messenger.send_message(display) {
@@ -85,16 +77,19 @@ pub fn poll_and_dispatch(
         }
     }
 
-    Ok((restart_requested, pause_mins, ota_action))
+    Ok((restart_requested, pause_mins))
 }
 
 /// Parse sentinel lines from a command reply, apply their side effects, and return
 /// `(display_text, restart_requested, pause_mins)`.
-fn apply_sentinels(reply: &str, sender: &mut SmsSender, store: &mut dyn Store) -> (String, bool, Option<u32>, OtaAction) {
+fn apply_sentinels(
+    reply: &str,
+    sender: &mut SmsSender,
+    store: &mut dyn Store,
+) -> (String, bool, Option<u32>) {
     let mut display_lines = Vec::new();
     let mut restart = false;
     let mut pause_mins: Option<u32> = None;
-    let mut ota = OtaAction::None;
 
     for line in reply.lines() {
         if let Some(rest) = line.strip_prefix(SEND_SENTINEL) {
@@ -132,16 +127,10 @@ fn apply_sentinels(reply: &str, sender: &mut SmsSender, store: &mut dyn Store) -
         } else if line.starts_with(RESTART_SENTINEL) {
             log::info!("[poller] sentinel: restart requested");
             restart = true;
-        } else if line.starts_with(UPDATE_SENTINEL) {
-            log::info!("[poller] sentinel: OTA update requested");
-            ota = OtaAction::Update;
-        } else if line.starts_with(UPDATE_CONFIRM_SENTINEL) {
-            log::info!("[poller] sentinel: OTA confirm requested");
-            ota = OtaAction::Confirm;
         } else {
             display_lines.push(line);
         }
     }
 
-    (display_lines.join("\n"), restart, pause_mins, ota)
+    (display_lines.join("\n"), restart, pause_mins)
 }

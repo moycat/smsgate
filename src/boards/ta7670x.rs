@@ -43,7 +43,7 @@ impl Board for TA7670X {
         poweron.set_high().map_err(|e| BoardError::Gpio(e.to_string()))?;
         std::thread::sleep(Duration::from_millis(200)); // let rail stabilise
 
-        // On warm reboots (watchdog, panic, /reboot command, OTA) the ESP32
+        // On warm reboots (watchdog, panic, /restart command) the ESP32
         // resets but the modem power rail stays up — the modem is already on
         // and responsive. Skip the 7s RESET+PWRKEY sequence; the AT probe
         // loop in A76xxModem::init() will find it immediately.

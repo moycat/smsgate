@@ -1,16 +1,13 @@
 //! IM backend abstraction.
 //!
 //! Two orthogonal traits:
-//! - `MessageSink`   — fire-and-forget outbound delivery (SMS → IM / webhook / MQ)
-//! - `MessageSource` — inbound command polling (Telegram only, typically)
+//! - `MessageSink`   — outbound delivery (SMS -> Telegram)
+//! - `MessageSource` — inbound command polling
 //!
 //! The legacy `Messenger` trait is kept as a convenience super-trait for backends
 //! that implement both (e.g. Telegram).
 
-pub mod fanout;
 pub mod telegram;
-#[cfg(feature = "esp32")]
-pub mod webhook;
 
 use thiserror::Error;
 
@@ -41,17 +38,18 @@ pub enum MessengerError {
     Disconnected,
 }
 
-/// Outbound-only delivery target. Implement this for webhooks, MQ, etc.
+/// Outbound delivery target.
 pub trait MessageSink {
     /// Deliver a text notification. Returns a backend-specific message ID
     /// (0 if the backend doesn't track IDs).
     fn send_message(&mut self, text: &str) -> Result<MessageId, MessengerError>;
 }
 
-/// Inbound command source. Only the "primary" backend (e.g. Telegram) needs this.
+/// Inbound command source.
 pub trait MessageSource {
     /// Poll for new messages. `since` = cursor from last poll (0 on first call).
-    fn poll(&mut self, since: i64, timeout_sec: u32) -> Result<Vec<InboundMessage>, MessengerError>;
+    fn poll(&mut self, since: i64, timeout_sec: u32)
+        -> Result<Vec<InboundMessage>, MessengerError>;
 }
 
 /// Full bidirectional backend (sink + source). Telegram implements this.

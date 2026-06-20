@@ -13,19 +13,18 @@ use smsgate::{
         reply_router::ReplyRouter,
         sms_handler::{handle_new_sms, process_pdu_hex, sweep_one_storage},
     },
-    commands::{
-        builtin::*,
-        CommandRegistry,
-    },
+    commands::{builtin::*, CommandRegistry},
     config::Config,
     creds::RuntimeCreds,
     im::{
-        MessageSink, MessageSource,
-        fanout::FanoutSink,
         telegram::{http::TelegramHttpClient, TelegramMessenger},
+        MessageSink, MessageSource,
     },
     log_ring::LogRing,
-    modem::{urc::{parse_urc, Urc}, a76xx::qhttp},
+    modem::{
+        a76xx::qhttp,
+        urc::{parse_urc, Urc},
+    },
     persist::nvs::NvsStore,
     sms::concat::ConcatReassembler,
     sms::sender::{DrainOutcome, SmsSender},
@@ -40,7 +39,9 @@ fn main() {
 /// Lock a `Mutex`, recovering from a poisoned state rather than panicking.
 #[cfg(feature = "esp32")]
 macro_rules! lock {
-    ($m:expr) => { $m.lock().unwrap_or_else(|e| e.into_inner()) };
+    ($m:expr) => {
+        $m.lock().unwrap_or_else(|e| e.into_inner())
+    };
 }
 
 #[cfg(feature = "esp32")]
@@ -54,7 +55,9 @@ fn main() {
     let mut peripherals = esp_idf_hal::peripherals::Peripherals::take().unwrap();
     let board = TA7670X;
     board.init(&mut peripherals).expect("board init failed");
-    let modem = board.build_modem_port(&mut peripherals).expect("modem init failed");
+    let modem = board
+        .build_modem_port(&mut peripherals)
+        .expect("modem init failed");
 
     // ---- NVS store (fall back to MemStore on NVS failure) ----
     let nvs_partition = esp_idf_svc::nvs::EspDefaultNvsPartition::take().unwrap();
@@ -86,9 +89,8 @@ fn main() {
     // 'static is sound because the wifi driver is kept alive until main exits.
     let wifi_inner: esp_idf_svc::wifi::EspWifi<'static> = unsafe {
         std::mem::transmute(
-            esp_idf_svc::wifi::EspWifi::new(
-                peripherals.modem, sysloop.clone(), None
-            ).expect("WiFi init failed")
+            esp_idf_svc::wifi::EspWifi::new(peripherals.modem, sysloop.clone(), None)
+                .expect("WiFi init failed"),
         )
     };
     let mut wifi = esp_idf_svc::wifi::BlockingWifi::wrap(wifi_inner, sysloop.clone())
@@ -103,7 +105,8 @@ fn main() {
                 &creds.apn,
                 &creds.apn_user,
                 &creds.apn_pass,
-            ).expect("PDP attach failed");
+            )
+            .expect("PDP attach failed");
         } else {
             panic!(
                 "no WiFi and no cellular fallback (set modem.cellular_fallback + modem.apn, or fix WiFi)"
@@ -112,8 +115,8 @@ fn main() {
     }
     let mut wifi = wifi; // keep WiFi driver alive; also used for reconnect on drop
 
-    // ---- IM (Telegram as primary) ----
-    let mut tg_messenger = if wifi_ok {
+    // ---- IM (Telegram) ----
+    let mut messenger = if wifi_ok {
         TelegramMessenger::new_wifi(
             TelegramHttpClient::new(None).expect("TLS init failed"),
             creds.bot_token.clone(),
@@ -138,29 +141,9 @@ fn main() {
     let registry = build_registry(&help_text);
 
     // Register bot commands with Telegram
-    if let Err(e) = tg_messenger.register_commands(&registry.command_list()) {
+    if let Err(e) = messenger.register_commands(&registry.command_list()) {
         log::warn!("[main] register_commands failed: {} — continuing", e);
     }
-
-    // ---- Build fanout sink (Telegram + any configured extra sinks) ----
-    let mut sinks: Vec<Box<dyn MessageSink>> = Vec::new();
-    sinks.push(Box::new(tg_messenger));
-    for sink_cfg in parse_sink_config() {
-        match sink_cfg.sink_type.as_str() {
-            "webhook" => {
-                match smsgate::im::webhook::WebhookSink::from_url(&sink_cfg.url) {
-                    Ok(ws) => {
-                        log::info!("[main] added webhook sink: {}", sink_cfg.url);
-                        sinks.push(Box::new(ws));
-                    }
-                    Err(e) => log::error!("[main] invalid webhook URL '{}': {}", sink_cfg.url, e),
-                }
-            }
-            other => log::warn!("[main] unknown sink type '{}' — skipped", other),
-        }
-    }
-    log::info!("[main] fanout: {} sink(s) configured", sinks.len());
-    let mut messenger = FanoutSink::new(sinks);
 
     // Alert if NVS init failed (now that we have a messenger to send the notification)
     if nvs_failed {
@@ -168,7 +151,7 @@ fn main() {
     }
 
     // /pause is a transient, timer-driven state. The resume timer lives in RAM
-    // only — a reboot (crash, OTA, /restart, power cycle) loses it. Clear the
+    // only — a reboot (crash, /restart, power cycle) loses it. Clear the
     // flag here so forwarding is always enabled at startup; a deliberate
     // long-term pause should be re-issued after reboot if still needed.
     let _ = smsgate::persist::save_bool(&mut *store, smsgate::persist::keys::FWD_ENABLED, true);
@@ -182,16 +165,15 @@ fn main() {
         let mut md = lock!(modem);
         let _ = md.send_at("+CPMS=\"ME\",\"ME\",\"ME\"");
         log::info!("[main] sweeping ME storage…");
-        sweep_one_storage("ME", &mut *md, &mut router, &mut log, &mut concat,
-                          &mut messenger, &mut *store);
-    }
-
-    // ---- OTA auto-confirm ----
-    if !smsgate::ota::is_manual_confirm() {
-        match smsgate::ota::confirm_running() {
-            Ok(()) => log::info!("[main] OTA auto-confirm: running slot marked valid"),
-            Err(e) => log::warn!("[main] OTA auto-confirm skipped: {}", e),
-        }
+        sweep_one_storage(
+            "ME",
+            &mut *md,
+            &mut router,
+            &mut log,
+            &mut concat,
+            &mut messenger,
+            &mut *store,
+        );
     }
 
     log::info!("smsgate ready");
@@ -199,15 +181,16 @@ fn main() {
 
     // Subscribe main task to the Task WDT (120s timeout).
     // The WDT fires if esp_task_wdt_reset() is not called within the timeout.
-    unsafe { esp_idf_sys::esp_task_wdt_add(std::ptr::null_mut()); }
+    unsafe {
+        esp_idf_sys::esp_task_wdt_add(std::ptr::null_mut());
+    }
 
     // ---- Telegram polling thread ----
     // Runs getUpdates (long-poll) independently so the main loop is never blocked
     // waiting for the network. The channel delivers batches of inbound messages.
-    let initial_cursor = smsgate::persist::load_i64(&*store, smsgate::persist::keys::IM_CURSOR)
-        .unwrap_or(0);
-    let (tg_tx, tg_rx) =
-        std::sync::mpsc::channel::<Vec<smsgate::im::InboundMessage>>();
+    let initial_cursor =
+        smsgate::persist::load_i64(&*store, smsgate::persist::keys::IM_CURSOR).unwrap_or(0);
+    let (tg_tx, tg_rx) = std::sync::mpsc::channel::<Vec<smsgate::im::InboundMessage>>();
     let modem_tg = modem.clone();
     let tg_token_poll = creds.bot_token.clone();
     let tg_chat_id_poll = creds.chat_id;
@@ -234,9 +217,13 @@ fn main() {
             let mut heartbeat_counter: u8 = 0;
             // Subscribe this thread to the Task WDT (same 120 s timeout as main).
             // If poll() hangs indefinitely the WDT fires and reboots the device.
-            unsafe { esp_idf_sys::esp_task_wdt_add(std::ptr::null_mut()); }
+            unsafe {
+                esp_idf_sys::esp_task_wdt_add(std::ptr::null_mut());
+            }
             loop {
-                unsafe { esp_idf_sys::esp_task_wdt_reset(); }
+                unsafe {
+                    esp_idf_sys::esp_task_wdt_reset();
+                }
                 match poll_messenger.poll(cursor, poll_secs) {
                     Ok(msgs) if !msgs.is_empty() => {
                         heartbeat_counter = 0;
@@ -283,13 +270,19 @@ fn main() {
         let uptime_ms = elapsed_since(boot_ms, now);
 
         // Kick the hardware watchdog
-        unsafe { esp_idf_sys::esp_task_wdt_reset(); }
+        unsafe {
+            esp_idf_sys::esp_task_wdt_reset();
+        }
 
         // Auto-resume after timed /pause
         if let Some(until) = pause_until {
             if std::time::Instant::now() >= until {
                 pause_until = None;
-                let _ = smsgate::persist::save_bool(&mut *store, smsgate::persist::keys::FWD_ENABLED, true);
+                let _ = smsgate::persist::save_bool(
+                    &mut *store,
+                    smsgate::persist::keys::FWD_ENABLED,
+                    true,
+                );
                 let _ = messenger.send_message(smsgate::i18n::resume_ok());
                 log::info!("[main] pause expired — forwarding re-enabled");
             }
@@ -328,17 +321,20 @@ fn main() {
                     let _ = messenger.send_message(&smsgate::i18n::low_signal(modem_status.csq));
                 } else if modem_status.csq > CSQ_WEAK && low_signal_alerted {
                     low_signal_alerted = false;
-                    let _ = messenger.send_message(&smsgate::i18n::signal_restored(modem_status.csq));
+                    let _ =
+                        messenger.send_message(&smsgate::i18n::signal_restored(modem_status.csq));
                 }
             }
 
             // Operator change alert (skip the initial "" → "SomeOp" transition)
-            if !modem_status.operator.is_empty() && !last_operator.is_empty()
+            if !modem_status.operator.is_empty()
+                && !last_operator.is_empty()
                 && modem_status.operator != last_operator
             {
-                let _ = messenger.send_message(
-                    &smsgate::i18n::operator_changed(&last_operator, &modem_status.operator),
-                );
+                let _ = messenger.send_message(&smsgate::i18n::operator_changed(
+                    &last_operator,
+                    &modem_status.operator,
+                ));
             }
             if !modem_status.operator.is_empty() {
                 last_operator.clone_from(&modem_status.operator);
@@ -378,15 +374,30 @@ fn main() {
                 // Direct delivery has no modem slot — nothing to delete afterwards.
                 if cmt_pdu_pending {
                     cmt_pdu_pending = false;
-                    process_pdu_hex(urc.trim(), 0, &mut router, &mut log,
-                                    &mut concat, &mut messenger, &mut *store);
+                    process_pdu_hex(
+                        urc.trim(),
+                        0,
+                        &mut router,
+                        &mut log,
+                        &mut concat,
+                        &mut messenger,
+                        &mut *store,
+                    );
                     continue;
                 }
 
                 match parse_urc(&urc) {
                     Urc::NewSms { mem, index } => {
-                        handle_new_sms(&mem, index, &mut *md, &mut router, &mut log,
-                                       &mut concat, &mut messenger, &mut *store);
+                        handle_new_sms(
+                            &mem,
+                            index,
+                            &mut *md,
+                            &mut router,
+                            &mut log,
+                            &mut concat,
+                            &mut messenger,
+                            &mut *store,
+                        );
                     }
                     Urc::SmsDelivery => {
                         cmt_pdu_pending = true; // next poll_urc() line is the raw PDU
@@ -405,7 +416,10 @@ fn main() {
             let mut channel_active = false;
             loop {
                 match tg_rx.try_recv() {
-                    Ok(msgs) => { channel_active = true; batch.extend(msgs); }
+                    Ok(msgs) => {
+                        channel_active = true;
+                        batch.extend(msgs);
+                    }
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         log::error!("[main] tg-poll thread died — rebooting");
@@ -424,55 +438,34 @@ fn main() {
         if !tg_messages.is_empty() {
             if let Some(new_cursor) = tg_messages.iter().map(|m| m.cursor).max() {
                 let _ = smsgate::persist::save_i64(
-                    &mut *store, smsgate::persist::keys::IM_CURSOR, new_cursor,
+                    &mut *store,
+                    smsgate::persist::keys::IM_CURSOR,
+                    new_cursor,
                 );
             }
             let free_heap = unsafe { esp_idf_sys::esp_get_free_heap_size() };
             match poll_and_dispatch(
-                &tg_messages, &mut messenger, &mut sender, &router, &registry,
-                &mut *store, &log, &modem_status, uptime_ms, free_heap, &wifi_info,
+                &tg_messages,
+                &mut messenger,
+                &mut sender,
+                &router,
+                &registry,
+                &mut *store,
+                &log,
+                &modem_status,
+                uptime_ms,
+                free_heap,
+                &wifi_info,
             ) {
-                Ok((restart, maybe_pause, ota_action)) => {
+                Ok((restart, maybe_pause)) => {
                     consecutive_failures = 0;
                     if let Some(mins) = maybe_pause {
                         // Cap at 1 week to prevent Duration overflow on pathological input.
                         const MAX_PAUSE_MINS: u64 = 7 * 24 * 60;
                         let secs = (mins as u64).min(MAX_PAUSE_MINS) * 60;
-                        pause_until = Some(std::time::Instant::now()
-                            + std::time::Duration::from_secs(secs));
+                        pause_until =
+                            Some(std::time::Instant::now() + std::time::Duration::from_secs(secs));
                         log::info!("[main] pause timer set for {} min", mins);
-                    }
-                    match ota_action {
-                        smsgate::bridge::poller::OtaAction::Update => {
-                            log::info!("[main] OTA update requested");
-                            match smsgate::ota::perform_update(|written, total| {
-                                if written % (128 * 1024) == 0 {
-                                    log::info!("[ota] progress: {} / {:?} bytes", written, total);
-                                }
-                            }) {
-                                Ok(()) => {
-                                    let _ = messenger.send_message(&smsgate::i18n::update_success());
-                                    esp_idf_hal::reset::restart();
-                                }
-                                Err(e) => {
-                                    log::error!("[main] OTA failed: {}", e);
-                                    let _ = messenger.send_message(&smsgate::i18n::update_failed(&e.to_string()));
-                                }
-                            }
-                        }
-                        smsgate::bridge::poller::OtaAction::Confirm => {
-                            match smsgate::ota::confirm_running() {
-                                Ok(()) => {
-                                    log::info!("[main] OTA confirm: running slot marked valid");
-                                    let _ = messenger.send_message(smsgate::i18n::update_confirmed());
-                                }
-                                Err(e) => {
-                                    log::error!("[main] OTA confirm failed: {}", e);
-                                    let _ = messenger.send_message(&smsgate::i18n::update_failed(&e.to_string()));
-                                }
-                            }
-                        }
-                        smsgate::bridge::poller::OtaAction::None => {}
                     }
                     if restart {
                         log::info!("[main] restart requested via /restart command");
@@ -517,7 +510,9 @@ fn main() {
 #[cfg(feature = "esp32")]
 fn build_registry(help_text: &str) -> CommandRegistry {
     let mut r = CommandRegistry::new();
-    r.register(Box::new(HelpCommand { help_text: help_text.to_string() }));
+    r.register(Box::new(HelpCommand {
+        help_text: help_text.to_string(),
+    }));
     r.register(Box::new(StatusCommand));
     r.register(Box::new(SendCommand));
     r.register(Box::new(LogCommand));
@@ -526,7 +521,6 @@ fn build_registry(help_text: &str) -> CommandRegistry {
     r.register(Box::new(PauseCommand));
     r.register(Box::new(ResumeCommand));
     r.register(Box::new(RestartCommand));
-    r.register(Box::new(UpdateCommand));
     r
 }
 
@@ -537,7 +531,7 @@ fn fmt_wifi(wifi_ok: bool, rssi: Option<i32>, ssid: &str) -> String {
     }
     match rssi {
         Some(r) => format!("{} ({} dBm)", ssid, r),
-        None    => format!("{} (--)", ssid),
+        None => format!("{} (--)", ssid),
     }
 }
 
@@ -568,8 +562,12 @@ fn setup_wifi(
     use std::time::Duration;
 
     let config = Configuration::Client(ClientConfiguration {
-        ssid: ssid.try_into().map_err(|_| anyhow::anyhow!("SSID too long"))?,
-        password: pass.try_into().map_err(|_| anyhow::anyhow!("Password too long"))?,
+        ssid: ssid
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("SSID too long"))?,
+        password: pass
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Password too long"))?,
         auth_method: AuthMethod::WPA2Personal,
         ..Default::default()
     });
@@ -590,24 +588,6 @@ fn setup_wifi(
         }
     }
     anyhow::bail!("WiFi failed after {} attempts", ATTEMPTS);
-}
-
-#[cfg(feature = "esp32")]
-struct SinkCfg {
-    sink_type: String,
-    url: String,
-}
-
-#[cfg(feature = "esp32")]
-fn parse_sink_config() -> Vec<SinkCfg> {
-    let json = smsgate::config::Config::SINKS;
-    let arr: Vec<serde_json::Value> = serde_json::from_str(json).unwrap_or_default();
-    arr.into_iter().filter_map(|v| {
-        Some(SinkCfg {
-            sink_type: v.get("type")?.as_str()?.to_string(),
-            url: v.get("url")?.as_str()?.to_string(),
-        })
-    }).collect()
 }
 
 /// Reconnect an already-started BlockingWifi that has lost its AP association.
@@ -667,7 +647,15 @@ fn serial_provision(nvs_partition: &esp_idf_svc::nvs::EspDefaultNvsPartition) ->
     println!("APN Password (leave blank if none):");
     let apn_pass = read();
 
-    let creds = smsgate::creds::RuntimeCreds { wifi_ssid, wifi_pass, bot_token, chat_id, apn, apn_user, apn_pass };
+    let creds = smsgate::creds::RuntimeCreds {
+        wifi_ssid,
+        wifi_pass,
+        bot_token,
+        chat_id,
+        apn,
+        apn_user,
+        apn_pass,
+    };
 
     if creds.save(nvs_partition) {
         println!("\nCredentials saved. Rebooting…");

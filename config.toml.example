@@ -36,25 +36,6 @@ max_failures_before_reboot = 8
 poll_interval_ms           = 3000
 watchdog_timeout_sec       = 120
 
-# Extra delivery sinks (optional). SMS is forwarded to Telegram AND each sink.
-# Each [[sink]] entry opens a fresh connection per message (no idle RAM cost).
-#
-# [[sink]]
-# type = "webhook"
-# url  = "https://example.com/hook/sms"
-#
-# [[sink]]
-# type = "webhook"
-# url  = "http://192.168.1.100:8080/mq/publish"
-
-[ota]
-# HTTPS URL to the firmware .bin file. Typically a GitHub Releases asset.
-# Leave empty to disable OTA entirely (the /update command will report "disabled").
-url = ""
-# "auto" — confirm immediately after successful boot (no rollback window)
-# "manual" — wait for /update confirm within 5 min, otherwise rollback on reboot
-confirm = "auto"
-
 [ui]
 # Locale: "en" (default) or "zh"
 # locale = "zh"

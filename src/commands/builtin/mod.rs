@@ -5,7 +5,6 @@ pub mod pause;
 pub mod restart;
 pub mod send;
 pub mod status;
-pub mod update;
 
 pub use block::{BlockCommand, UnblockCommand};
 pub use help::HelpCommand;
@@ -14,4 +13,3 @@ pub use pause::{PauseCommand, ResumeCommand};
 pub use restart::RestartCommand;
 pub use send::SendCommand;
 pub use status::StatusCommand;
-pub use update::UpdateCommand;

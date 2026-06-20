@@ -141,17 +141,6 @@ pub fn resume_ok()             -> &'static str { "转发已恢复。" }
 
 pub fn restart_ok() -> &'static str { "正在重启…" }
 
-// ── /update ─────────────────────────────────────────────────────────────────
-
-pub fn update_disabled()          -> &'static str { "OTA 已禁用（未配置 URL）。" }
-pub fn update_starting()          -> &'static str { "正在开始 OTA 更新…请勿断电。" }
-pub fn update_confirming()        -> &'static str { "正在确认当前固件有效。" }
-pub fn update_confirm_not_manual() -> &'static str { "确认模式为\"auto\"——无需手动确认。" }
-pub fn update_usage()             -> &'static str { "用法：/update 或 /update confirm" }
-pub fn update_success()           -> String        { "OTA 完成——正在重启…".into() }
-pub fn update_failed(e: &str)     -> String        { format!("OTA 失败：{}", e) }
-pub fn update_confirmed()         -> &'static str { "固件已确认——回滚已禁用。" }
-
 // ── 命令描述（Telegram 自动补全）────────────────────────────────────────────
 
 pub fn desc_help()    -> &'static str { "显示帮助" }
@@ -163,4 +152,3 @@ pub fn desc_unblock() -> &'static str { "解除屏蔽" }
 pub fn desc_pause()   -> &'static str { "暂停转发（默认 60 分钟）" }
 pub fn desc_resume()  -> &'static str { "恢复转发" }
 pub fn desc_restart() -> &'static str { "重启设备" }
-pub fn desc_update()  -> &'static str { "OTA 固件更新（/update confirm 确认）" }

@@ -22,7 +22,6 @@ fn make_registry() -> CommandRegistry {
     r.register(Box::new(PauseCommand));
     r.register(Box::new(ResumeCommand));
     r.register(Box::new(RestartCommand));
-    r.register(Box::new(UpdateCommand));
     r
 }
 
@@ -176,7 +175,7 @@ fn pause_sentinel_returns_duration() {
     let status = ModemStatus::default();
     let mut sender = SmsSender::new();
 
-    let (restart, pause_mins, _ota) = poll_and_dispatch(
+    let (restart, pause_mins) = poll_and_dispatch(
         &[msg("/pause 45")],
         &mut messenger, &mut sender, &router, &reg,
         &mut store, &log, &status, 0, 0, "",
@@ -389,36 +388,4 @@ fn unknown_command_sends_no_reply() {
 
     // Unknown commands produce no reply
     assert_eq!(messenger.sent_count(), 0);
-}
-
-#[test]
-fn update_command_returns_disabled_ota() {
-    use smsgate::bridge::poller::OtaAction;
-
-    // Skip when OTA is configured in developer's config.toml — can't override
-    // compile-time env vars at test time, and the test is checking disabled case.
-    if smsgate::ota::is_enabled() {
-        return;
-    }
-
-    let mut store = MemStore::new();
-    let mut messenger = RecordingMessenger::new();
-    let router = ReplyRouter::new();
-    let reg = make_registry();
-    let log = LogRing::new();
-    let status = ModemStatus::default();
-    let mut sender = SmsSender::new();
-
-    let (_restart, _pause, ota) = poll_and_dispatch(
-        &[msg("/update")],
-        &mut messenger, &mut sender, &router, &reg,
-        &mut store, &log, &status, 0, 0, "",
-    ).unwrap();
-
-    // OTA URL is empty in tests, so no sentinel should fire
-    assert_eq!(ota, OtaAction::None);
-    // But the command should reply with "disabled"
-    let reply = messenger.last_sent().unwrap();
-    assert!(reply.contains("disabled") || reply.contains("禁用"),
-            "expected disabled OTA message, got: {}", reply);
 }
