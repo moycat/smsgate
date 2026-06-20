@@ -1,12 +1,12 @@
 //! End-to-end Scenario tests.
 
-use smsgate::testing::{pdu, Scenario};
 use smsgate::bridge::forwarder::{add_to_blocklist, forward_sms};
 use smsgate::bridge::reply_router::ReplyRouter;
 use smsgate::log_ring::LogRing;
 use smsgate::persist::{keys, mem::MemStore, save_bool};
 use smsgate::sms::{codec::build_sms_submit_pdus, SmsMessage};
 use smsgate::testing::mocks::RecordingMessenger;
+use smsgate::testing::{pdu, Scenario};
 
 // A known-good GSM-7 single-part DELIVER PDU for "+8613800138000", "Hello"
 // We build it by hand-coding a minimal SMS-DELIVER:
@@ -41,7 +41,11 @@ fn scenario_blocked_number_not_forwarded() {
     };
     forward_sms(&sms, &mut messenger, &mut router, &mut log, &mut store);
 
-    assert_eq!(messenger.sent_count(), 0, "blocked number should produce no IM messages");
+    assert_eq!(
+        messenger.sent_count(),
+        0,
+        "blocked number should produce no IM messages"
+    );
 }
 
 #[test]
@@ -54,11 +58,23 @@ fn scenario_paused_forwarding() {
     let mut log = LogRing::new();
 
     forward_sms(
-        &SmsMessage { sender: "+1".to_string(), body: "test".to_string(), timestamp: "".to_string(), slot: 0 },
-        &mut messenger, &mut router, &mut log, &mut store,
+        &SmsMessage {
+            sender: "+1".to_string(),
+            body: "test".to_string(),
+            timestamp: "".to_string(),
+            slot: 0,
+        },
+        &mut messenger,
+        &mut router,
+        &mut log,
+        &mut store,
     );
 
-    assert_eq!(messenger.sent_count(), 0, "paused forwarding should produce no IM messages");
+    assert_eq!(
+        messenger.sent_count(),
+        0,
+        "paused forwarding should produce no IM messages"
+    );
 }
 
 #[test]
@@ -76,7 +92,11 @@ fn outbound_sms_sends_correct_pdu() {
     assert_eq!(pdus.len(), 1);
     let hex = &pdus[0].hex;
     // PDU should start with 00 (empty SCA)
-    assert!(hex.starts_with("00"), "PDU should start with 00 (empty SCA), got: {}", &hex[..4.min(hex.len())]);
+    assert!(
+        hex.starts_with("00"),
+        "PDU should start with 00 (empty SCA), got: {}",
+        &hex[..4.min(hex.len())]
+    );
     // TPDU length should match hex minus SCA byte
     let total_bytes = hex.len() / 2;
     assert_eq!(total_bytes as u8, pdus[0].tpdu_len + 1);

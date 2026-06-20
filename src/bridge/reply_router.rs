@@ -29,12 +29,16 @@ pub struct ReplyRouter {
 
 impl ReplyRouter {
     pub fn new() -> Self {
-        ReplyRouter { slots: Box::new([Slot::default(); SLOT_COUNT]) }
+        ReplyRouter {
+            slots: Box::new([Slot::default(); SLOT_COUNT]),
+        }
     }
 
     /// Load from persistent store.
     pub fn load(&mut self, store: &dyn Store) {
-        let Some(bytes) = store.load(keys::REPLY_MAP) else { return };
+        let Some(bytes) = store.load(keys::REPLY_MAP) else {
+            return;
+        };
         if bytes.len() < std::mem::size_of::<[Slot; SLOT_COUNT]>() {
             return;
         }
@@ -77,7 +81,11 @@ impl ReplyRouter {
         let slot = &self.slots[idx];
         if slot.message_id == message_id && slot.message_id != 0 {
             let s = slot.phone_str();
-            if !s.is_empty() { Some(s) } else { None }
+            if !s.is_empty() {
+                Some(s)
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -85,5 +93,7 @@ impl ReplyRouter {
 }
 
 impl Default for ReplyRouter {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

@@ -1,10 +1,10 @@
 //! SMS → IM forwarding core logic.
 
-use crate::im::{MessageId, MessageSink};
-use crate::persist::{load_bool, keys, Store};
-use crate::sms::{codec::human_readable_phone, SmsMessage};
-use crate::log_ring::{LogEntry, LogRing};
 use crate::bridge::reply_router::ReplyRouter;
+use crate::im::{MessageId, MessageSink};
+use crate::log_ring::{LogEntry, LogRing};
+use crate::persist::{keys, load_bool, Store};
+use crate::sms::{codec::human_readable_phone, SmsMessage};
 
 /// Process and forward one SMS. Returns the IM MessageId on success.
 pub fn forward_sms(
@@ -22,7 +22,10 @@ pub fn forward_sms(
     };
 
     if load_bool(store, keys::FWD_ENABLED) == Some(false) {
-        log::info!("[forwarder] forwarding paused — dropping SMS from {}", sms.sender);
+        log::info!(
+            "[forwarder] forwarding paused — dropping SMS from {}",
+            sms.sender
+        );
         log.push(log_entry(false));
         return None;
     }
@@ -44,7 +47,11 @@ pub fn forward_sms(
         Ok(msg_id) => {
             router.put(msg_id, &sms.sender, store);
             log.push(log_entry(true));
-            log::info!("[forwarder] forwarded SMS from {} → msg_id={}", sms.sender, msg_id);
+            log::info!(
+                "[forwarder] forwarded SMS from {} → msg_id={}",
+                sms.sender,
+                msg_id
+            );
             Some(msg_id)
         }
         Err(e) => {
@@ -56,8 +63,12 @@ pub fn forward_sms(
 
 /// Check if `phone` is in the block list.
 pub fn is_blocked(phone: &str, store: &dyn Store) -> bool {
-    let Some(bytes) = store.load(keys::BLOCK_LIST) else { return false };
-    let Ok(list) = serde_json::from_slice::<Vec<String>>(&bytes) else { return false };
+    let Some(bytes) = store.load(keys::BLOCK_LIST) else {
+        return false;
+    };
+    let Ok(list) = serde_json::from_slice::<Vec<String>>(&bytes) else {
+        return false;
+    };
     let normalized = crate::sms::codec::normalize_phone(phone);
     list.iter().any(|b| {
         let nb = crate::sms::codec::normalize_phone(b);
@@ -66,7 +77,10 @@ pub fn is_blocked(phone: &str, store: &dyn Store) -> bool {
 }
 
 /// Add a phone number to the block list.
-pub fn add_to_blocklist(phone: &str, store: &mut dyn Store) -> Result<(), crate::persist::StoreError> {
+pub fn add_to_blocklist(
+    phone: &str,
+    store: &mut dyn Store,
+) -> Result<(), crate::persist::StoreError> {
     let mut list = load_blocklist(store);
     let n = crate::sms::codec::normalize_phone(phone);
     if !list.contains(&n) {
@@ -91,12 +105,17 @@ pub fn remove_from_blocklist(phone: &str, store: &mut dyn Store) -> bool {
 }
 
 pub fn load_blocklist(store: &dyn Store) -> Vec<String> {
-    store.load(keys::BLOCK_LIST)
+    store
+        .load(keys::BLOCK_LIST)
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default()
 }
 
-fn save_blocklist(list: &[String], store: &mut dyn Store) -> Result<(), crate::persist::StoreError> {
-    let bytes = serde_json::to_vec(list).map_err(|e| crate::persist::StoreError::Serde(e.to_string()))?;
+fn save_blocklist(
+    list: &[String],
+    store: &mut dyn Store,
+) -> Result<(), crate::persist::StoreError> {
+    let bytes =
+        serde_json::to_vec(list).map_err(|e| crate::persist::StoreError::Serde(e.to_string()))?;
     store.save(keys::BLOCK_LIST, &bytes)
 }

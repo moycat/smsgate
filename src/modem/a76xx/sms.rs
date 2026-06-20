@@ -10,7 +10,11 @@ use std::time::Duration;
 
 /// Send a PDU SMS via the standard `AT+CMGS` handshake.
 /// Returns the message reference number (MR) on success.
-pub fn send_pdu<P: AtTransport + ?Sized>(port: &mut P, hex: &str, tpdu_len: u8) -> Result<u8, ModemError> {
+pub fn send_pdu<P: AtTransport + ?Sized>(
+    port: &mut P,
+    hex: &str,
+    tpdu_len: u8,
+) -> Result<u8, ModemError> {
     // Issue AT+CMGS=<tpduLen>
     let cmd = format!("+CMGS={}", tpdu_len);
     port.write_raw(format!("AT{}\r", cmd).as_bytes())?;
@@ -32,11 +36,15 @@ pub fn send_pdu<P: AtTransport + ?Sized>(port: &mut P, hex: &str, tpdu_len: u8) 
             return Err(ModemError::Timeout);
         }
         // Kick the Task Watchdog Timer — SMS send can block > 30 s on congested networks.
-        unsafe { esp_idf_sys::esp_task_wdt_reset(); }
+        unsafe {
+            esp_idf_sys::esp_task_wdt_reset();
+        }
         // Read using a generous timeout per line
         if let Some(line) = read_line_raw(port, Duration::from_secs(5)) {
             let line = line.trim().to_string();
-            if line.is_empty() { continue; }
+            if line.is_empty() {
+                continue;
+            }
             if line == "OK" {
                 break;
             }
@@ -64,7 +72,9 @@ fn read_line_raw<P: AtTransport + ?Sized>(port: &mut P, timeout: Duration) -> Op
     // We reuse poll_urc which has a short timeout — call in loop until we get a real line
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        if std::time::Instant::now() > deadline { return None; }
+        if std::time::Instant::now() > deadline {
+            return None;
+        }
         if let Some(l) = port.poll_urc() {
             return Some(l);
         }

@@ -38,7 +38,9 @@ impl Group {
 
     fn insert(&mut self, part_num: u8, content: String) -> bool {
         let idx = (part_num as usize).saturating_sub(1);
-        if idx >= self.parts.len() { return false; }
+        if idx >= self.parts.len() {
+            return false;
+        }
         if self.parts[idx].is_none() {
             self.parts[idx] = Some(content);
             self.received += 1;
@@ -70,7 +72,9 @@ pub struct ConcatReassembler {
 
 impl ConcatReassembler {
     pub fn new() -> Self {
-        ConcatReassembler { groups: Vec::with_capacity(MAX_GROUPS) }
+        ConcatReassembler {
+            groups: Vec::with_capacity(MAX_GROUPS),
+        }
     }
 
     /// Feed a parsed PDU. Returns `Some(CompletedSms)` when all parts have arrived.
@@ -82,13 +86,12 @@ impl ConcatReassembler {
 
         // Reject before touching the group table: a never-completing group
         // wastes one of the 8 slots for up to 24 h.
-        if pdu.concat_total == 0
-            || pdu.concat_part == 0
-            || pdu.concat_part > pdu.concat_total
-        {
+        if pdu.concat_total == 0 || pdu.concat_part == 0 || pdu.concat_part > pdu.concat_total {
             log::warn!(
                 "[concat] malformed concat header from {}: part={}/{} — discarded",
-                pdu.sender, pdu.concat_part, pdu.concat_total
+                pdu.sender,
+                pdu.concat_part,
+                pdu.concat_total
             );
             return None;
         }
@@ -98,16 +101,19 @@ impl ConcatReassembler {
 
         // Find or create matching group
         let key = (&pdu.sender[..], pdu.concat_ref);
-        let group_idx = self.groups.iter().position(|g| {
-            g.sender == key.0 && g.ref_num == key.1 && g.total == pdu.concat_total
-        });
+        let group_idx = self
+            .groups
+            .iter()
+            .position(|g| g.sender == key.0 && g.ref_num == key.1 && g.total == pdu.concat_total);
 
         let idx = match group_idx {
             Some(i) => i,
             None => {
                 // Evict LRU if at capacity
                 if self.groups.len() >= MAX_GROUPS {
-                    let oldest = self.groups.iter()
+                    let oldest = self
+                        .groups
+                        .iter()
                         .enumerate()
                         .min_by_key(|(_, g)| g.first_seen)
                         .map(|(i, _)| i)
@@ -116,7 +122,10 @@ impl ConcatReassembler {
                     self.groups.remove(oldest);
                 }
                 self.groups.push(Group::new(
-                    &pdu.sender, pdu.concat_ref, pdu.concat_total, &pdu.timestamp,
+                    &pdu.sender,
+                    pdu.concat_ref,
+                    pdu.concat_total,
+                    &pdu.timestamp,
                 ));
                 self.groups.len() - 1
             }
@@ -126,7 +135,11 @@ impl ConcatReassembler {
         if complete {
             let g = self.groups.remove(idx);
             let content = g.assemble();
-            Some(CompletedSms { sender: g.sender, content, timestamp: g.timestamp })
+            Some(CompletedSms {
+                sender: g.sender,
+                content,
+                timestamp: g.timestamp,
+            })
         } else {
             None
         }
@@ -139,5 +152,7 @@ impl ConcatReassembler {
 }
 
 impl Default for ConcatReassembler {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

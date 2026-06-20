@@ -4,13 +4,13 @@ use smsgate::creds::RuntimeCreds;
 
 fn creds(token: &str, chat_id: i64) -> RuntimeCreds {
     RuntimeCreds {
-        wifi_ssid:  String::new(),
-        wifi_pass:  String::new(),
-        bot_token:  token.to_string(),
+        wifi_ssid: String::new(),
+        wifi_pass: String::new(),
+        bot_token: token.to_string(),
         chat_id,
-        apn:        String::new(),
-        apn_user:   String::new(),
-        apn_pass:   String::new(),
+        apn: String::new(),
+        apn_user: String::new(),
+        apn_pass: String::new(),
     }
 }
 

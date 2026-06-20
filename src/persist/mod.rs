@@ -1,8 +1,8 @@
 //! Key-value persistence abstraction.
 
+pub mod mem;
 #[cfg(feature = "esp32")]
 pub mod nvs;
-pub mod mem;
 
 use thiserror::Error;
 
@@ -46,7 +46,9 @@ pub mod keys {
 /// Load an i64 from the store.
 pub fn load_i64(store: &dyn Store, key: &str) -> Option<i64> {
     let bytes = store.load(key)?;
-    if bytes.len() < 8 { return None; }
+    if bytes.len() < 8 {
+        return None;
+    }
     Some(i64::from_le_bytes(bytes[..8].try_into().ok()?))
 }
 

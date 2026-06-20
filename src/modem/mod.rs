@@ -60,7 +60,11 @@ pub const CSQ_UNKNOWN: u8 = 99;
 
 impl Default for ModemStatus {
     fn default() -> Self {
-        ModemStatus { csq: CSQ_UNKNOWN, operator: String::new(), registered: false }
+        ModemStatus {
+            csq: CSQ_UNKNOWN,
+            operator: String::new(),
+            registered: false,
+        }
     }
 }
 
@@ -116,7 +120,11 @@ pub trait ModemPort: AtTransport {
     /// Default: `ATH`.
     fn hang_up(&mut self) -> Result<(), ModemError> {
         let r = self.send_at("H")?;
-        if r.ok { Ok(()) } else { Err(ModemError::AtError("ATH failed".into())) }
+        if r.ok {
+            Ok(())
+        } else {
+            Err(ModemError::AtError("ATH failed".into()))
+        }
     }
 
     /// HTTPS POST JSON via the modem's built-in HTTP stack (Quectel `AT+QHTTP*`).
@@ -133,7 +141,9 @@ pub trait ModemPort: AtTransport {
         let mut s = ModemStatus::default();
         if let Ok(r) = self.send_at("+CSQ") {
             if let Some(v) = r.body.strip_prefix("+CSQ: ") {
-                s.csq = v.split(',').next()
+                s.csq = v
+                    .split(',')
+                    .next()
                     .and_then(|x| x.trim().parse().ok())
                     .unwrap_or(CSQ_UNKNOWN);
             }

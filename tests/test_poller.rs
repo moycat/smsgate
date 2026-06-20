@@ -13,7 +13,9 @@ use smsgate::testing::mocks::RecordingMessenger;
 
 fn make_registry() -> CommandRegistry {
     let mut r = CommandRegistry::new();
-    r.register(Box::new(HelpCommand { help_text: String::new() }));
+    r.register(Box::new(HelpCommand {
+        help_text: String::new(),
+    }));
     r.register(Box::new(StatusCommand));
     r.register(Box::new(SendCommand));
     r.register(Box::new(LogCommand));
@@ -26,11 +28,19 @@ fn make_registry() -> CommandRegistry {
 }
 
 fn msg(text: &str) -> InboundMessage {
-    InboundMessage { cursor: 1, text: text.to_string(), reply_to: None }
+    InboundMessage {
+        cursor: 1,
+        text: text.to_string(),
+        reply_to: None,
+    }
 }
 
 fn reply_msg(text: &str, reply_to: i64) -> InboundMessage {
-    InboundMessage { cursor: 1, text: text.to_string(), reply_to: Some(reply_to) }
+    InboundMessage {
+        cursor: 1,
+        text: text.to_string(),
+        reply_to: Some(reply_to),
+    }
 }
 
 #[test]
@@ -45,8 +55,16 @@ fn send_sentinel_enqueues_sms() {
 
     let result = poll_and_dispatch(
         &[msg("/send +8613800138000 Hello world")],
-        &mut messenger, &mut sender, &router, &reg,
-        &mut store, &log, &status, 0, 0, "",
+        &mut messenger,
+        &mut sender,
+        &router,
+        &reg,
+        &mut store,
+        &log,
+        &status,
+        0,
+        0,
+        "",
     );
     assert!(result.is_ok());
     assert!(!result.unwrap().0); // no restart
@@ -60,7 +78,11 @@ fn send_sentinel_enqueues_sms() {
     // IM reply is clean (no sentinel)
     assert_eq!(messenger.sent_count(), 1);
     let reply = messenger.last_sent().unwrap();
-    assert!(!reply.contains("__SEND__"), "sentinel leaked to IM: {}", reply);
+    assert!(
+        !reply.contains("__SEND__"),
+        "sentinel leaked to IM: {}",
+        reply
+    );
     assert!(reply.contains("+8613800138000"));
 }
 
@@ -79,25 +101,50 @@ fn send_sentinel_rate_limited_after_5() {
         messenger = RecordingMessenger::new();
         poll_and_dispatch(
             &[msg(&format!("/send +{} hello", i))],
-            &mut messenger, &mut sender, &router, &reg,
-            &mut store, &log, &status, 0, 0, "",
-        ).unwrap();
+            &mut messenger,
+            &mut sender,
+            &router,
+            &reg,
+            &mut store,
+            &log,
+            &status,
+            0,
+            0,
+            "",
+        )
+        .unwrap();
         assert_eq!(sender.len(), (i + 1) as usize);
         let reply = messenger.last_sent().unwrap_or_default();
-        assert!(!reply.contains("Rate limit"), "send {} should not be rate limited", i);
+        assert!(
+            !reply.contains("Rate limit"),
+            "send {} should not be rate limited",
+            i
+        );
     }
 
     // 6th in the same window — rate limited, IM reply contains the error
     messenger = RecordingMessenger::new();
     poll_and_dispatch(
         &[msg("/send +9 hello")],
-        &mut messenger, &mut sender, &router, &reg,
-        &mut store, &log, &status, 0, 0, "",
-    ).unwrap();
+        &mut messenger,
+        &mut sender,
+        &router,
+        &reg,
+        &mut store,
+        &log,
+        &status,
+        0,
+        0,
+        "",
+    )
+    .unwrap();
     assert_eq!(sender.len(), 5, "no new SMS queued when rate limited");
     let reply = messenger.last_sent().unwrap_or_default();
-    assert!(reply.contains("Rate limit") || reply.contains("频率限制"),
-        "rate limit message expected, got: {}", reply);
+    assert!(
+        reply.contains("Rate limit") || reply.contains("频率限制"),
+        "rate limit message expected, got: {}",
+        reply
+    );
 }
 
 #[test]
@@ -112,9 +159,18 @@ fn block_sentinel_adds_to_blocklist() {
 
     poll_and_dispatch(
         &[msg("/block 10086")],
-        &mut messenger, &mut sender, &router, &reg,
-        &mut store, &log, &status, 0, 0, "",
-    ).unwrap();
+        &mut messenger,
+        &mut sender,
+        &router,
+        &reg,
+        &mut store,
+        &log,
+        &status,
+        0,
+        0,
+        "",
+    )
+    .unwrap();
 
     assert!(is_blocked("10086", &store), "number should be blocked");
     let reply = messenger.last_sent().unwrap();
@@ -135,9 +191,18 @@ fn unblock_sentinel_removes_from_blocklist() {
 
     poll_and_dispatch(
         &[msg("/unblock 10086")],
-        &mut messenger, &mut sender, &router, &reg,
-        &mut store, &log, &status, 0, 0, "",
-    ).unwrap();
+        &mut messenger,
+        &mut sender,
+        &router,
+        &reg,
+        &mut store,
+        &log,
+        &status,
+        0,
+        0,
+        "",
+    )
+    .unwrap();
 
     assert!(!is_blocked("10086", &store), "number should be unblocked");
     let reply = messenger.last_sent().unwrap();
@@ -156,9 +221,18 @@ fn pause_sentinel_disables_forwarding() {
 
     poll_and_dispatch(
         &[msg("/pause 30")],
-        &mut messenger, &mut sender, &router, &reg,
-        &mut store, &log, &status, 0, 0, "",
-    ).unwrap();
+        &mut messenger,
+        &mut sender,
+        &router,
+        &reg,
+        &mut store,
+        &log,
+        &status,
+        0,
+        0,
+        "",
+    )
+    .unwrap();
 
     assert_eq!(load_bool(&store, keys::FWD_ENABLED), Some(false));
     let reply = messenger.last_sent().unwrap();
@@ -177,11 +251,24 @@ fn pause_sentinel_returns_duration() {
 
     let (restart, pause_mins) = poll_and_dispatch(
         &[msg("/pause 45")],
-        &mut messenger, &mut sender, &router, &reg,
-        &mut store, &log, &status, 0, 0, "",
-    ).unwrap();
+        &mut messenger,
+        &mut sender,
+        &router,
+        &reg,
+        &mut store,
+        &log,
+        &status,
+        0,
+        0,
+        "",
+    )
+    .unwrap();
     assert!(!restart);
-    assert_eq!(pause_mins, Some(45), "pause duration must be returned to caller");
+    assert_eq!(
+        pause_mins,
+        Some(45),
+        "pause duration must be returned to caller"
+    );
     assert_eq!(load_bool(&store, keys::FWD_ENABLED), Some(false));
 }
 
@@ -199,9 +286,18 @@ fn resume_sentinel_enables_forwarding() {
 
     poll_and_dispatch(
         &[msg("/resume")],
-        &mut messenger, &mut sender, &router, &reg,
-        &mut store, &log, &status, 0, 0, "",
-    ).unwrap();
+        &mut messenger,
+        &mut sender,
+        &router,
+        &reg,
+        &mut store,
+        &log,
+        &status,
+        0,
+        0,
+        "",
+    )
+    .unwrap();
 
     assert_eq!(load_bool(&store, keys::FWD_ENABLED), Some(true));
     let reply = messenger.last_sent().unwrap();
@@ -220,8 +316,16 @@ fn restart_sentinel_returns_true() {
 
     let result = poll_and_dispatch(
         &[msg("/restart")],
-        &mut messenger, &mut sender, &router, &reg,
-        &mut store, &log, &status, 0, 0, "",
+        &mut messenger,
+        &mut sender,
+        &router,
+        &reg,
+        &mut store,
+        &log,
+        &status,
+        0,
+        0,
+        "",
     );
     assert!(result.is_ok());
     assert!(result.unwrap().0, "restart should be signalled");
@@ -245,9 +349,18 @@ fn reply_to_sms_enqueues_outbound() {
 
     poll_and_dispatch(
         &[reply_msg("Reply text here", 5000)],
-        &mut messenger, &mut sender, &router, &reg,
-        &mut store, &log, &status, 0, 0, "",
-    ).unwrap();
+        &mut messenger,
+        &mut sender,
+        &router,
+        &reg,
+        &mut store,
+        &log,
+        &status,
+        0,
+        0,
+        "",
+    )
+    .unwrap();
 
     // SMS should be enqueued to the original sender
     assert_eq!(sender.len(), 1);
@@ -267,9 +380,18 @@ fn non_command_non_reply_is_ignored() {
 
     poll_and_dispatch(
         &[msg("just some text")],
-        &mut messenger, &mut sender, &router, &reg,
-        &mut store, &log, &status, 0, 0, "",
-    ).unwrap();
+        &mut messenger,
+        &mut sender,
+        &router,
+        &reg,
+        &mut store,
+        &log,
+        &status,
+        0,
+        0,
+        "",
+    )
+    .unwrap();
 
     // Nothing enqueued, no IM reply
     assert_eq!(sender.len(), 0);
@@ -289,9 +411,18 @@ fn send_sentinel_body_with_pipe_char() {
 
     poll_and_dispatch(
         &[msg("/send +1 Hello|world|test")],
-        &mut messenger, &mut sender, &router, &reg,
-        &mut store, &log, &status, 0, 0, "",
-    ).unwrap();
+        &mut messenger,
+        &mut sender,
+        &router,
+        &reg,
+        &mut store,
+        &log,
+        &status,
+        0,
+        0,
+        "",
+    )
+    .unwrap();
 
     assert_eq!(sender.len(), 1);
     let snap = sender.snapshot();
@@ -312,9 +443,18 @@ fn send_sentinel_body_with_newline() {
 
     poll_and_dispatch(
         &[msg("/send +1 line1\nline2")],
-        &mut messenger, &mut sender, &router, &reg,
-        &mut store, &log, &status, 0, 0, "",
-    ).unwrap();
+        &mut messenger,
+        &mut sender,
+        &router,
+        &reg,
+        &mut store,
+        &log,
+        &status,
+        0,
+        0,
+        "",
+    )
+    .unwrap();
 
     assert_eq!(sender.len(), 1);
     let snap = sender.snapshot();
@@ -336,9 +476,18 @@ fn send_body_preview_truncated_at_50_chars() {
     let long_body: String = "A".repeat(70);
     poll_and_dispatch(
         &[msg(&format!("/send +1 {}", long_body))],
-        &mut messenger, &mut sender, &router, &reg,
-        &mut store, &log, &status, 0, 0, "",
-    ).unwrap();
+        &mut messenger,
+        &mut sender,
+        &router,
+        &reg,
+        &mut store,
+        &log,
+        &status,
+        0,
+        0,
+        "",
+    )
+    .unwrap();
 
     assert_eq!(sender.len(), 1);
     // snapshot body_preview is truncated to 30 chars by SmsSender
@@ -348,7 +497,11 @@ fn send_body_preview_truncated_at_50_chars() {
     // Display reply to Telegram shows 50-char preview (send command truncation)
     let reply = messenger.last_sent().unwrap();
     let preview_50: String = "A".repeat(50);
-    assert!(reply.contains(&preview_50), "reply should show 50-char preview: {}", reply);
+    assert!(
+        reply.contains(&preview_50),
+        "reply should show 50-char preview: {}",
+        reply
+    );
 }
 
 #[test]
@@ -363,9 +516,18 @@ fn reply_to_unknown_id_does_not_enqueue() {
 
     poll_and_dispatch(
         &[reply_msg("Reply to unknown", 9999)],
-        &mut messenger, &mut sender, &router, &reg,
-        &mut store, &log, &status, 0, 0, "",
-    ).unwrap();
+        &mut messenger,
+        &mut sender,
+        &router,
+        &reg,
+        &mut store,
+        &log,
+        &status,
+        0,
+        0,
+        "",
+    )
+    .unwrap();
 
     assert_eq!(sender.len(), 0, "unknown reply_to should not enqueue SMS");
 }
@@ -382,9 +544,18 @@ fn unknown_command_sends_no_reply() {
 
     poll_and_dispatch(
         &[msg("/nonexistent_cmd")],
-        &mut messenger, &mut sender, &router, &reg,
-        &mut store, &log, &status, 0, 0, "",
-    ).unwrap();
+        &mut messenger,
+        &mut sender,
+        &router,
+        &reg,
+        &mut store,
+        &log,
+        &status,
+        0,
+        0,
+        "",
+    )
+    .unwrap();
 
     // Unknown commands produce no reply
     assert_eq!(messenger.sent_count(), 0);

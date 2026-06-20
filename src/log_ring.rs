@@ -20,7 +20,9 @@ pub struct LogRing {
 
 impl LogRing {
     pub fn new() -> Self {
-        LogRing { entries: Deque::new() }
+        LogRing {
+            entries: Deque::new(),
+        }
     }
 
     /// Push a new entry, evicting the oldest if full.
@@ -39,10 +41,16 @@ impl LogRing {
         self.entries.iter().skip(skip).collect()
     }
 
-    pub fn len(&self) -> usize { self.entries.len() }
-    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 impl Default for LogRing {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

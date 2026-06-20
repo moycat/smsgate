@@ -1,11 +1,14 @@
 //! Tests for bridge::sms_handler — CMTI processing and boot-time sweep.
 
-use smsgate::testing::{mocks::{FailingMessenger, RecordingMessenger, ScriptedModem}, pdu};
 use smsgate::bridge::reply_router::ReplyRouter;
 use smsgate::bridge::sms_handler::{handle_new_sms, process_pdu_hex, sweep_one_storage};
 use smsgate::log_ring::LogRing;
 use smsgate::persist::mem::MemStore;
 use smsgate::sms::concat::ConcatReassembler;
+use smsgate::testing::{
+    mocks::{FailingMessenger, RecordingMessenger, ScriptedModem},
+    pdu,
+};
 
 // Minimal valid SMS-DELIVER PDU: sender "+8613800138000", body "Hello"
 // SCA=00, FO=04, OA=0D918136001380F0, PID=00, DCS=00, SCTS=..., UDL=05, UD=C8329BFD06
@@ -35,9 +38,13 @@ fn process_pdu_hex_concat_partial_deletes_slot_no_forward() {
     let mut store = MemStore::new();
 
     let result = process_pdu_hex(
-        &pdu(CONCAT_PART1_PDU), 3,
-        &mut router, &mut log, &mut concat,
-        &mut messenger, &mut store,
+        &pdu(CONCAT_PART1_PDU),
+        3,
+        &mut router,
+        &mut log,
+        &mut concat,
+        &mut messenger,
+        &mut store,
     );
 
     assert!(result, "concat partial should return true (delete slot)");
@@ -54,9 +61,13 @@ fn process_pdu_hex_forwards_valid_sms() {
     let mut store = MemStore::new();
 
     let result = process_pdu_hex(
-        &pdu(HELLO_PDU), 1,
-        &mut router, &mut log, &mut concat,
-        &mut messenger, &mut store,
+        &pdu(HELLO_PDU),
+        1,
+        &mut router,
+        &mut log,
+        &mut concat,
+        &mut messenger,
+        &mut store,
     );
 
     assert!(result, "valid PDU should return true (delete slot)");
@@ -74,9 +85,13 @@ fn process_pdu_hex_invalid_hex_returns_true() {
     let mut store = MemStore::new();
 
     let result = process_pdu_hex(
-        "DEADBEEF", 5,
-        &mut router, &mut log, &mut concat,
-        &mut messenger, &mut store,
+        "DEADBEEF",
+        5,
+        &mut router,
+        &mut log,
+        &mut concat,
+        &mut messenger,
+        &mut store,
     );
 
     assert!(result, "unparseable PDU should return true (delete slot)");
@@ -92,9 +107,13 @@ fn process_pdu_hex_records_log_entry() {
     let mut store = MemStore::new();
 
     process_pdu_hex(
-        &pdu(HELLO_PDU), 1,
-        &mut router, &mut log, &mut concat,
-        &mut messenger, &mut store,
+        &pdu(HELLO_PDU),
+        1,
+        &mut router,
+        &mut log,
+        &mut concat,
+        &mut messenger,
+        &mut store,
     );
 
     assert_eq!(log.len(), 1);
@@ -112,9 +131,13 @@ fn process_pdu_hex_concat_both_parts_forward_once() {
 
     // Part 1: consumed, nothing forwarded yet
     let r1 = process_pdu_hex(
-        &pdu(CONCAT_PART1_PDU), 3,
-        &mut router, &mut log, &mut concat,
-        &mut messenger, &mut store,
+        &pdu(CONCAT_PART1_PDU),
+        3,
+        &mut router,
+        &mut log,
+        &mut concat,
+        &mut messenger,
+        &mut store,
     );
     assert!(r1, "part 1 should return true (delete slot)");
     assert_eq!(messenger.sent_count(), 0);
@@ -122,14 +145,25 @@ fn process_pdu_hex_concat_both_parts_forward_once() {
 
     // Part 2: group completes, one forward
     let r2 = process_pdu_hex(
-        &pdu(CONCAT_PART2_PDU), 4,
-        &mut router, &mut log, &mut concat,
-        &mut messenger, &mut store,
+        &pdu(CONCAT_PART2_PDU),
+        4,
+        &mut router,
+        &mut log,
+        &mut concat,
+        &mut messenger,
+        &mut store,
     );
     assert!(r2, "part 2 should return true (forwarded OK)");
     assert_eq!(messenger.sent_count(), 1);
-    assert_eq!(concat.group_count(), 0, "group should be gone after assembly");
-    assert!(messenger.contains_sent("Hi!"), "assembled body should be 'Hi!'");
+    assert_eq!(
+        concat.group_count(),
+        0,
+        "group should be gone after assembly"
+    );
+    assert!(
+        messenger.contains_sent("Hi!"),
+        "assembled body should be 'Hi!'"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -143,7 +177,11 @@ fn handle_new_sms_reads_and_forwards() {
     // (after forward) AT+CMGD=1 → OK
     let modem = ScriptedModem::new()
         .expect("+CPMS=\"ME\"", "", true)
-        .expect("+CMGR=1", &format!("+CMGR: 0,,18\n{}", pdu(HELLO_PDU)), true)
+        .expect(
+            "+CMGR=1",
+            &format!("+CMGR: 0,,18\n{}", pdu(HELLO_PDU)),
+            true,
+        )
         .expect("+CMGD=1", "", true);
 
     let mut modem = modem;
@@ -154,9 +192,14 @@ fn handle_new_sms_reads_and_forwards() {
     let mut store = MemStore::new();
 
     handle_new_sms(
-        "ME", 1,
-        &mut modem, &mut router, &mut log, &mut concat,
-        &mut messenger, &mut store,
+        "ME",
+        1,
+        &mut modem,
+        &mut router,
+        &mut log,
+        &mut concat,
+        &mut messenger,
+        &mut store,
     );
 
     modem.check_consumed();
@@ -179,9 +222,14 @@ fn handle_new_sms_cmgr_error_does_not_forward() {
     let mut store = MemStore::new();
 
     handle_new_sms(
-        "ME", 2,
-        &mut modem, &mut router, &mut log, &mut concat,
-        &mut messenger, &mut store,
+        "ME",
+        2,
+        &mut modem,
+        &mut router,
+        &mut log,
+        &mut concat,
+        &mut messenger,
+        &mut store,
     );
 
     modem.check_consumed();
@@ -204,9 +252,14 @@ fn handle_new_sms_invalid_pdu_deletes_slot() {
     let mut store = MemStore::new();
 
     handle_new_sms(
-        "ME", 3,
-        &mut modem, &mut router, &mut log, &mut concat,
-        &mut messenger, &mut store,
+        "ME",
+        3,
+        &mut modem,
+        &mut router,
+        &mut log,
+        &mut concat,
+        &mut messenger,
+        &mut store,
     );
 
     modem.check_consumed(); // CMGD must have been called
@@ -220,8 +273,7 @@ fn handle_new_sms_invalid_pdu_deletes_slot() {
 #[test]
 fn sweep_empty_storage_no_forwards() {
     // AT+CMGL=4 returns OK with empty body
-    let modem = ScriptedModem::new()
-        .expect("+CMGL=4", "", true);
+    let modem = ScriptedModem::new().expect("+CMGL=4", "", true);
 
     let mut modem = modem;
     let mut router = ReplyRouter::new();
@@ -231,8 +283,13 @@ fn sweep_empty_storage_no_forwards() {
     let mut store = MemStore::new();
 
     sweep_one_storage(
-        "ME", &mut modem, &mut router, &mut log, &mut concat,
-        &mut messenger, &mut store,
+        "ME",
+        &mut modem,
+        &mut router,
+        &mut log,
+        &mut concat,
+        &mut messenger,
+        &mut store,
     );
 
     modem.check_consumed();
@@ -255,8 +312,13 @@ fn sweep_finds_and_forwards_sms() {
     let mut store = MemStore::new();
 
     sweep_one_storage(
-        "ME", &mut modem, &mut router, &mut log, &mut concat,
-        &mut messenger, &mut store,
+        "ME",
+        &mut modem,
+        &mut router,
+        &mut log,
+        &mut concat,
+        &mut messenger,
+        &mut store,
     );
 
     modem.check_consumed();
@@ -269,7 +331,8 @@ fn sweep_multiple_sms() {
     // Two SMS in storage
     let cmgl_body = format!(
         "+CMGL: 1,0,,18\n{}\n+CMGL: 2,0,,18\n{}",
-        pdu(HELLO_PDU), pdu(HELLO_PDU)
+        pdu(HELLO_PDU),
+        pdu(HELLO_PDU)
     );
     let modem = ScriptedModem::new()
         .expect("+CMGL=4", &cmgl_body, true)
@@ -284,8 +347,13 @@ fn sweep_multiple_sms() {
     let mut store = MemStore::new();
 
     sweep_one_storage(
-        "ME", &mut modem, &mut router, &mut log, &mut concat,
-        &mut messenger, &mut store,
+        "ME",
+        &mut modem,
+        &mut router,
+        &mut log,
+        &mut concat,
+        &mut messenger,
+        &mut store,
     );
 
     modem.check_consumed();
@@ -295,8 +363,7 @@ fn sweep_multiple_sms() {
 #[test]
 fn sweep_cmgl_error_is_silent() {
     // AT+CMGL=4 returns error (e.g. storage not supported)
-    let modem = ScriptedModem::new()
-        .expect("+CMGL=4", "+CMS ERROR: 302", false);
+    let modem = ScriptedModem::new().expect("+CMGL=4", "+CMS ERROR: 302", false);
 
     let mut modem = modem;
     let mut router = ReplyRouter::new();
@@ -306,8 +373,13 @@ fn sweep_cmgl_error_is_silent() {
     let mut store = MemStore::new();
 
     sweep_one_storage(
-        "SM", &mut modem, &mut router, &mut log, &mut concat,
-        &mut messenger, &mut store,
+        "SM",
+        &mut modem,
+        &mut router,
+        &mut log,
+        &mut concat,
+        &mut messenger,
+        &mut store,
     );
 
     modem.check_consumed();
@@ -320,7 +392,11 @@ fn handle_new_sms_messenger_failure_keeps_slot() {
     // The SMS stays for retry on next boot.
     let modem = ScriptedModem::new()
         .expect("+CPMS=\"ME\"", "", true)
-        .expect("+CMGR=4", &format!("+CMGR: 0,,18\n{}", pdu(HELLO_PDU)), true);
+        .expect(
+            "+CMGR=4",
+            &format!("+CMGR: 0,,18\n{}", pdu(HELLO_PDU)),
+            true,
+        );
     // Note: NO +CMGD step — slot must be kept
 
     let mut modem = modem;
@@ -331,9 +407,14 @@ fn handle_new_sms_messenger_failure_keeps_slot() {
     let mut store = MemStore::new();
 
     handle_new_sms(
-        "ME", 4,
-        &mut modem, &mut router, &mut log, &mut concat,
-        &mut messenger, &mut store,
+        "ME",
+        4,
+        &mut modem,
+        &mut router,
+        &mut log,
+        &mut concat,
+        &mut messenger,
+        &mut store,
     );
 
     modem.check_consumed(); // CMGD must NOT have been called
@@ -355,8 +436,13 @@ fn sweep_invalid_pdu_deletes_slot() {
     let mut store = MemStore::new();
 
     sweep_one_storage(
-        "ME", &mut modem, &mut router, &mut log, &mut concat,
-        &mut messenger, &mut store,
+        "ME",
+        &mut modem,
+        &mut router,
+        &mut log,
+        &mut concat,
+        &mut messenger,
+        &mut store,
     );
 
     modem.check_consumed();

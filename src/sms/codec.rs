@@ -90,14 +90,14 @@ pub fn timestamp_to_rfc3339(ts: &str, gmt_offset_minutes: i32) -> String {
     format!(
         "20{year}-{mo}-{dd}T{hh}:{mm}:{ss}{sign}{ah:02}:{am:02}",
         year = &ts[0..2],
-        mo   = &ts[3..5],
-        dd   = &ts[6..8],
-        hh   = &ts[9..11],
-        mm   = &ts[12..14],
-        ss   = &ts[15..17],
+        mo = &ts[3..5],
+        dd = &ts[6..8],
+        hh = &ts[9..11],
+        mm = &ts[12..14],
+        ss = &ts[15..17],
         sign = sign,
-        ah   = abs_h,
-        am   = abs_m,
+        ah = abs_h,
+        am = abs_m,
     )
 }
 
@@ -115,21 +115,25 @@ pub fn pdu_timestamp_to_unix(ts: &str) -> i64 {
     let mm = parse2(&ts[12..14]);
     let ss = parse2(&ts[15..17]);
 
-    if mo < 1 || mo > 12 || dd < 1 || dd > 31 || hh > 23 || mm > 59 || ss > 60 {
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&dd) || hh > 23 || mm > 59 || ss > 60 {
         return 0;
     }
 
     let year = 2000 + yy;
     let month_days = [0i64, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
     let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-    let leaps = (year - 1) / 4 - (year - 1) / 100 + (year - 1) / 400
-        - (1969 / 4 - 1969 / 100 + 1969 / 400);
+    let leaps =
+        (year - 1) / 4 - (year - 1) / 100 + (year - 1) / 400 - (1969 / 4 - 1969 / 100 + 1969 / 400);
     let doy = month_days[(mo - 1) as usize] + dd - 1 + if mo > 2 && is_leap { 1 } else { 0 };
     let days = (year - 1970) * 365 + leaps + doy;
     let local = days * 86400 + hh * 3600 + mm * 60 + ss;
 
     let tz_offset_min: i64 = if ts.len() >= 18 {
-        let sign = if ts.as_bytes()[17] == b'-' { -1i64 } else { 1i64 };
+        let sign = if ts.as_bytes()[17] == b'-' {
+            -1i64
+        } else {
+            1i64
+        };
         let raw: i64 = ts[18..].parse().unwrap_or(0);
         sign * raw * 15
     } else {
@@ -167,8 +171,13 @@ fn hex_nibble(c: u8) -> Option<u8> {
 
 fn hex_to_bytes(hex: &str) -> Option<Vec<u8>> {
     // Strip whitespace
-    let clean: Vec<u8> = hex.bytes().filter(|&b| !matches!(b, b' ' | b'\r' | b'\n' | b'\t')).collect();
-    if clean.len() % 2 != 0 { return None; }
+    let clean: Vec<u8> = hex
+        .bytes()
+        .filter(|&b| !matches!(b, b' ' | b'\r' | b'\n' | b'\t'))
+        .collect();
+    if !clean.len().is_multiple_of(2) {
+        return None;
+    }
     let mut out = Vec::with_capacity(clean.len() / 2);
     let mut i = 0;
     while i + 1 < clean.len() {
@@ -183,30 +192,29 @@ fn hex_to_bytes(hex: &str) -> Option<Vec<u8>> {
 fn bytes_to_hex(data: &[u8]) -> String {
     let mut out = String::with_capacity(data.len() * 2);
     for &b in data {
-        out.push(char::from_digit((b >> 4) as u32, 16).unwrap().to_ascii_uppercase());
-        out.push(char::from_digit((b & 0xF) as u32, 16).unwrap().to_ascii_uppercase());
+        out.push(
+            char::from_digit((b >> 4) as u32, 16)
+                .unwrap()
+                .to_ascii_uppercase(),
+        );
+        out.push(
+            char::from_digit((b & 0xF) as u32, 16)
+                .unwrap()
+                .to_ascii_uppercase(),
+        );
     }
     out
 }
 
 // GSM-7 default alphabet (septet index → UTF-8)
 static GSM7: [&str; 128] = [
-    "@", "£", "$", "¥", "è", "é", "ù", "ì",
-    "ò", "Ç", "\n", "Ø", "ø", "\r", "Å", "å",
-    "Δ", "_", "Φ", "Γ", "Λ", "Ω", "Π", "Ψ",
-    "Σ", "Θ", "Ξ", "\x1b", "Æ", "æ", "ß", "É",
-    " ", "!", "\"", "#", "¤", "%", "&", "'",
-    "(", ")", "*", "+", ",", "-", ".", "/",
-    "0", "1", "2", "3", "4", "5", "6", "7",
-    "8", "9", ":", ";", "<", "=", ">", "?",
-    "¡", "A", "B", "C", "D", "E", "F", "G",
-    "H", "I", "J", "K", "L", "M", "N", "O",
-    "P", "Q", "R", "S", "T", "U", "V", "W",
-    "X", "Y", "Z", "Ä", "Ö", "Ñ", "Ü", "§",
-    "¿", "a", "b", "c", "d", "e", "f", "g",
-    "h", "i", "j", "k", "l", "m", "n", "o",
-    "p", "q", "r", "s", "t", "u", "v", "w",
-    "x", "y", "z", "ä", "ö", "ñ", "ü", "à",
+    "@", "£", "$", "¥", "è", "é", "ù", "ì", "ò", "Ç", "\n", "Ø", "ø", "\r", "Å", "å", "Δ", "_",
+    "Φ", "Γ", "Λ", "Ω", "Π", "Ψ", "Σ", "Θ", "Ξ", "\x1b", "Æ", "æ", "ß", "É", " ", "!", "\"", "#",
+    "¤", "%", "&", "'", "(", ")", "*", "+", ",", "-", ".", "/", "0", "1", "2", "3", "4", "5", "6",
+    "7", "8", "9", ":", ";", "<", "=", ">", "?", "¡", "A", "B", "C", "D", "E", "F", "G", "H", "I",
+    "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "Ä", "Ö",
+    "Ñ", "Ü", "§", "¿", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o",
+    "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z", "ä", "ö", "ñ", "ü", "à",
 ];
 
 fn gsm7_extension(c: u8) -> &'static str {
@@ -231,8 +239,10 @@ fn unpack_septets(data: &[u8], num_septets: usize, bit_offset: usize) -> Vec<u8>
         let bit = bit_offset + i * 7;
         let byte = bit / 8;
         let shift = bit % 8;
-        if byte >= data.len() { break; }
-        let v = data[byte] as u16 | data.get(byte + 1).copied().unwrap_or(0) as u16 * 256;
+        if byte >= data.len() {
+            break;
+        }
+        let v = data[byte] as u16 | ((data.get(byte + 1).copied().unwrap_or(0) as u16) * 256);
         out.push(((v >> shift) & 0x7F) as u8);
     }
     out
@@ -263,16 +273,20 @@ fn ucs2_bytes_to_utf8(data: &[u8]) -> String {
         let code = (data[i] as u16) << 8 | data[i + 1] as u16;
         i += 2;
         // High surrogate?
-        if code >= 0xD800 && code <= 0xDBFF && i + 1 < data.len() {
+        if (0xD800..=0xDBFF).contains(&code) && i + 1 < data.len() {
             let low = (data[i] as u16) << 8 | data[i + 1] as u16;
-            if low >= 0xDC00 && low <= 0xDFFF {
+            if (0xDC00..=0xDFFF).contains(&low) {
                 i += 2;
                 let cp = ((code as u32 - 0xD800) << 10) + (low as u32 - 0xDC00) + 0x10000;
-                if let Some(c) = char::from_u32(cp) { out.push(c); }
+                if let Some(c) = char::from_u32(cp) {
+                    out.push(c);
+                }
                 continue;
             }
         }
-        if let Some(c) = char::from_u32(code as u32) { out.push(c); }
+        if let Some(c) = char::from_u32(code as u32) {
+            out.push(c);
+        }
     }
     out
 }
@@ -283,9 +297,19 @@ fn decode_bcd_address(data: &[u8], byte_len: usize, digit_len: usize) -> String 
     while i < byte_len && out.len() < digit_len {
         let lo = data[i] & 0x0F;
         let hi = (data[i] >> 4) & 0x0F;
-        if lo <= 9 { out.push((b'0' + lo) as char); } else { break; }
-        if out.len() >= digit_len { break; }
-        if hi <= 9 { out.push((b'0' + hi) as char); } else { break; }
+        if lo <= 9 {
+            out.push((b'0' + lo) as char);
+        } else {
+            break;
+        }
+        if out.len() >= digit_len {
+            break;
+        }
+        if hi <= 9 {
+            out.push((b'0' + hi) as char);
+        } else {
+            break;
+        }
         i += 1;
     }
     out
@@ -304,8 +328,12 @@ fn decode_scts(data: &[u8]) -> String {
     let tz_q = tz_lo * 10 + tz_hi2;
     format!(
         "{:02}/{:02}/{:02},{:02}:{:02}:{:02}{}{:02}",
-        swap(data[0]), swap(data[1]), swap(data[2]),
-        swap(data[3]), swap(data[4]), swap(data[5]),
+        swap(data[0]),
+        swap(data[1]),
+        swap(data[2]),
+        swap(data[3]),
+        swap(data[4]),
+        swap(data[5]),
         if negative { '-' } else { '+' },
         tz_q
     )
@@ -321,26 +349,38 @@ pub fn parse_sms_pdu(hex_pdu: &str) -> Result<SmsPdu, SmsError> {
     let n = buf.len();
     let mut p = 0usize;
 
-    if p >= n { return Err(SmsError::MalformedPdu("truncated before SCA")); }
+    if p >= n {
+        return Err(SmsError::MalformedPdu("truncated before SCA"));
+    }
     let sca_len = buf[p] as usize;
     p += 1;
-    if p + sca_len > n { return Err(SmsError::MalformedPdu("SCA too long")); }
+    if p + sca_len > n {
+        return Err(SmsError::MalformedPdu("SCA too long"));
+    }
     p += sca_len;
 
-    if p >= n { return Err(SmsError::MalformedPdu("truncated before first octet")); }
+    if p >= n {
+        return Err(SmsError::MalformedPdu("truncated before first octet"));
+    }
     let first_octet = buf[p];
     p += 1;
     let udhi = (first_octet & 0x40) != 0;
 
     // TP-OA
-    if p >= n { return Err(SmsError::MalformedPdu("truncated before OA")); }
+    if p >= n {
+        return Err(SmsError::MalformedPdu("truncated before OA"));
+    }
     let oa_digits = buf[p] as usize;
     p += 1;
-    if p >= n { return Err(SmsError::MalformedPdu("truncated before OA TOA")); }
+    if p >= n {
+        return Err(SmsError::MalformedPdu("truncated before OA TOA"));
+    }
     let oa_toa = buf[p];
     p += 1;
-    let oa_bytes = (oa_digits + 1) / 2;
-    if p + oa_bytes > n { return Err(SmsError::MalformedPdu("OA bytes truncated")); }
+    let oa_bytes = oa_digits.div_ceil(2);
+    if p + oa_bytes > n {
+        return Err(SmsError::MalformedPdu("OA bytes truncated"));
+    }
 
     let sender = if (oa_toa & 0x70) == 0x50 {
         // Alphanumeric sender
@@ -357,16 +397,24 @@ pub fn parse_sms_pdu(hex_pdu: &str) -> Result<SmsPdu, SmsError> {
     p += oa_bytes;
 
     // TP-PID
-    if p >= n { return Err(SmsError::MalformedPdu("truncated before PID")); }
+    if p >= n {
+        return Err(SmsError::MalformedPdu("truncated before PID"));
+    }
     p += 1;
 
     // TP-DCS
-    if p >= n { return Err(SmsError::MalformedPdu("truncated before DCS")); }
+    if p >= n {
+        return Err(SmsError::MalformedPdu("truncated before DCS"));
+    }
     let dcs = buf[p];
     p += 1;
 
     #[derive(PartialEq)]
-    enum Alpha { Gsm7, Eight, Ucs2 }
+    enum Alpha {
+        Gsm7,
+        Eight,
+        Ucs2,
+    }
     let alpha = if (dcs & 0xC0) == 0x00 {
         match (dcs >> 2) & 0x03 {
             0 => Alpha::Gsm7,
@@ -375,7 +423,11 @@ pub fn parse_sms_pdu(hex_pdu: &str) -> Result<SmsPdu, SmsError> {
             _ => Alpha::Gsm7,
         }
     } else if (dcs & 0xF0) == 0xF0 {
-        if (dcs & 0x04) != 0 { Alpha::Eight } else { Alpha::Gsm7 }
+        if (dcs & 0x04) != 0 {
+            Alpha::Eight
+        } else {
+            Alpha::Gsm7
+        }
     } else if (dcs & 0xF0) == 0xE0 {
         Alpha::Ucs2
     } else {
@@ -383,18 +435,24 @@ pub fn parse_sms_pdu(hex_pdu: &str) -> Result<SmsPdu, SmsError> {
     };
 
     // TP-SCTS
-    if p + 7 > n { return Err(SmsError::MalformedPdu("truncated before SCTS")); }
+    if p + 7 > n {
+        return Err(SmsError::MalformedPdu("truncated before SCTS"));
+    }
     let timestamp = decode_scts(&buf[p..p + 7]);
     p += 7;
 
     // TP-UDL
-    if p >= n { return Err(SmsError::MalformedPdu("truncated before UDL")); }
+    if p >= n {
+        return Err(SmsError::MalformedPdu("truncated before UDL"));
+    }
     let udl = buf[p] as usize;
     p += 1;
 
     let ud_remaining = n - p;
     let ud_bytes = if alpha != Alpha::Gsm7 {
-        if udl > ud_remaining { return Err(SmsError::MalformedPdu("UDL > remaining")); }
+        if udl > ud_remaining {
+            return Err(SmsError::MalformedPdu("UDL > remaining"));
+        }
         udl
     } else {
         ud_remaining
@@ -402,13 +460,21 @@ pub fn parse_sms_pdu(hex_pdu: &str) -> Result<SmsPdu, SmsError> {
 
     // UDH
     let mut udh_total = 0usize;
-    let mut pdu = SmsPdu { sender, timestamp, ..Default::default() };
+    let mut pdu = SmsPdu {
+        sender,
+        timestamp,
+        ..Default::default()
+    };
 
     if udhi {
-        if ud_bytes < 1 { return Err(SmsError::MalformedPdu("UDH missing UDHL")); }
+        if ud_bytes < 1 {
+            return Err(SmsError::MalformedPdu("UDH missing UDHL"));
+        }
         let udhl = buf[p] as usize;
         udh_total = udhl + 1;
-        if udh_total > ud_bytes { return Err(SmsError::MalformedPdu("UDH too long")); }
+        if udh_total > ud_bytes {
+            return Err(SmsError::MalformedPdu("UDH too long"));
+        }
 
         let mut ie = p + 1;
         let ie_end = p + udh_total;
@@ -417,7 +483,9 @@ pub fn parse_sms_pdu(hex_pdu: &str) -> Result<SmsPdu, SmsError> {
             ie += 1;
             let iedl = buf[ie] as usize;
             ie += 1;
-            if ie + iedl > ie_end { break; }
+            if ie + iedl > ie_end {
+                break;
+            }
             match (iei, iedl) {
                 (0x00, 3) => {
                     pdu.is_concatenated = true;
@@ -444,7 +512,9 @@ pub fn parse_sms_pdu(hex_pdu: &str) -> Result<SmsPdu, SmsError> {
                 let udh_bits = udh_total * 8;
                 let fill = (7 - (udh_bits % 7)) % 7;
                 let header_septets = (udh_bits + fill) / 7;
-                if header_septets > udl { return Err(SmsError::MalformedPdu("UDH header septets > UDL")); }
+                if header_septets > udl {
+                    return Err(SmsError::MalformedPdu("UDH header septets > UDL"));
+                }
                 let body_septets = udl - header_septets;
                 let bit_offset = udh_bits + fill;
                 let septets = unpack_septets(&buf[p..p + ud_bytes], body_septets, bit_offset);
@@ -456,13 +526,20 @@ pub fn parse_sms_pdu(hex_pdu: &str) -> Result<SmsPdu, SmsError> {
         }
         Alpha::Ucs2 => {
             let body_start = if udhi { udh_total } else { 0 };
-            if body_start > ud_bytes { return Err(SmsError::MalformedPdu("UDH > UCS2 body")); }
+            if body_start > ud_bytes {
+                return Err(SmsError::MalformedPdu("UDH > UCS2 body"));
+            }
             ucs2_bytes_to_utf8(&buf[p + body_start..p + ud_bytes])
         }
         Alpha::Eight => {
             let body_start = if udhi { udh_total } else { 0 };
-            if body_start > ud_bytes { return Err(SmsError::MalformedPdu("UDH > 8bit body")); }
-            buf[p + body_start..p + ud_bytes].iter().map(|&b| b as char).collect()
+            if body_start > ud_bytes {
+                return Err(SmsError::MalformedPdu("UDH > 8bit body"));
+            }
+            buf[p + body_start..p + ud_bytes]
+                .iter()
+                .map(|&b| b as char)
+                .collect()
         }
     };
 
@@ -483,67 +560,242 @@ fn utf8_to_codepoints(s: &str) -> Vec<u32> {
 fn encode_gsm7_char(cp: u32, out: &mut [u8]) -> usize {
     match cp {
         // Characters with non-identity ASCII mapping
-        0x24 => { out[0] = 0x02; 1 }
-        0x40 => { out[0] = 0x00; 1 }
-        0x5F => { out[0] = 0x11; 1 }
+        0x24 => {
+            out[0] = 0x02;
+            1
+        }
+        0x40 => {
+            out[0] = 0x00;
+            1
+        }
+        0x5F => {
+            out[0] = 0x11;
+            1
+        }
         0x60 => 0, // backtick not in GSM-7
         // Extension table (2 septets: ESC + code)
-        0x5B => { out[0]=0x1B; out[1]=0x3C; 2 } // [
-        0x5C => { out[0]=0x1B; out[1]=0x2F; 2 } // backslash
-        0x5D => { out[0]=0x1B; out[1]=0x3E; 2 } // ]
-        0x5E => { out[0]=0x1B; out[1]=0x14; 2 } // ^
-        0x7B => { out[0]=0x1B; out[1]=0x28; 2 } // {
-        0x7C => { out[0]=0x1B; out[1]=0x40; 2 } // |
-        0x7D => { out[0]=0x1B; out[1]=0x29; 2 } // }
-        0x7E => { out[0]=0x1B; out[1]=0x3D; 2 } // ~
+        0x5B => {
+            out[0] = 0x1B;
+            out[1] = 0x3C;
+            2
+        } // [
+        0x5C => {
+            out[0] = 0x1B;
+            out[1] = 0x2F;
+            2
+        } // backslash
+        0x5D => {
+            out[0] = 0x1B;
+            out[1] = 0x3E;
+            2
+        } // ]
+        0x5E => {
+            out[0] = 0x1B;
+            out[1] = 0x14;
+            2
+        } // ^
+        0x7B => {
+            out[0] = 0x1B;
+            out[1] = 0x28;
+            2
+        } // {
+        0x7C => {
+            out[0] = 0x1B;
+            out[1] = 0x40;
+            2
+        } // |
+        0x7D => {
+            out[0] = 0x1B;
+            out[1] = 0x29;
+            2
+        } // }
+        0x7E => {
+            out[0] = 0x1B;
+            out[1] = 0x3D;
+            2
+        } // ~
         // Direct ASCII range (after special cases above)
-        0x20..=0x7E => { out[0] = cp as u8; 1 }
-        0x0A => { out[0] = 0x0A; 1 } // LF
-        0x0D => { out[0] = 0x0D; 1 } // CR
-        0x0C => { out[0]=0x1B; out[1]=0x0A; 2 } // form feed
+        0x20..=0x7E => {
+            out[0] = cp as u8;
+            1
+        }
+        0x0A => {
+            out[0] = 0x0A;
+            1
+        } // LF
+        0x0D => {
+            out[0] = 0x0D;
+            1
+        } // CR
+        0x0C => {
+            out[0] = 0x1B;
+            out[1] = 0x0A;
+            2
+        } // form feed
         // Non-ASCII GSM-7 basic table
-        0x00A1 => { out[0]=0x40; 1 }
-        0x00A3 => { out[0]=0x01; 1 }
-        0x00A4 => { out[0]=0x24; 1 }
-        0x00A5 => { out[0]=0x03; 1 }
-        0x00A7 => { out[0]=0x5F; 1 }
-        0x00BF => { out[0]=0x60; 1 }
-        0x00C4 => { out[0]=0x5B; 1 }
-        0x00C5 => { out[0]=0x0E; 1 }
-        0x00C6 => { out[0]=0x1C; 1 }
-        0x00C7 => { out[0]=0x09; 1 }
-        0x00C9 => { out[0]=0x1F; 1 }
-        0x00D1 => { out[0]=0x5D; 1 }
-        0x00D6 => { out[0]=0x5C; 1 }
-        0x00D8 => { out[0]=0x0B; 1 }
-        0x00DC => { out[0]=0x5E; 1 }
-        0x00DF => { out[0]=0x1E; 1 }
-        0x00E0 => { out[0]=0x7F; 1 }
-        0x00E4 => { out[0]=0x7B; 1 }
-        0x00E5 => { out[0]=0x0F; 1 }
-        0x00E6 => { out[0]=0x1D; 1 }
-        0x00E8 => { out[0]=0x04; 1 }
-        0x00E9 => { out[0]=0x05; 1 }
-        0x00EC => { out[0]=0x07; 1 }
-        0x00F1 => { out[0]=0x7D; 1 }
-        0x00F2 => { out[0]=0x08; 1 }
-        0x00F6 => { out[0]=0x7C; 1 }
-        0x00F8 => { out[0]=0x0C; 1 }
-        0x00F9 => { out[0]=0x06; 1 }
-        0x00FC => { out[0]=0x7E; 1 }
+        0x00A1 => {
+            out[0] = 0x40;
+            1
+        }
+        0x00A3 => {
+            out[0] = 0x01;
+            1
+        }
+        0x00A4 => {
+            out[0] = 0x24;
+            1
+        }
+        0x00A5 => {
+            out[0] = 0x03;
+            1
+        }
+        0x00A7 => {
+            out[0] = 0x5F;
+            1
+        }
+        0x00BF => {
+            out[0] = 0x60;
+            1
+        }
+        0x00C4 => {
+            out[0] = 0x5B;
+            1
+        }
+        0x00C5 => {
+            out[0] = 0x0E;
+            1
+        }
+        0x00C6 => {
+            out[0] = 0x1C;
+            1
+        }
+        0x00C7 => {
+            out[0] = 0x09;
+            1
+        }
+        0x00C9 => {
+            out[0] = 0x1F;
+            1
+        }
+        0x00D1 => {
+            out[0] = 0x5D;
+            1
+        }
+        0x00D6 => {
+            out[0] = 0x5C;
+            1
+        }
+        0x00D8 => {
+            out[0] = 0x0B;
+            1
+        }
+        0x00DC => {
+            out[0] = 0x5E;
+            1
+        }
+        0x00DF => {
+            out[0] = 0x1E;
+            1
+        }
+        0x00E0 => {
+            out[0] = 0x7F;
+            1
+        }
+        0x00E4 => {
+            out[0] = 0x7B;
+            1
+        }
+        0x00E5 => {
+            out[0] = 0x0F;
+            1
+        }
+        0x00E6 => {
+            out[0] = 0x1D;
+            1
+        }
+        0x00E8 => {
+            out[0] = 0x04;
+            1
+        }
+        0x00E9 => {
+            out[0] = 0x05;
+            1
+        }
+        0x00EC => {
+            out[0] = 0x07;
+            1
+        }
+        0x00F1 => {
+            out[0] = 0x7D;
+            1
+        }
+        0x00F2 => {
+            out[0] = 0x08;
+            1
+        }
+        0x00F6 => {
+            out[0] = 0x7C;
+            1
+        }
+        0x00F8 => {
+            out[0] = 0x0C;
+            1
+        }
+        0x00F9 => {
+            out[0] = 0x06;
+            1
+        }
+        0x00FC => {
+            out[0] = 0x7E;
+            1
+        }
         // Greek (basic table)
-        0x0393 => { out[0]=0x13; 1 }
-        0x0394 => { out[0]=0x10; 1 }
-        0x0398 => { out[0]=0x19; 1 }
-        0x039B => { out[0]=0x14; 1 }
-        0x039E => { out[0]=0x1A; 1 }
-        0x03A0 => { out[0]=0x16; 1 }
-        0x03A3 => { out[0]=0x18; 1 }
-        0x03A6 => { out[0]=0x12; 1 }
-        0x03A8 => { out[0]=0x17; 1 }
-        0x03A9 => { out[0]=0x15; 1 }
+        0x0393 => {
+            out[0] = 0x13;
+            1
+        }
+        0x0394 => {
+            out[0] = 0x10;
+            1
+        }
+        0x0398 => {
+            out[0] = 0x19;
+            1
+        }
+        0x039B => {
+            out[0] = 0x14;
+            1
+        }
+        0x039E => {
+            out[0] = 0x1A;
+            1
+        }
+        0x03A0 => {
+            out[0] = 0x16;
+            1
+        }
+        0x03A3 => {
+            out[0] = 0x18;
+            1
+        }
+        0x03A6 => {
+            out[0] = 0x12;
+            1
+        }
+        0x03A8 => {
+            out[0] = 0x17;
+            1
+        }
+        0x03A9 => {
+            out[0] = 0x15;
+            1
+        }
         // Euro (extension)
-        0x20AC => { out[0]=0x1B; out[1]=0x65; 2 }
+        0x20AC => {
+            out[0] = 0x1B;
+            out[1] = 0x65;
+            2
+        }
         _ => 0,
     }
 }
@@ -551,9 +803,9 @@ fn encode_gsm7_char(cp: u32, out: &mut [u8]) -> usize {
 /// Pack septets into bytes with optional bit offset (for UDH alignment).
 pub fn pack_septets(septets: &[u8], bit_offset: usize) -> Vec<u8> {
     if septets.is_empty() {
-        return vec![0u8; (bit_offset + 7) / 8];
+        return vec![0u8; bit_offset.div_ceil(8)];
     }
-    let num_bytes = (bit_offset + septets.len() * 7 + 7) / 8;
+    let num_bytes = (bit_offset + septets.len() * 7).div_ceil(8);
     let mut out = vec![0u8; num_bytes];
     for (i, &s) in septets.iter().enumerate() {
         let val = (s & 0x7F) as u16;
@@ -590,8 +842,10 @@ fn code_points_to_utf16be(cps: &[u32]) -> Vec<u8> {
             let adj = cp - 0x10000;
             let hi = (0xD800 + (adj >> 10)) as u16;
             let lo = (0xDC00 + (adj & 0x3FF)) as u16;
-            out.push((hi >> 8) as u8); out.push((hi & 0xFF) as u8);
-            out.push((lo >> 8) as u8); out.push((lo & 0xFF) as u8);
+            out.push((hi >> 8) as u8);
+            out.push((hi & 0xFF) as u8);
+            out.push((lo >> 8) as u8);
+            out.push((lo & 0xFF) as u8);
         }
     }
     out
@@ -601,8 +855,11 @@ fn encode_bcd_phone(phone: &str, out: &mut Vec<u8>) {
     let mut digits = String::new();
     let mut international = false;
     for c in phone.chars() {
-        if c == '+' { international = true; }
-        else if c.is_ascii_digit() { digits.push(c); }
+        if c == '+' {
+            international = true;
+        } else if c.is_ascii_digit() {
+            digits.push(c);
+        }
     }
     out.push(digits.len() as u8);
     out.push(if international { 0x91 } else { 0x81 });
@@ -610,7 +867,11 @@ fn encode_bcd_phone(phone: &str, out: &mut Vec<u8>) {
     let mut i = 0;
     while i < dbytes.len() {
         let lo = dbytes[i] - b'0';
-        let hi = if i + 1 < dbytes.len() { dbytes[i + 1] - b'0' } else { 0x0F };
+        let hi = if i + 1 < dbytes.len() {
+            dbytes[i + 1] - b'0'
+        } else {
+            0x0F
+        };
         out.push((hi << 4) | lo);
         i += 2;
     }
@@ -624,7 +885,9 @@ pub fn build_sms_submit_pdus(
     max_parts: usize,
     request_status_report: bool,
 ) -> Vec<SmsSubmitPdu> {
-    if phone.is_empty() || body.is_empty() { return vec![]; }
+    if phone.is_empty() || body.is_empty() {
+        return vec![];
+    }
 
     let cps = utf8_to_codepoints(body);
 
@@ -634,7 +897,10 @@ pub fn build_sms_submit_pdus(
     let mut can_gsm7 = true;
     for &cp in &cps {
         let n = encode_gsm7_char(cp, &mut buf);
-        if n == 0 { can_gsm7 = false; break; }
+        if n == 0 {
+            can_gsm7 = false;
+            break;
+        }
         gsm7.extend_from_slice(&buf[..n]);
     }
 
@@ -647,12 +913,7 @@ pub fn build_sms_submit_pdus(
     build_ucs2_pdus(phone, &ucs2, max_parts, request_status_report)
 }
 
-fn build_gsm7_pdus(
-    phone: &str,
-    septets: &[u8],
-    max_parts: usize,
-    srr: bool,
-) -> Vec<SmsSubmitPdu> {
+fn build_gsm7_pdus(phone: &str, septets: &[u8], max_parts: usize, srr: bool) -> Vec<SmsSubmitPdu> {
     if septets.len() <= 160 {
         // Single-part
         let packed = pack_septets(septets, 0);
@@ -664,7 +925,10 @@ fn build_gsm7_pdus(
         pdu.push(0x00); // DCS GSM7
         pdu.push(septets.len() as u8);
         pdu.extend_from_slice(&packed);
-        return vec![SmsSubmitPdu { tpdu_len: (pdu.len() - 1) as u8, hex: bytes_to_hex(&pdu) }];
+        return vec![SmsSubmitPdu {
+            tpdu_len: (pdu.len() - 1) as u8,
+            hex: bytes_to_hex(&pdu),
+        }];
     }
 
     // Multi-part: split into 153-septet chunks (ESC-safe)
@@ -674,15 +938,20 @@ fn build_gsm7_pdus(
         let remaining = septets.len() - pos;
         let mut chunk = remaining.min(153);
         if chunk == 153 && remaining > 153 {
-            if septets[pos + 152] == 0x1B { chunk = 152; }
-            else if septets[pos + 151] == 0x1B { chunk = 151; }
+            if septets[pos + 152] == 0x1B {
+                chunk = 152;
+            } else if septets[pos + 151] == 0x1B {
+                chunk = 151;
+            }
         }
         slices.push((pos, pos + chunk));
         pos += chunk;
     }
 
     let total = slices.len();
-    if total > max_parts { return vec![]; }
+    if total > max_parts {
+        return vec![];
+    }
 
     static REF: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
     let concat_ref = REF.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -692,7 +961,9 @@ fn build_gsm7_pdus(
         let chunk = &septets[*start..*end];
         // UDH: 6 bytes; first septet at bit 49
         let mut packed = pack_septets(chunk, 49);
-        packed[0] = 0x05; packed[1] = 0x00; packed[2] = 0x03;
+        packed[0] = 0x05;
+        packed[1] = 0x00;
+        packed[2] = 0x03;
         packed[3] = concat_ref;
         packed[4] = total as u8;
         packed[5] = (part_num + 1) as u8;
@@ -703,29 +974,32 @@ fn build_gsm7_pdus(
         pdu.push(if srr { 0x61 } else { 0x41 }); // UDHI set
         pdu.push(0x00);
         encode_bcd_phone(phone, &mut pdu);
-        pdu.push(0x00); pdu.push(0x00);
+        pdu.push(0x00);
+        pdu.push(0x00);
         pdu.push(udl);
         pdu.extend_from_slice(&packed);
-        result.push(SmsSubmitPdu { tpdu_len: (pdu.len() - 1) as u8, hex: bytes_to_hex(&pdu) });
+        result.push(SmsSubmitPdu {
+            tpdu_len: (pdu.len() - 1) as u8,
+            hex: bytes_to_hex(&pdu),
+        });
     }
     result
 }
 
-fn build_ucs2_pdus(
-    phone: &str,
-    ucs2: &[u8],
-    max_parts: usize,
-    srr: bool,
-) -> Vec<SmsSubmitPdu> {
+fn build_ucs2_pdus(phone: &str, ucs2: &[u8], max_parts: usize, srr: bool) -> Vec<SmsSubmitPdu> {
     if ucs2.len() <= 140 {
         let mut pdu = vec![0x00u8];
         pdu.push(if srr { 0x21 } else { 0x01 });
         pdu.push(0x00);
         encode_bcd_phone(phone, &mut pdu);
-        pdu.push(0x00); pdu.push(0x08); // DCS UCS2
+        pdu.push(0x00);
+        pdu.push(0x08); // DCS UCS2
         pdu.push(ucs2.len() as u8);
         pdu.extend_from_slice(ucs2);
-        return vec![SmsSubmitPdu { tpdu_len: (pdu.len() - 1) as u8, hex: bytes_to_hex(&pdu) }];
+        return vec![SmsSubmitPdu {
+            tpdu_len: (pdu.len() - 1) as u8,
+            hex: bytes_to_hex(&pdu),
+        }];
     }
 
     // Multi-part: 134-byte chunks (surrogate-safe)
@@ -736,14 +1010,18 @@ fn build_ucs2_pdus(
         let mut chunk = remaining.min(134);
         if chunk == 134 && remaining > 134 {
             let hi = (ucs2[pos + 132] as u16) << 8 | ucs2[pos + 133] as u16;
-            if hi >= 0xD800 && hi <= 0xDBFF { chunk = 132; }
+            if (0xD800..=0xDBFF).contains(&hi) {
+                chunk = 132;
+            }
         }
         slices.push((pos, pos + chunk));
         pos += chunk;
     }
 
     let total = slices.len();
-    if total > max_parts { return vec![]; }
+    if total > max_parts {
+        return vec![];
+    }
 
     static REF2: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
     let concat_ref = REF2.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -752,17 +1030,28 @@ fn build_ucs2_pdus(
     for (part_num, (start, end)) in slices.iter().enumerate() {
         let chunk = &ucs2[*start..*end];
         let udl = (6 + chunk.len()) as u8;
-        let mut ud = vec![0x05u8, 0x00, 0x03, concat_ref, total as u8, (part_num + 1) as u8];
+        let mut ud = vec![
+            0x05u8,
+            0x00,
+            0x03,
+            concat_ref,
+            total as u8,
+            (part_num + 1) as u8,
+        ];
         ud.extend_from_slice(chunk);
 
         let mut pdu = vec![0x00u8];
         pdu.push(if srr { 0x61 } else { 0x41 });
         pdu.push(0x00);
         encode_bcd_phone(phone, &mut pdu);
-        pdu.push(0x00); pdu.push(0x08);
+        pdu.push(0x00);
+        pdu.push(0x08);
         pdu.push(udl);
         pdu.extend_from_slice(&ud);
-        result.push(SmsSubmitPdu { tpdu_len: (pdu.len() - 1) as u8, hex: bytes_to_hex(&pdu) });
+        result.push(SmsSubmitPdu {
+            tpdu_len: (pdu.len() - 1) as u8,
+            hex: bytes_to_hex(&pdu),
+        });
     }
     result
 }
@@ -778,47 +1067,84 @@ pub fn count_sms_parts(body: &str, max_parts: usize) -> usize {
 
 /// Parse a hex-encoded SMS-STATUS-REPORT PDU (+CDS URC).
 pub fn parse_status_report(hex_pdu: &str) -> Result<StatusReport, SmsError> {
-    let raw = hex_to_bytes(hex_pdu).ok_or(SmsError::MalformedPdu("invalid hex in status report"))?;
+    let raw =
+        hex_to_bytes(hex_pdu).ok_or(SmsError::MalformedPdu("invalid hex in status report"))?;
     let n = raw.len();
     let mut pos = 0usize;
 
-    if pos >= n { return Err(SmsError::MalformedPdu("empty status report")); }
+    if pos >= n {
+        return Err(SmsError::MalformedPdu("empty status report"));
+    }
     let sca_len = raw[pos] as usize;
     pos += 1 + sca_len;
 
-    if pos >= n { return Err(SmsError::MalformedPdu("truncated SR first octet")); }
-    let first = raw[pos]; pos += 1;
-    if (first & 0x03) != 0x02 { return Err(SmsError::MalformedPdu("not a STATUS-REPORT")); }
+    if pos >= n {
+        return Err(SmsError::MalformedPdu("truncated SR first octet"));
+    }
+    let first = raw[pos];
+    pos += 1;
+    if (first & 0x03) != 0x02 {
+        return Err(SmsError::MalformedPdu("not a STATUS-REPORT"));
+    }
 
-    if pos >= n { return Err(SmsError::MalformedPdu("truncated SR MR")); }
-    let message_ref = raw[pos]; pos += 1;
+    if pos >= n {
+        return Err(SmsError::MalformedPdu("truncated SR MR"));
+    }
+    let message_ref = raw[pos];
+    pos += 1;
 
-    if pos + 1 >= n { return Err(SmsError::MalformedPdu("truncated SR RA")); }
-    let ra_digits = raw[pos] as usize; pos += 1;
-    let ra_toa = raw[pos]; pos += 1;
-    let ra_bytes = (ra_digits + 1) / 2;
-    if pos + ra_bytes > n { return Err(SmsError::MalformedPdu("SR RA bytes truncated")); }
+    if pos + 1 >= n {
+        return Err(SmsError::MalformedPdu("truncated SR RA"));
+    }
+    let ra_digits = raw[pos] as usize;
+    pos += 1;
+    let ra_toa = raw[pos];
+    pos += 1;
+    let ra_bytes = ra_digits.div_ceil(2);
+    if pos + ra_bytes > n {
+        return Err(SmsError::MalformedPdu("SR RA bytes truncated"));
+    }
 
-    let mut recipient = if (ra_toa & 0x70) == 0x10 { "+".to_string() } else { String::new() };
+    let mut recipient = if (ra_toa & 0x70) == 0x10 {
+        "+".to_string()
+    } else {
+        String::new()
+    };
     for b in 0..ra_bytes {
         let byte = raw[pos + b];
         let d1 = byte & 0x0F;
         let d2 = (byte >> 4) & 0x0F;
         recipient.push((b'0' + d1) as char);
-        if b * 2 + 1 < ra_digits { recipient.push((b'0' + d2) as char); }
+        if b * 2 + 1 < ra_digits {
+            recipient.push((b'0' + d2) as char);
+        }
     }
     pos += ra_bytes;
 
-    if pos + 14 > n { return Err(SmsError::MalformedPdu("SR timestamps truncated")); }
-    let sc_timestamp = decode_scts(&raw[pos..pos + 7]); pos += 7;
-    let discharge_time = decode_scts(&raw[pos..pos + 7]); pos += 7;
+    if pos + 14 > n {
+        return Err(SmsError::MalformedPdu("SR timestamps truncated"));
+    }
+    let sc_timestamp = decode_scts(&raw[pos..pos + 7]);
+    pos += 7;
+    let discharge_time = decode_scts(&raw[pos..pos + 7]);
+    pos += 7;
 
-    if pos >= n { return Err(SmsError::MalformedPdu("SR status byte missing")); }
+    if pos >= n {
+        return Err(SmsError::MalformedPdu("SR status byte missing"));
+    }
     let status = raw[pos];
     let delivered = status == 0x00;
     let status_text = sr_status_text(status);
 
-    Ok(StatusReport { message_ref, recipient, sc_timestamp, discharge_time, status, delivered, status_text })
+    Ok(StatusReport {
+        message_ref,
+        recipient,
+        sc_timestamp,
+        discharge_time,
+        status,
+        delivered,
+        status_text,
+    })
 }
 
 fn sr_status_text(st: u8) -> String {

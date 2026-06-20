@@ -11,7 +11,9 @@ pub struct MemStore {
 
 impl MemStore {
     pub fn new() -> Self {
-        MemStore { data: HashMap::new() }
+        MemStore {
+            data: HashMap::new(),
+        }
     }
 }
 

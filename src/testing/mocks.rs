@@ -1,10 +1,10 @@
 //! Mock implementations of ModemPort and Messenger.
 
 use crate::im::{InboundMessage, MessageId, MessageSink, MessageSource, MessengerError};
-use crate::modem::{AtResponse, AtTransport, ModemError, ModemPort};
 use crate::modem::a76xx::at::UartPort;
-use std::time::Duration;
+use crate::modem::{AtResponse, AtTransport, ModemError, ModemPort};
 use std::collections::VecDeque;
+use std::time::Duration;
 
 // ---------------------------------------------------------------------------
 // MockUart
@@ -102,7 +102,9 @@ impl UartPort for MockUart {
 }
 
 impl Default for MockUart {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -162,7 +164,11 @@ impl ScriptedModem {
     pub fn check_consumed(&self) {
         if !self.script.is_empty() {
             let remaining: Vec<_> = self.script.iter().map(|s| &s.command_suffix).collect();
-            panic!("ScriptedModem: {} unconsumed script steps: {:?}", self.script.len(), remaining);
+            panic!(
+                "ScriptedModem: {} unconsumed script steps: {:?}",
+                self.script.len(),
+                remaining
+            );
         }
     }
 }
@@ -170,7 +176,10 @@ impl ScriptedModem {
 impl AtTransport for ScriptedModem {
     fn send_at(&mut self, cmd: &str) -> Result<AtResponse, ModemError> {
         let Some(step) = self.script.pop_front() else {
-            return Err(ModemError::AtError(format!("unexpected AT command: AT{}", cmd)));
+            return Err(ModemError::AtError(format!(
+                "unexpected AT command: AT{}",
+                cmd
+            )));
         };
         if step.command_suffix != cmd {
             panic!(
@@ -178,7 +187,10 @@ impl AtTransport for ScriptedModem {
                 step.command_suffix, cmd
             );
         }
-        Ok(AtResponse { body: step.response_body, ok: step.ok })
+        Ok(AtResponse {
+            body: step.response_body,
+            ok: step.ok,
+        })
     }
 
     fn poll_urc(&mut self) -> Option<String> {
@@ -209,7 +221,9 @@ impl ModemPort for ScriptedModem {
 }
 
 impl Default for ScriptedModem {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -248,8 +262,12 @@ impl RecordingMessenger {
         });
     }
 
-    pub fn sent_count(&self) -> usize { self.sent.len() }
-    pub fn last_sent(&self) -> Option<&str> { self.sent.last().map(|m| m.text.as_str()) }
+    pub fn sent_count(&self) -> usize {
+        self.sent.len()
+    }
+    pub fn last_sent(&self) -> Option<&str> {
+        self.sent.last().map(|m| m.text.as_str())
+    }
     pub fn contains_sent(&self, substr: &str) -> bool {
         self.sent.iter().any(|m| m.text.contains(substr))
     }
@@ -259,20 +277,29 @@ impl MessageSink for RecordingMessenger {
     fn send_message(&mut self, text: &str) -> Result<MessageId, MessengerError> {
         let id = self.next_id;
         self.next_id += 1;
-        self.sent.push(SentMessage { text: text.to_string(), id });
+        self.sent.push(SentMessage {
+            text: text.to_string(),
+            id,
+        });
         Ok(id)
     }
 }
 
 impl MessageSource for RecordingMessenger {
-    fn poll(&mut self, _since: i64, _timeout_sec: u32) -> Result<Vec<InboundMessage>, MessengerError> {
+    fn poll(
+        &mut self,
+        _since: i64,
+        _timeout_sec: u32,
+    ) -> Result<Vec<InboundMessage>, MessengerError> {
         let msgs: Vec<_> = self.inbound.drain(..).collect();
         Ok(msgs)
     }
 }
 
 impl Default for RecordingMessenger {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -289,7 +316,11 @@ impl MessageSink for FailingMessenger {
 }
 
 impl MessageSource for FailingMessenger {
-    fn poll(&mut self, _since: i64, _timeout_sec: u32) -> Result<Vec<InboundMessage>, MessengerError> {
+    fn poll(
+        &mut self,
+        _since: i64,
+        _timeout_sec: u32,
+    ) -> Result<Vec<InboundMessage>, MessengerError> {
         Ok(vec![])
     }
 }

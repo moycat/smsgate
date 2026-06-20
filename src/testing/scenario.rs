@@ -1,10 +1,10 @@
 //! Declarative Scenario DSL for end-to-end tests.
 
-use crate::testing::mocks::{RecordingMessenger, ScriptedModem};
 use crate::bridge::{forwarder::forward_sms, reply_router::ReplyRouter};
 use crate::log_ring::LogRing;
 use crate::persist::mem::MemStore;
 use crate::sms::{codec::parse_sms_pdu, SmsMessage};
+use crate::testing::mocks::{RecordingMessenger, ScriptedModem};
 
 /// Assertion to check after the scenario runs.
 enum Assertion {
@@ -51,7 +51,8 @@ impl Scenario {
 
     /// Assert at least one sent IM message contains `substr`.
     pub fn expect_im_sent_contains(mut self, substr: &str) -> Self {
-        self.assertions.push(Assertion::ImSentContains(substr.to_string()));
+        self.assertions
+            .push(Assertion::ImSentContains(substr.to_string()));
         self
     }
 
@@ -94,7 +95,13 @@ impl Scenario {
                 timestamp: pdu.timestamp,
                 slot: 0,
             };
-            forward_sms(&sms, &mut self.messenger, &mut router, &mut log, &mut self.store);
+            forward_sms(
+                &sms,
+                &mut self.messenger,
+                &mut router,
+                &mut log,
+                &mut self.store,
+            );
         }
 
         // Check assertions
@@ -104,30 +111,43 @@ impl Scenario {
                     assert!(
                         self.messenger.contains_sent(s),
                         "[{}] expected IM message containing {:?}, sent messages: {:?}",
-                        self.name, s,
-                        self.messenger.sent.iter().map(|m| &m.text).collect::<Vec<_>>()
+                        self.name,
+                        s,
+                        self.messenger
+                            .sent
+                            .iter()
+                            .map(|m| &m.text)
+                            .collect::<Vec<_>>()
                     );
                 }
                 Assertion::ImSentCount(n) => {
                     assert_eq!(
-                        self.messenger.sent_count(), *n,
+                        self.messenger.sent_count(),
+                        *n,
                         "[{}] expected {} IM messages, got {}",
-                        self.name, n, self.messenger.sent_count()
+                        self.name,
+                        n,
+                        self.messenger.sent_count()
                     );
                 }
                 Assertion::ImSentNone => {
                     assert_eq!(
-                        self.messenger.sent_count(), 0,
+                        self.messenger.sent_count(),
+                        0,
                         "[{}] expected no IM messages, got {} (first: {:?})",
-                        self.name, self.messenger.sent_count(),
+                        self.name,
+                        self.messenger.sent_count(),
                         self.messenger.last_sent()
                     );
                 }
                 Assertion::PdusSentCount(n) => {
                     assert_eq!(
-                        self.modem.sent_pdus.len(), *n,
+                        self.modem.sent_pdus.len(),
+                        *n,
                         "[{}] expected {} PDUs sent, got {}",
-                        self.name, n, self.modem.sent_pdus.len()
+                        self.name,
+                        n,
+                        self.modem.sent_pdus.len()
                     );
                 }
                 Assertion::HangUpCount(n) => {

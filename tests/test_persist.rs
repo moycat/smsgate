@@ -1,8 +1,6 @@
 //! Persistence layer tests — helpers and MemStore.
 
-use smsgate::persist::{
-    keys, load_bool, load_i64, mem::MemStore, save_bool, save_i64, Store,
-};
+use smsgate::persist::{keys, load_bool, load_i64, mem::MemStore, save_bool, save_i64, Store};
 
 #[test]
 fn save_and_load_i64_roundtrip() {

@@ -64,7 +64,7 @@ pub enum CmdSendResult {
 #[derive(Debug)]
 pub enum DrainOutcome {
     Idle,
-    Sent    { phone: String },
+    Sent { phone: String },
     Retrying,
     Dropped { phone: String },
     BadPdu,
@@ -72,7 +72,9 @@ pub enum DrainOutcome {
 
 impl DrainOutcome {
     /// Returns true if an attempt was made (i.e. not `Idle`).
-    pub fn attempted(&self) -> bool { !matches!(self, DrainOutcome::Idle) }
+    pub fn attempted(&self) -> bool {
+        !matches!(self, DrainOutcome::Idle)
+    }
 }
 
 /// Outbound SMS queue with retry.
@@ -102,14 +104,23 @@ impl SmsSender {
             return None;
         }
         // Dedup: if same phone+body already queued, skip
-        if self.entries.iter().any(|e| e.phone == phone && e.body == body) {
+        if self
+            .entries
+            .iter()
+            .any(|e| e.phone == phone && e.body == body)
+        {
             log::info!("[sender] duplicate suppressed for {}", phone);
             return None;
         }
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
         self.entries.push(QueueEntry {
-            id, phone, body, attempts: 0, next_attempt: None, enqueued_at: Instant::now(),
+            id,
+            phone,
+            body,
+            attempts: 0,
+            next_attempt: None,
+            enqueued_at: Instant::now(),
         });
         Some(id)
     }
@@ -121,7 +132,8 @@ impl SmsSender {
     /// commands use this path.
     pub fn enqueue_command_send(&mut self, phone: String, body: String) -> CmdSendResult {
         let now = Instant::now();
-        let window_expired = self.cmd_window_start
+        let window_expired = self
+            .cmd_window_start
             .map(|s| now.duration_since(s) >= Duration::from_secs(CMD_SEND_WINDOW_SECS))
             .unwrap_or(true);
         if window_expired {
@@ -131,7 +143,9 @@ impl SmsSender {
         if self.cmd_window_count >= CMD_SEND_LIMIT {
             log::warn!(
                 "[sender] /send rate limit: {}/{} in {}s window",
-                self.cmd_window_count, CMD_SEND_LIMIT, CMD_SEND_WINDOW_SECS
+                self.cmd_window_count,
+                CMD_SEND_LIMIT,
+                CMD_SEND_WINDOW_SECS
             );
             return CmdSendResult::RateLimited;
         }
@@ -155,7 +169,12 @@ impl SmsSender {
         let phone = entry.phone.clone();
         let body = entry.body.clone();
 
-        log::info!("[sender] attempt {} for {} ({}..)", attempt, phone, &body[..body.len().min(20)]);
+        log::info!(
+            "[sender] attempt {} for {} ({}..)",
+            attempt,
+            phone,
+            &body[..body.len().min(20)]
+        );
 
         let pdus = build_sms_submit_pdus(&phone, &body, super::MAX_SMS_PARTS, false);
         if pdus.is_empty() {
@@ -186,7 +205,10 @@ impl SmsSender {
             self.entries.remove(idx);
             DrainOutcome::Dropped { phone }
         } else {
-            let delay = RETRY_DELAYS.get(attempt - 1).copied().unwrap_or(RETRY_DELAYS[2]);
+            let delay = RETRY_DELAYS
+                .get(attempt - 1)
+                .copied()
+                .unwrap_or(RETRY_DELAYS[2]);
             self.entries[idx].next_attempt = Some(Instant::now() + delay);
             DrainOutcome::Retrying
         }
@@ -211,19 +233,28 @@ impl SmsSender {
 
     /// Returns a snapshot of all queued entries.
     pub fn snapshot(&self) -> Vec<QueueSnapshot> {
-        self.entries.iter().map(|e| QueueSnapshot {
-            id: e.id,
-            phone: e.phone.clone(),
-            body_preview: e.body.chars().take(30).collect(),
-            attempts: e.attempts,
-            age_secs: e.enqueued_at.elapsed().as_secs(),
-        }).collect()
+        self.entries
+            .iter()
+            .map(|e| QueueSnapshot {
+                id: e.id,
+                phone: e.phone.clone(),
+                body_preview: e.body.chars().take(30).collect(),
+                attempts: e.attempts,
+                age_secs: e.enqueued_at.elapsed().as_secs(),
+            })
+            .collect()
     }
 
-    pub fn len(&self) -> usize { self.entries.len() }
-    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 impl Default for SmsSender {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

@@ -3,7 +3,12 @@
 use smsgate::log_ring::{LogEntry, LogRing};
 
 fn entry(sender: &str) -> LogEntry {
-    LogEntry { sender: sender.to_string(), body_preview: "body".to_string(), timestamp: "ts".to_string(), forwarded: true }
+    LogEntry {
+        sender: sender.to_string(),
+        body_preview: "body".to_string(),
+        timestamp: "ts".to_string(),
+        forwarded: true,
+    }
 }
 
 #[test]
@@ -49,7 +54,7 @@ fn ring_evicts_oldest_when_full() {
         r.push(entry(&i.to_string()));
     }
     assert_eq!(r.len(), 50); // capacity is 50
-    // Oldest (0) evicted; newest (50) is present
+                             // Oldest (0) evicted; newest (50) is present
     let entries = r.last_n(50);
     assert_eq!(entries[0].sender, "1");
     assert_eq!(entries[49].sender, "50");

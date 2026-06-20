@@ -46,10 +46,12 @@ pub fn parse_urc(line: &str) -> Urc {
     if let Some(rest) = line.strip_prefix("+CMTI:") {
         let rest = rest.trim_start();
         let mut parts = rest.splitn(2, ',');
-        let mem = parts.next()
+        let mem = parts
+            .next()
             .map(|s| s.trim().trim_matches('"').to_string())
             .unwrap_or_else(|| "SM".to_string());
-        let idx: u16 = parts.next()
+        let idx: u16 = parts
+            .next()
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(0);
         return Urc::NewSms { mem, index: idx };
@@ -62,8 +64,8 @@ pub fn parse_urc(line: &str) -> Urc {
     }
     if let Some(rest) = line.strip_prefix("+CLIP:") {
         let rest = rest.trim_start();
-        let number = crate::sms::codec::parse_clip_line(&format!("+CLIP: {}", rest))
-            .unwrap_or_default();
+        let number =
+            crate::sms::codec::parse_clip_line(&format!("+CLIP: {}", rest)).unwrap_or_default();
         return Urc::Clip(number);
     }
     if line.starts_with("+CDS:") || line.starts_with("+CDSI:") {

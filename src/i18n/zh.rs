@@ -45,16 +45,32 @@ pub fn incoming_call(display: &str) -> String {
 
 // ── /status ──────────────────────────────────────────────────────────────────
 
-pub fn status_op_unknown() -> &'static str { "未知" }
-pub fn status_reg_ok()     -> &'static str { "已注册" }
-pub fn status_reg_no()     -> &'static str { "未注册" }
-pub fn status_fwd_on()     -> &'static str { "已启用" }
-pub fn status_fwd_off()    -> &'static str { "已暂停" }
-pub fn status_build(commit: &str) -> String { format!("🔖 版本：{}", commit) }
+pub fn status_op_unknown() -> &'static str {
+    "未知"
+}
+pub fn status_reg_ok() -> &'static str {
+    "已注册"
+}
+pub fn status_reg_no() -> &'static str {
+    "未注册"
+}
+pub fn status_fwd_on() -> &'static str {
+    "已启用"
+}
+pub fn status_fwd_off() -> &'static str {
+    "已暂停"
+}
+pub fn status_build(commit: &str) -> String {
+    format!("🔖 版本：{}", commit)
+}
 
+#[allow(clippy::too_many_arguments)]
 pub fn format_status(
-    h: u32, m: u32, s: u32,
-    signal: &str, operator: &str,
+    h: u32,
+    m: u32,
+    s: u32,
+    signal: &str,
+    operator: &str,
     registered: bool,
     free_heap_kb: u32,
     queue_n: usize,
@@ -64,8 +80,16 @@ pub fn format_status(
     last_sms: Option<(&str, &str)>,
     wifi_info: &str,
 ) -> String {
-    let reg = if registered { status_reg_ok() } else { status_reg_no() };
-    let fwd = if fwd_on { status_fwd_on() } else { status_fwd_off() };
+    let reg = if registered {
+        status_reg_ok()
+    } else {
+        status_reg_no()
+    };
+    let fwd = if fwd_on {
+        status_fwd_on()
+    } else {
+        status_fwd_off()
+    };
     let wifi_line = if wifi_info.is_empty() {
         String::new()
     } else {
@@ -90,9 +114,12 @@ pub fn format_status(
          📋 日志：{} 条\n\
          🔄 转发：{}\n\
          {}",
-        h, m, s,
+        h,
+        m,
+        s,
         wifi_line,
-        signal, operator,
+        signal,
+        operator,
         reg,
         heap_line,
         queue_n,
@@ -105,10 +132,18 @@ pub fn format_status(
 
 // ── /send ────────────────────────────────────────────────────────────────────
 
-pub fn send_usage()          -> &'static str { "用法：/send <号码> <消息内容>" }
-pub fn send_invalid_number() -> &'static str { "无效号码" }
-pub fn send_empty_body()     -> &'static str { "消息内容为空" }
-pub fn send_too_long()       -> &'static str { "消息过长（超过 10 条短信）" }
+pub fn send_usage() -> &'static str {
+    "用法：/send <号码> <消息内容>"
+}
+pub fn send_invalid_number() -> &'static str {
+    "无效号码"
+}
+pub fn send_empty_body() -> &'static str {
+    "消息内容为空"
+}
+pub fn send_too_long() -> &'static str {
+    "消息过长（超过 10 条短信）"
+}
 
 pub fn send_queued(phone: &str, preview: &str, parts: usize) -> String {
     format!("已入队：{} → \"{}…\"（{} 条）", phone, preview, parts)
@@ -119,36 +154,76 @@ pub fn send_rate_limited() -> &'static str {
 
 // ── /log ─────────────────────────────────────────────────────────────────────
 
-pub fn log_empty()          -> &'static str { "暂无短信记录。" }
-pub fn log_header(n: usize) -> String       { format!("最近 {} 条短信：\n", n) }
+pub fn log_empty() -> &'static str {
+    "暂无短信记录。"
+}
+pub fn log_header(n: usize) -> String {
+    format!("最近 {} 条短信：\n", n)
+}
 
 // ── /block + /unblock ────────────────────────────────────────────────────────
 
-pub fn block_usage()   -> &'static str { "用法：/block <号码>" }
-pub fn block_ok(phone: &str) -> String { format!("已屏蔽：{}", phone) }
+pub fn block_usage() -> &'static str {
+    "用法：/block <号码>"
+}
+pub fn block_ok(phone: &str) -> String {
+    format!("已屏蔽：{}", phone)
+}
 
-pub fn unblock_usage()                -> &'static str { "用法：/unblock <号码>" }
-pub fn unblock_not_found(phone: &str) -> String       { format!("{} 不在屏蔽名单中。", phone) }
-pub fn unblock_ok(phone: &str)        -> String       { format!("已解除屏蔽：{}", phone) }
+pub fn unblock_usage() -> &'static str {
+    "用法：/unblock <号码>"
+}
+pub fn unblock_not_found(phone: &str) -> String {
+    format!("{} 不在屏蔽名单中。", phone)
+}
+pub fn unblock_ok(phone: &str) -> String {
+    format!("已解除屏蔽：{}", phone)
+}
 
 // ── /pause + /resume ─────────────────────────────────────────────────────────
 
-pub fn pause_ok(mins: u32)     -> String       { format!("转发已暂停 {} 分钟。", mins) }
-pub fn resume_already_active() -> &'static str { "转发已处于启用状态。" }
-pub fn resume_ok()             -> &'static str { "转发已恢复。" }
+pub fn pause_ok(mins: u32) -> String {
+    format!("转发已暂停 {} 分钟。", mins)
+}
+pub fn resume_already_active() -> &'static str {
+    "转发已处于启用状态。"
+}
+pub fn resume_ok() -> &'static str {
+    "转发已恢复。"
+}
 
 // ── /restart ─────────────────────────────────────────────────────────────────
 
-pub fn restart_ok() -> &'static str { "正在重启…" }
+pub fn restart_ok() -> &'static str {
+    "正在重启…"
+}
 
 // ── 命令描述（Telegram 自动补全）────────────────────────────────────────────
 
-pub fn desc_help()    -> &'static str { "显示帮助" }
-pub fn desc_status()  -> &'static str { "设备状态" }
-pub fn desc_send()    -> &'static str { "发送短信：/send <号码> <内容>" }
-pub fn desc_log()     -> &'static str { "最近 N 条转发记录（默认 10）" }
-pub fn desc_block()   -> &'static str { "屏蔽号码" }
-pub fn desc_unblock() -> &'static str { "解除屏蔽" }
-pub fn desc_pause()   -> &'static str { "暂停转发（默认 60 分钟）" }
-pub fn desc_resume()  -> &'static str { "恢复转发" }
-pub fn desc_restart() -> &'static str { "重启设备" }
+pub fn desc_help() -> &'static str {
+    "显示帮助"
+}
+pub fn desc_status() -> &'static str {
+    "设备状态"
+}
+pub fn desc_send() -> &'static str {
+    "发送短信：/send <号码> <内容>"
+}
+pub fn desc_log() -> &'static str {
+    "最近 N 条转发记录（默认 10）"
+}
+pub fn desc_block() -> &'static str {
+    "屏蔽号码"
+}
+pub fn desc_unblock() -> &'static str {
+    "解除屏蔽"
+}
+pub fn desc_pause() -> &'static str {
+    "暂停转发（默认 60 分钟）"
+}
+pub fn desc_resume() -> &'static str {
+    "恢复转发"
+}
+pub fn desc_restart() -> &'static str {
+    "重启设备"
+}

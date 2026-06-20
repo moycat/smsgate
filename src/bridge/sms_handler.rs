@@ -13,6 +13,7 @@ use crate::sms::{codec::parse_sms_pdu, concat::ConcatReassembler, SmsMessage};
 ///
 /// Returns `true` if the modem slot was deleted (forwarded OK or unparseable),
 /// `false` if forwarding failed and the slot should be retried on next boot.
+#[allow(clippy::too_many_arguments)]
 pub fn handle_new_sms(
     mem: &str,
     index: u16,
@@ -31,12 +32,17 @@ pub fn handle_new_sms(
     let pdu_hex = match &r {
         Ok(resp) if resp.ok => {
             log::info!("[sms_handler] AT+CMGR={} body: {:?}", index, resp.body);
-            resp.body.lines()
+            resp.body
+                .lines()
                 .find(|l| !l.starts_with("+CMGR:") && !l.is_empty())
                 .map(|s| s.trim().to_string())
         }
         Ok(resp) => {
-            log::warn!("[sms_handler] AT+CMGR={} error: {}", index, resp.body.trim());
+            log::warn!(
+                "[sms_handler] AT+CMGR={} error: {}",
+                index,
+                resp.body.trim()
+            );
             None
         }
         Err(e) => {
@@ -46,7 +52,11 @@ pub fn handle_new_sms(
     };
 
     let Some(hex) = pdu_hex else {
-        log::warn!("[sms_handler] could not read SMS at mem={} slot={}", mem, index);
+        log::warn!(
+            "[sms_handler] could not read SMS at mem={} slot={}",
+            mem,
+            index
+        );
         return false;
     };
 
@@ -54,7 +64,11 @@ pub fn handle_new_sms(
     if delete {
         let _ = modem.send_at(&format!("+CMGD={}", index));
     } else {
-        log::warn!("[sms_handler] forward failed — SMS stays at mem={} slot={}", mem, index);
+        log::warn!(
+            "[sms_handler] forward failed — SMS stays at mem={} slot={}",
+            mem,
+            index
+        );
     }
     delete
 }
@@ -78,17 +92,28 @@ pub fn sweep_one_storage(
         }
     };
     if !resp.ok {
-        log::warn!("[sms_handler] sweep {} AT+CMGL=4 error: {}", mem, resp.body.trim());
+        log::warn!(
+            "[sms_handler] sweep {} AT+CMGL=4 error: {}",
+            mem,
+            resp.body.trim()
+        );
         return;
     }
-    log::info!("[sms_handler] sweep {} AT+CMGL=4 body: {:?}", mem, resp.body);
+    log::info!(
+        "[sms_handler] sweep {} AT+CMGL=4 body: {:?}",
+        mem,
+        resp.body
+    );
 
     let body = resp.body.clone();
     let mut lines = body.lines().peekable();
     while let Some(line) = lines.next() {
         if let Some(rest) = line.strip_prefix("+CMGL: ") {
-            let slot: u16 = rest.split(',').next()
-                .and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+            let slot: u16 = rest
+                .split(',')
+                .next()
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0);
             if let Some(hex) = lines.next() {
                 let hex = hex.trim();
                 log::info!("[sms_handler] sweep found SMS in {} slot {}", mem, slot);
@@ -96,7 +121,11 @@ pub fn sweep_one_storage(
                 if delete {
                     let _ = modem.send_at(&format!("+CMGD={}", slot));
                 } else {
-                    log::warn!("[sms_handler] sweep forward failed — SMS stays at {} slot {}", mem, slot);
+                    log::warn!(
+                        "[sms_handler] sweep forward failed — SMS stays at {} slot {}",
+                        mem,
+                        slot
+                    );
                 }
             }
         }

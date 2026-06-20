@@ -141,7 +141,9 @@ fn send_at_connect_payload_ok() {
     uart.queue_response_line("+QHTTPPOST: 0,200,52");
     uart.queue_response_line("OK");
     let mut p = port(uart);
-    let r = p.send_at_connect_payload("+QHTTPPOST=52,60,60", "{\"test\":1}").unwrap();
+    let r = p
+        .send_at_connect_payload("+QHTTPPOST=52,60,60", "{\"test\":1}")
+        .unwrap();
     assert!(r.ok);
     let sent = p.inner().sent_str();
     assert!(sent.contains("{\"test\":1}"));
@@ -152,7 +154,9 @@ fn send_at_connect_payload_error_before_connect() {
     let mut uart = MockUart::new();
     uart.queue_response_line("ERROR");
     let mut p = port(uart);
-    let r = p.send_at_connect_payload("+QHTTPPOST=52,60,60", "body").unwrap();
+    let r = p
+        .send_at_connect_payload("+QHTTPPOST=52,60,60", "body")
+        .unwrap();
     assert!(!r.ok);
 }
 
@@ -184,6 +188,12 @@ fn urc_buf_capped() {
     let mut p = port(uart);
     let _r = p.send_at("+TEST").unwrap();
     let mut count = 0usize;
-    while p.poll_urc().is_some() { count += 1; }
-    assert!(count <= 32, "expected at most 32 buffered URCs, got {}", count);
+    while p.poll_urc().is_some() {
+        count += 1;
+    }
+    assert!(
+        count <= 32,
+        "expected at most 32 buffered URCs, got {}",
+        count
+    );
 }

@@ -1,7 +1,7 @@
 //! PDU codec tests — ported from C++ test_sms_pdu.cpp, test_sms_pdu_encode.cpp, test_sms_codec.cpp
 
-use smsgate::testing::pdu;
 use smsgate::sms::codec::*;
+use smsgate::testing::pdu;
 
 // ---------------------------------------------------------------------------
 // Phone number helpers
@@ -266,7 +266,7 @@ fn encode_single_ucs2() {
     // Verify DCS byte is 0x08 (UCS-2)
     let hex_bytes: Vec<u8> = (0..pdus[0].hex.len())
         .step_by(2)
-        .map(|i| u8::from_str_radix(&pdus[0].hex[i..i+2], 16).unwrap())
+        .map(|i| u8::from_str_radix(&pdus[0].hex[i..i + 2], 16).unwrap())
         .collect();
     // SCA(1 byte 00) + first_octet + MR + OA(phone) + PID + DCS
     // DCS is at offset 1 + 1 + 1 + (OA bytes) + 1
@@ -463,7 +463,11 @@ fn pdu_timestamp_unix_utc8_offset() {
     // TZ token "+32" = +32 * 15 min = +480 min = +8h
     let ts = "24/01/01,08:00:00+32";
     let unix = pdu_timestamp_to_unix(ts);
-    assert_eq!(unix, 1704067200, "UTC+8 should equal UTC epoch, got {}", unix);
+    assert_eq!(
+        unix, 1704067200,
+        "UTC+8 should equal UTC epoch, got {}",
+        unix
+    );
 }
 
 #[test]
@@ -496,8 +500,10 @@ fn unpack_from_packed(data: &[u8], n_septets: usize, offset: usize) -> Vec<u8> {
         let bit = offset + i * 7;
         let byte = bit / 8;
         let shift = bit % 8;
-        if byte >= data.len() { break; }
-        let v = data[byte] as u16 | data.get(byte + 1).copied().unwrap_or(0) as u16 * 256;
+        if byte >= data.len() {
+            break;
+        }
+        let v = data[byte] as u16 | (data.get(byte + 1).copied().unwrap_or(0) as u16 * 256);
         out.push(((v >> shift) & 0x7F) as u8);
     }
     out

@@ -16,6 +16,7 @@ use crate::sms::sender::{CmdSendResult, SmsSender};
 ///
 /// Polling is handled by a dedicated background thread; this function only processes
 /// messages that have already been received. Cursor persistence is the caller's responsibility.
+#[allow(clippy::too_many_arguments)]
 pub fn poll_and_dispatch(
     messages: &[InboundMessage],
     messenger: &mut dyn MessageSink,

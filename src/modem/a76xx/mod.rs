@@ -8,11 +8,11 @@ pub mod qhttp;
 pub mod sms;
 
 #[cfg(feature = "esp32")]
-use std::time::Duration;
-#[cfg(feature = "esp32")]
-use super::{AtResponse, AtTransport, ModemError, ModemPort, creg_registered};
+use super::{creg_registered, AtResponse, AtTransport, ModemError, ModemPort};
 #[cfg(feature = "esp32")]
 use at::HardwareAtPort as AtPort;
+#[cfg(feature = "esp32")]
+use std::time::Duration;
 
 /// A76xx modem driver (A7670, A7608, A7672, etc.).
 #[cfg(feature = "esp32")]
@@ -74,7 +74,9 @@ impl A76xxModem {
                 Err(e) => log::warn!("[a76xx] CNMI timeout: {} — retrying", e),
             }
             if std::time::Instant::now() > cnmi_deadline {
-                log::error!("[a76xx] CNMI never accepted after 30 s — SMS notifications may not work");
+                log::error!(
+                    "[a76xx] CNMI never accepted after 30 s — SMS notifications may not work"
+                );
                 break;
             }
             std::thread::sleep(std::time::Duration::from_secs(2));
@@ -83,16 +85,16 @@ impl A76xxModem {
         // Verify CNMI setting was accepted
         match self.send_at("+CNMI?") {
             Ok(r) if r.ok => log::info!("[a76xx] CNMI: {}", r.body.trim()),
-            Ok(r)         => log::warn!("[a76xx] CNMI? error: {}", r.body.trim()),
-            Err(_)        => log::warn!("[a76xx] CNMI? timed out"),
+            Ok(r) => log::warn!("[a76xx] CNMI? error: {}", r.body.trim()),
+            Err(_) => log::warn!("[a76xx] CNMI? timed out"),
         }
 
         // Query active storage for diagnostics. Non-fatal; some SIM/modem combos
         // return +CMS ERROR here if SMS management isn't supported.
         match self.send_at("+CPMS?") {
-            Ok(r) if r.ok  => log::info!("[a76xx] CPMS: {}", r.body.trim()),
-            Ok(r)          => log::debug!("[a76xx] CPMS? not supported: {}", r.body.trim()),
-            Err(_)         => log::debug!("[a76xx] CPMS? timed out"),
+            Ok(r) if r.ok => log::info!("[a76xx] CPMS: {}", r.body.trim()),
+            Ok(r) => log::debug!("[a76xx] CPMS? not supported: {}", r.body.trim()),
+            Err(_) => log::debug!("[a76xx] CPMS? timed out"),
         }
 
         // Wait for network registration (up to 30 s)
@@ -117,8 +119,8 @@ impl A76xxModem {
         if cellular_data {
             match self.send_at("+CGATT=1") {
                 Ok(r) if r.ok => log::info!("[a76xx] cellular data enabled (AT+CGATT=1 OK)"),
-                Ok(r)         => log::warn!("[a76xx] AT+CGATT=1: {}", r.body.trim()),
-                Err(e)        => log::warn!("[a76xx] AT+CGATT=1 failed: {}", e),
+                Ok(r) => log::warn!("[a76xx] AT+CGATT=1: {}", r.body.trim()),
+                Err(e) => log::warn!("[a76xx] AT+CGATT=1 failed: {}", e),
             }
         }
         Ok(())

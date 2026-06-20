@@ -7,18 +7,31 @@ pub struct PauseCommand;
 pub struct ResumeCommand;
 
 impl Command for PauseCommand {
-    fn name(&self) -> &'static str { "pause" }
-    fn description(&self) -> &'static str { crate::i18n::desc_pause() }
+    fn name(&self) -> &'static str {
+        "pause"
+    }
+    fn description(&self) -> &'static str {
+        crate::i18n::desc_pause()
+    }
 
     fn handle(&self, args: &str, _ctx: &CommandContext) -> String {
         let mins: u32 = args.trim().parse().unwrap_or(60);
-        format!("{}{}  \n{}", PAUSE_SENTINEL, mins, crate::i18n::pause_ok(mins))
+        format!(
+            "{}{}  \n{}",
+            PAUSE_SENTINEL,
+            mins,
+            crate::i18n::pause_ok(mins)
+        )
     }
 }
 
 impl Command for ResumeCommand {
-    fn name(&self) -> &'static str { "resume" }
-    fn description(&self) -> &'static str { crate::i18n::desc_resume() }
+    fn name(&self) -> &'static str {
+        "resume"
+    }
+    fn description(&self) -> &'static str {
+        crate::i18n::desc_resume()
+    }
 
     fn handle(&self, _args: &str, ctx: &CommandContext) -> String {
         if load_bool(ctx.store, keys::FWD_ENABLED).unwrap_or(true) {

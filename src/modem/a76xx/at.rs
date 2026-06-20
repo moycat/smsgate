@@ -32,12 +32,17 @@ pub struct AtPort<U: UartPort> {
 
 impl<U: UartPort> AtPort<U> {
     pub fn new(uart: U) -> Self {
-        AtPort { uart, urc_buf: std::collections::VecDeque::new() }
+        AtPort {
+            uart,
+            urc_buf: std::collections::VecDeque::new(),
+        }
     }
 
     /// Access the underlying UART (useful in tests to inspect sent bytes).
     #[cfg(feature = "testing")]
-    pub fn inner(&self) -> &U { &self.uart }
+    pub fn inner(&self) -> &U {
+        &self.uart
+    }
 
     /// Send "AT<cmd>\r" and collect lines until OK/ERROR/timeout.
     pub fn send_at(&mut self, cmd: &str) -> Result<AtResponse, ModemError> {
@@ -51,7 +56,10 @@ impl<U: UartPort> AtPort<U> {
         if let Some(err) = self.collect_until_ok(deadline, &mut body_lines)? {
             return Ok(err);
         }
-        Ok(AtResponse { body: body_lines.join("\n"), ok: true })
+        Ok(AtResponse {
+            body: body_lines.join("\n"),
+            ok: true,
+        })
     }
 
     /// Non-blocking: drain one URC line if available.
@@ -61,7 +69,9 @@ impl<U: UartPort> AtPort<U> {
         }
         let line = self.read_line(Duration::from_millis(10))?;
         let line = line.trim().to_string();
-        if line.is_empty() { return None; }
+        if line.is_empty() {
+            return None;
+        }
         Some(line)
     }
 
@@ -92,17 +102,24 @@ impl<U: UartPort> AtPort<U> {
             if Instant::now() > deadline {
                 return Err(ModemError::Timeout);
             }
-            match self.read_line(READLINE_TIMEOUT) {
-                Some(line) => {
-                    let line = line.trim().to_string();
-                    if line.is_empty() { continue; }
-                    if line == "OK" { return Ok(None); }
-                    if line.starts_with("ERROR") || line.starts_with("+CME ERROR") || line.starts_with("+CMS ERROR") {
-                        return Ok(Some(AtResponse { body: line, ok: false }));
-                    }
-                    self.buffer_line(line, body_lines);
+            if let Some(line) = self.read_line(READLINE_TIMEOUT) {
+                let line = line.trim().to_string();
+                if line.is_empty() {
+                    continue;
                 }
-                None => {}
+                if line == "OK" {
+                    return Ok(None);
+                }
+                if line.starts_with("ERROR")
+                    || line.starts_with("+CME ERROR")
+                    || line.starts_with("+CMS ERROR")
+                {
+                    return Ok(Some(AtResponse {
+                        body: line,
+                        ok: false,
+                    }));
+                }
+                self.buffer_line(line, body_lines);
             }
         }
     }
@@ -112,10 +129,14 @@ impl<U: UartPort> AtPort<U> {
         let mut line = String::new();
         loop {
             if Instant::now() > deadline {
-                if !line.is_empty() { return Some(line); }
+                if !line.is_empty() {
+                    return Some(line);
+                }
                 return None;
             }
-            let Some(c) = self.uart.read_byte(UART_READ_TICKS) else { continue; };
+            let Some(c) = self.uart.read_byte(UART_READ_TICKS) else {
+                continue;
+            };
             if c == b'\n' {
                 return Some(line);
             }
@@ -162,37 +183,51 @@ impl<U: UartPort> AtPort<U> {
             if Instant::now() > deadline {
                 return Err(ModemError::Timeout);
             }
-            match self.read_line(READLINE_TIMEOUT) {
-                Some(line) => {
-                    let line = line.trim().to_string();
-                    if line.is_empty() { continue; }
-                    if line.contains("CONNECT") { break; }
-                    if line == "OK" || line.starts_with("ERROR") || line.starts_with("+CME ERROR") {
-                        return Ok(AtResponse { body: line.clone(), ok: line == "OK" });
-                    }
-                    self.buffer_line(line, &mut body_lines);
+            if let Some(line) = self.read_line(READLINE_TIMEOUT) {
+                let line = line.trim().to_string();
+                if line.is_empty() {
+                    continue;
                 }
-                None => {}
+                if line.contains("CONNECT") {
+                    break;
+                }
+                if line == "OK" || line.starts_with("ERROR") || line.starts_with("+CME ERROR") {
+                    return Ok(AtResponse {
+                        body: line.clone(),
+                        ok: line == "OK",
+                    });
+                }
+                self.buffer_line(line, &mut body_lines);
             }
         }
 
-        let pl = format!("{}\r\n", payload.trim_end_matches('\r').trim_end_matches('\n'));
+        let pl = format!(
+            "{}\r\n",
+            payload.trim_end_matches('\r').trim_end_matches('\n')
+        );
         self.uart.write_all(pl.as_bytes())?;
 
         body_lines.clear();
         if let Some(err) = self.collect_until_ok(deadline, &mut body_lines)? {
             return Ok(err);
         }
-        Ok(AtResponse { body: body_lines.join("\n"), ok: true })
+        Ok(AtResponse {
+            body: body_lines.join("\n"),
+            ok: true,
+        })
     }
 
     /// Read until `prompt` byte or timeout (used for AT+CMGS '>' prompt).
     pub fn wait_for_prompt(&mut self, prompt: u8, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
-            if Instant::now() > deadline { return false; }
+            if Instant::now() > deadline {
+                return false;
+            }
             if let Some(b) = self.uart.read_byte(UART_READ_TICKS) {
-                if b == prompt { return true; }
+                if b == prompt {
+                    return true;
+                }
             }
         }
     }

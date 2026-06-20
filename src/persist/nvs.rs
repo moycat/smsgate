@@ -25,12 +25,14 @@ impl Store for NvsStore {
     }
 
     fn save(&mut self, key: &str, data: &[u8]) -> Result<(), StoreError> {
-        self.nvs.set_blob(key, data)
+        self.nvs
+            .set_blob(key, data)
             .map_err(|e| StoreError::Nvs(e.to_string()))
     }
 
     fn delete(&mut self, key: &str) -> Result<(), StoreError> {
-        self.nvs.remove(key)
+        self.nvs
+            .remove(key)
             .map(|_| ())
             .map_err(|e| StoreError::Nvs(e.to_string()))
     }
@@ -42,7 +44,8 @@ impl Store for NvsStore {
             super::keys::BLOCK_LIST,
             super::keys::FWD_ENABLED,
         ] {
-            self.nvs.remove(key)
+            self.nvs
+                .remove(key)
                 .map(|_| ())
                 .map_err(|e| StoreError::Nvs(e.to_string()))?;
         }

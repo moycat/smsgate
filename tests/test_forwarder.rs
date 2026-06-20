@@ -28,7 +28,10 @@ fn forward_sms_sends_to_im() {
 
     assert!(result.is_some());
     assert_eq!(messenger.sent_count(), 1);
-    assert!(messenger.contains_sent("+86 138-0013-8000"), "should include formatted phone");
+    assert!(
+        messenger.contains_sent("+86 138-0013-8000"),
+        "should include formatted phone"
+    );
     assert!(messenger.contains_sent("Hello test"));
 }
 
@@ -39,7 +42,13 @@ fn forward_updates_log_ring() {
     let mut router = ReplyRouter::new();
     let mut log = LogRing::new();
 
-    forward_sms(&make_sms("123", "hi"), &mut messenger, &mut router, &mut log, &mut store);
+    forward_sms(
+        &make_sms("123", "hi"),
+        &mut messenger,
+        &mut router,
+        &mut log,
+        &mut store,
+    );
 
     assert_eq!(log.len(), 1);
     let entry = log.last_n(1)[0];
@@ -57,7 +66,11 @@ fn blocked_number_not_forwarded() {
     let mut log = LogRing::new();
 
     let result = forward_sms(
-        &make_sms("10086", "spam"), &mut messenger, &mut router, &mut log, &mut store,
+        &make_sms("10086", "spam"),
+        &mut messenger,
+        &mut router,
+        &mut log,
+        &mut store,
     );
 
     assert!(result.is_none());
@@ -77,7 +90,11 @@ fn forwarding_paused_drops_message() {
     let mut log = LogRing::new();
 
     let result = forward_sms(
-        &make_sms("+1234567890", "test"), &mut messenger, &mut router, &mut log, &mut store,
+        &make_sms("+1234567890", "test"),
+        &mut messenger,
+        &mut router,
+        &mut log,
+        &mut store,
     );
 
     assert!(result.is_none());
@@ -195,10 +212,19 @@ fn forwarding_paused_log_entry_not_forwarded() {
     let mut router = ReplyRouter::new();
     let mut log = LogRing::new();
 
-    forward_sms(&make_sms("+1", "test"), &mut messenger, &mut router, &mut log, &mut store);
+    forward_sms(
+        &make_sms("+1", "test"),
+        &mut messenger,
+        &mut router,
+        &mut log,
+        &mut store,
+    );
 
     assert_eq!(log.len(), 1);
-    assert!(!log.last_n(1)[0].forwarded, "paused message should log as not-forwarded");
+    assert!(
+        !log.last_n(1)[0].forwarded,
+        "paused message should log as not-forwarded"
+    );
 }
 
 #[test]

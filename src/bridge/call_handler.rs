@@ -11,8 +11,14 @@ const COOLDOWN: Duration = Duration::from_secs(6);
 #[derive(Debug, PartialEq)]
 enum State {
     Idle,
-    Ringing { since: Instant, clip_deadline: Instant, number: Option<String> },
-    Cooldown { until: Instant },
+    Ringing {
+        since: Instant,
+        clip_deadline: Instant,
+        number: Option<String>,
+    },
+    Cooldown {
+        until: Instant,
+    },
 }
 
 /// Incoming call handler with auto-hangup and IM notification.
@@ -56,7 +62,11 @@ impl CallHandler {
         sender: &mut SmsSender,
     ) {
         match &self.state {
-            State::Ringing { clip_deadline, number, since: _ } => {
+            State::Ringing {
+                clip_deadline,
+                number,
+                since: _,
+            } => {
                 let deadline = *clip_deadline;
                 let num = number.clone();
                 if Instant::now() >= deadline {
@@ -99,7 +109,11 @@ impl CallHandler {
         sender: &mut SmsSender,
     ) {
         if let State::Ringing { .. } = &mut self.state {
-            let n = if number.is_empty() { None } else { Some(number) };
+            let n = if number.is_empty() {
+                None
+            } else {
+                Some(number)
+            };
             self.commit_call(n, modem, messenger, sender);
         }
     }
@@ -127,10 +141,14 @@ impl CallHandler {
         }
 
         log::info!("[call] call from {} — hung up and notified", display);
-        self.state = State::Cooldown { until: Instant::now() + COOLDOWN };
+        self.state = State::Cooldown {
+            until: Instant::now() + COOLDOWN,
+        };
     }
 }
 
 impl Default for CallHandler {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

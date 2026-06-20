@@ -55,7 +55,10 @@ impl TelegramHttpClient {
              Connection: keep-alive\r\n\
              \r\n\
              {}",
-            path, HOST, body_bytes.len(), json_body
+            path,
+            HOST,
+            body_bytes.len(),
+            json_body
         );
 
         self.tls.write_all(request.as_bytes())?;
@@ -75,18 +78,27 @@ impl TelegramHttpClient {
                 anyhow::bail!("connection closed before headers received");
             }
             response.push_str(&String::from_utf8_lossy(&buf[..n]));
-            if response.contains("\r\n\r\n") { break; }
+            if response.contains("\r\n\r\n") {
+                break;
+            }
         }
 
         // Parse Content-Length
-        let cl: usize = response.lines()
-            .find(|l| l.get(..15).is_some_and(|p| p.eq_ignore_ascii_case("content-length:")))
+        let cl: usize = response
+            .lines()
+            .find(|l| {
+                l.get(..15)
+                    .is_some_and(|p| p.eq_ignore_ascii_case("content-length:"))
+            })
             .and_then(|l| l.splitn(2, ':').nth(1))
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(0);
 
         // Find body start
-        let body_start = response.find("\r\n\r\n").map(|i| i + 4).unwrap_or(response.len());
+        let body_start = response
+            .find("\r\n\r\n")
+            .map(|i| i + 4)
+            .unwrap_or(response.len());
         let mut body = response[body_start..].to_string();
 
         // Read remaining body bytes
@@ -95,7 +107,9 @@ impl TelegramHttpClient {
                 anyhow::bail!("body read timeout");
             }
             let n = self.tls.read(&mut buf)?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             body.push_str(&String::from_utf8_lossy(&buf[..n]));
         }
 

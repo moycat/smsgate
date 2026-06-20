@@ -5,12 +5,15 @@
 
 use super::{Board, BoardError, ModemVariant};
 use crate::config::Config;
-use crate::modem::{ModemPort, a76xx::{at::HardwareAtPort, A76xxModem}};
-use std::sync::{Arc, Mutex};
+use crate::modem::{
+    a76xx::{at::HardwareAtPort, A76xxModem},
+    ModemPort,
+};
 use esp_idf_hal::{
     peripherals::Peripherals,
     uart::{config::Config as UartConfig, UartDriver},
 };
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// LilyGo T-A7670X: BOARD_POWERON_PIN (GPIO12) powers the modem rail.
@@ -21,12 +24,24 @@ const MODEM_RESET_PIN: u8 = 5;
 pub struct TA7670X;
 
 impl Board for TA7670X {
-    fn modem_variant(&self) -> ModemVariant { ModemVariant::A76xx }
-    fn uart_tx_pin(&self) -> u8 { Config::UART_TX }
-    fn uart_rx_pin(&self) -> u8 { Config::UART_RX }
-    fn uart_baud(&self) -> u32 { Config::UART_BAUD }
-    fn pwrkey_pin(&self) -> u8 { Config::PWRKEY_PIN }
-    fn reset_pin(&self) -> Option<u8> { Some(MODEM_RESET_PIN) }
+    fn modem_variant(&self) -> ModemVariant {
+        ModemVariant::A76xx
+    }
+    fn uart_tx_pin(&self) -> u8 {
+        Config::UART_TX
+    }
+    fn uart_rx_pin(&self) -> u8 {
+        Config::UART_RX
+    }
+    fn uart_baud(&self) -> u32 {
+        Config::UART_BAUD
+    }
+    fn pwrkey_pin(&self) -> u8 {
+        Config::PWRKEY_PIN
+    }
+    fn reset_pin(&self) -> Option<u8> {
+        Some(MODEM_RESET_PIN)
+    }
 
     fn init(&self, _peripherals: &mut Peripherals) -> Result<(), BoardError> {
         use esp_idf_hal::gpio::AnyOutputPin;
@@ -36,11 +51,12 @@ impl Board for TA7670X {
         // (LilyGo gpio.h: "The modem power switch must be set to HIGH for the
         //  modem to supply power.")
         let mut poweron = unsafe {
-            esp_idf_hal::gpio::PinDriver::output(
-                AnyOutputPin::steal(BOARD_POWERON_PIN)
-            ).map_err(|e| BoardError::Gpio(e.to_string()))?
+            esp_idf_hal::gpio::PinDriver::output(AnyOutputPin::steal(BOARD_POWERON_PIN))
+                .map_err(|e| BoardError::Gpio(e.to_string()))?
         };
-        poweron.set_high().map_err(|e| BoardError::Gpio(e.to_string()))?;
+        poweron
+            .set_high()
+            .map_err(|e| BoardError::Gpio(e.to_string()))?;
         std::thread::sleep(Duration::from_millis(200)); // let rail stabilise
 
         // On warm reboots (watchdog, panic, /restart command) the ESP32
@@ -50,8 +66,7 @@ impl Board for TA7670X {
         // Only PowerOn and Brownout guarantee the modem is truly off.
         let cold_boot = matches!(
             esp_idf_hal::reset::ResetReason::get(),
-            esp_idf_hal::reset::ResetReason::PowerOn
-            | esp_idf_hal::reset::ResetReason::Brownout
+            esp_idf_hal::reset::ResetReason::PowerOn | esp_idf_hal::reset::ResetReason::Brownout
         );
 
         if cold_boot {
@@ -59,30 +74,40 @@ impl Board for TA7670X {
             // Sequence from LilyGo C++ reference (MODEM_RESET_LEVEL=HIGH for T-A7670X):
             //   LOW for 100 ms → HIGH for 2600 ms → LOW.
             let mut reset_pin = unsafe {
-                esp_idf_hal::gpio::PinDriver::output(
-                    AnyOutputPin::steal(MODEM_RESET_PIN)
-                ).map_err(|e| BoardError::Gpio(e.to_string()))?
+                esp_idf_hal::gpio::PinDriver::output(AnyOutputPin::steal(MODEM_RESET_PIN))
+                    .map_err(|e| BoardError::Gpio(e.to_string()))?
             };
-            reset_pin.set_low().map_err(|e| BoardError::Gpio(e.to_string()))?;
+            reset_pin
+                .set_low()
+                .map_err(|e| BoardError::Gpio(e.to_string()))?;
             std::thread::sleep(Duration::from_millis(100));
-            reset_pin.set_high().map_err(|e| BoardError::Gpio(e.to_string()))?;
+            reset_pin
+                .set_high()
+                .map_err(|e| BoardError::Gpio(e.to_string()))?;
             std::thread::sleep(Duration::from_millis(2600));
-            reset_pin.set_low().map_err(|e| BoardError::Gpio(e.to_string()))?;
+            reset_pin
+                .set_low()
+                .map_err(|e| BoardError::Gpio(e.to_string()))?;
             drop(reset_pin);
 
             // PWRKEY pulse — LOW for 100 ms, HIGH for 1000 ms, back to LOW.
             // A7670G datasheet: minimum PWRKEY HIGH time for power-on is 1000 ms.
             // (100 ms is only enough to power OFF an already-running modem.)
             let mut pwrkey = unsafe {
-                esp_idf_hal::gpio::PinDriver::output(
-                    AnyOutputPin::steal(Config::PWRKEY_PIN)
-                ).map_err(|e| BoardError::Gpio(e.to_string()))?
+                esp_idf_hal::gpio::PinDriver::output(AnyOutputPin::steal(Config::PWRKEY_PIN))
+                    .map_err(|e| BoardError::Gpio(e.to_string()))?
             };
-            pwrkey.set_low().map_err(|e| BoardError::Gpio(e.to_string()))?;
+            pwrkey
+                .set_low()
+                .map_err(|e| BoardError::Gpio(e.to_string()))?;
             std::thread::sleep(Duration::from_millis(100));
-            pwrkey.set_high().map_err(|e| BoardError::Gpio(e.to_string()))?;
+            pwrkey
+                .set_high()
+                .map_err(|e| BoardError::Gpio(e.to_string()))?;
             std::thread::sleep(Duration::from_millis(1000));
-            pwrkey.set_low().map_err(|e| BoardError::Gpio(e.to_string()))?;
+            pwrkey
+                .set_low()
+                .map_err(|e| BoardError::Gpio(e.to_string()))?;
             // No post-PWRKEY sleep: the AT probe loop in A76xxModem::init()
             // retries for up to 30 s, so it acts as the wait.
             log::info!("[board] cold boot — modem power-on sequence complete");
@@ -102,9 +127,7 @@ impl Board for TA7670X {
         &self,
         peripherals: &mut Peripherals,
     ) -> Result<Arc<Mutex<dyn ModemPort + Send>>, BoardError> {
-        let uart_config = UartConfig::new().baudrate(
-            esp_idf_hal::units::Hertz(Config::UART_BAUD)
-        );
+        let uart_config = UartConfig::new().baudrate(esp_idf_hal::units::Hertz(Config::UART_BAUD));
 
         // Build UartDriver and extend its lifetime to 'static.
         //
@@ -120,9 +143,13 @@ impl Board for TA7670X {
             let rx = AnyIOPin::steal(Config::UART_RX);
             let driver = UartDriver::new(
                 peripherals.uart1.reborrow(),
-                tx, rx, Option::<AnyIOPin>::None, Option::<AnyIOPin>::None,
+                tx,
+                rx,
+                Option::<AnyIOPin>::None,
+                Option::<AnyIOPin>::None,
                 &uart_config,
-            ).map_err(|e| BoardError::Uart(e.to_string()))?;
+            )
+            .map_err(|e| BoardError::Uart(e.to_string()))?;
             std::mem::transmute(driver)
         };
 

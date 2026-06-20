@@ -45,16 +45,32 @@ pub fn incoming_call(display: &str) -> String {
 
 // ── /status ───────────────────────────────────────────────────────────────────
 
-pub fn status_op_unknown() -> &'static str { "unknown" }
-pub fn status_reg_ok()     -> &'static str { "registered" }
-pub fn status_reg_no()     -> &'static str { "not registered" }
-pub fn status_fwd_on()     -> &'static str { "enabled" }
-pub fn status_fwd_off()    -> &'static str { "PAUSED" }
-pub fn status_build(commit: &str) -> String { format!("🔖 Build: {}", commit) }
+pub fn status_op_unknown() -> &'static str {
+    "unknown"
+}
+pub fn status_reg_ok() -> &'static str {
+    "registered"
+}
+pub fn status_reg_no() -> &'static str {
+    "not registered"
+}
+pub fn status_fwd_on() -> &'static str {
+    "enabled"
+}
+pub fn status_fwd_off() -> &'static str {
+    "PAUSED"
+}
+pub fn status_build(commit: &str) -> String {
+    format!("🔖 Build: {}", commit)
+}
 
+#[allow(clippy::too_many_arguments)]
 pub fn format_status(
-    h: u32, m: u32, s: u32,
-    signal: &str, operator: &str,
+    h: u32,
+    m: u32,
+    s: u32,
+    signal: &str,
+    operator: &str,
     registered: bool,
     free_heap_kb: u32,
     queue_n: usize,
@@ -64,8 +80,16 @@ pub fn format_status(
     last_sms: Option<(&str, &str)>,
     wifi_info: &str,
 ) -> String {
-    let reg = if registered { status_reg_ok() } else { status_reg_no() };
-    let fwd = if fwd_on { status_fwd_on() } else { status_fwd_off() };
+    let reg = if registered {
+        status_reg_ok()
+    } else {
+        status_reg_no()
+    };
+    let fwd = if fwd_on {
+        status_fwd_on()
+    } else {
+        status_fwd_off()
+    };
     let wifi_line = if wifi_info.is_empty() {
         String::new()
     } else {
@@ -90,9 +114,12 @@ pub fn format_status(
          📋 Log: {} messages\n\
          🔄 Forwarding: {}\n\
          {}",
-        h, m, s,
+        h,
+        m,
+        s,
         wifi_line,
-        signal, operator,
+        signal,
+        operator,
         reg,
         heap_line,
         queue_n,
@@ -105,10 +132,18 @@ pub fn format_status(
 
 // ── /send ─────────────────────────────────────────────────────────────────────
 
-pub fn send_usage()          -> &'static str { "Usage: /send <number> <message text>" }
-pub fn send_invalid_number() -> &'static str { "Invalid phone number" }
-pub fn send_empty_body()     -> &'static str { "Message body is empty" }
-pub fn send_too_long()       -> &'static str { "Message too long (> 10 SMS parts)" }
+pub fn send_usage() -> &'static str {
+    "Usage: /send <number> <message text>"
+}
+pub fn send_invalid_number() -> &'static str {
+    "Invalid phone number"
+}
+pub fn send_empty_body() -> &'static str {
+    "Message body is empty"
+}
+pub fn send_too_long() -> &'static str {
+    "Message too long (> 10 SMS parts)"
+}
 
 pub fn send_queued(phone: &str, preview: &str, parts: usize) -> String {
     format!("Queued: {} → \"{}…\" ({} part(s))", phone, preview, parts)
@@ -119,36 +154,76 @@ pub fn send_rate_limited() -> &'static str {
 
 // ── /log ──────────────────────────────────────────────────────────────────────
 
-pub fn log_empty()       -> &'static str { "No SMS history." }
-pub fn log_header(n: usize) -> String    { format!("Last {} SMS:\n", n) }
+pub fn log_empty() -> &'static str {
+    "No SMS history."
+}
+pub fn log_header(n: usize) -> String {
+    format!("Last {} SMS:\n", n)
+}
 
 // ── /block + /unblock ─────────────────────────────────────────────────────────
 
-pub fn block_usage()   -> &'static str { "Usage: /block <number>" }
-pub fn block_ok(phone: &str) -> String { format!("Blocked: {}", phone) }
+pub fn block_usage() -> &'static str {
+    "Usage: /block <number>"
+}
+pub fn block_ok(phone: &str) -> String {
+    format!("Blocked: {}", phone)
+}
 
-pub fn unblock_usage()                -> &'static str { "Usage: /unblock <number>" }
-pub fn unblock_not_found(phone: &str) -> String       { format!("{} is not in the block list.", phone) }
-pub fn unblock_ok(phone: &str)        -> String       { format!("Unblocked: {}", phone) }
+pub fn unblock_usage() -> &'static str {
+    "Usage: /unblock <number>"
+}
+pub fn unblock_not_found(phone: &str) -> String {
+    format!("{} is not in the block list.", phone)
+}
+pub fn unblock_ok(phone: &str) -> String {
+    format!("Unblocked: {}", phone)
+}
 
 // ── /pause + /resume ──────────────────────────────────────────────────────────
 
-pub fn pause_ok(mins: u32)         -> String       { format!("Forwarding paused for {} min.", mins) }
-pub fn resume_already_active()     -> &'static str { "Forwarding is already active." }
-pub fn resume_ok()                 -> &'static str { "Forwarding resumed." }
+pub fn pause_ok(mins: u32) -> String {
+    format!("Forwarding paused for {} min.", mins)
+}
+pub fn resume_already_active() -> &'static str {
+    "Forwarding is already active."
+}
+pub fn resume_ok() -> &'static str {
+    "Forwarding resumed."
+}
 
 // ── /restart ──────────────────────────────────────────────────────────────────
 
-pub fn restart_ok() -> &'static str { "Rebooting…" }
+pub fn restart_ok() -> &'static str {
+    "Rebooting…"
+}
 
 // ── Command descriptions (shown in Telegram autocomplete) ─────────────────────
 
-pub fn desc_help()    -> &'static str { "List all commands" }
-pub fn desc_status()  -> &'static str { "Show device health and stats" }
-pub fn desc_send()    -> &'static str { "Send an SMS: /send <number> <text>" }
-pub fn desc_log()     -> &'static str { "Last N forwarded messages (default 10)" }
-pub fn desc_block()   -> &'static str { "Block SMS from a number" }
-pub fn desc_unblock() -> &'static str { "Unblock SMS from a number" }
-pub fn desc_pause()   -> &'static str { "Pause SMS forwarding (default 60 min)" }
-pub fn desc_resume()  -> &'static str { "Resume SMS forwarding immediately" }
-pub fn desc_restart() -> &'static str { "Reboot the device" }
+pub fn desc_help() -> &'static str {
+    "List all commands"
+}
+pub fn desc_status() -> &'static str {
+    "Show device health and stats"
+}
+pub fn desc_send() -> &'static str {
+    "Send an SMS: /send <number> <text>"
+}
+pub fn desc_log() -> &'static str {
+    "Last N forwarded messages (default 10)"
+}
+pub fn desc_block() -> &'static str {
+    "Block SMS from a number"
+}
+pub fn desc_unblock() -> &'static str {
+    "Unblock SMS from a number"
+}
+pub fn desc_pause() -> &'static str {
+    "Pause SMS forwarding (default 60 min)"
+}
+pub fn desc_resume() -> &'static str {
+    "Resume SMS forwarding immediately"
+}
+pub fn desc_restart() -> &'static str {
+    "Reboot the device"
+}

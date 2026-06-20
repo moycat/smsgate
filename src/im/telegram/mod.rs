@@ -52,11 +52,13 @@ impl TelegramMessenger {
     fn post_json(&mut self, method: &str, body: &str) -> Result<String, MessengerError> {
         let path = format!("/bot{}/{}", self.token, method);
         match &mut self.transport {
-            Transport::Wifi(http) => http.post(&path, body)
+            Transport::Wifi(http) => http
+                .post(&path, body)
                 .map_err(|e| MessengerError::Http(e.to_string())),
             Transport::Modem(m) => {
                 let mut g = m.lock().map_err(|_| MessengerError::Disconnected)?;
-                let raw = g.post_telegram_https(&path, body)
+                let raw = g
+                    .post_telegram_https(&path, body)
                     .map_err(|e| MessengerError::Http(format!("modem {}", e)))?;
                 Ok(raw)
             }
@@ -64,7 +66,9 @@ impl TelegramMessenger {
     }
 
     fn post_and_parse<T: serde::de::DeserializeOwned>(
-        &mut self, method: &str, body: &str,
+        &mut self,
+        method: &str,
+        body: &str,
     ) -> Result<ApiResult<T>, MessengerError> {
         let resp = self.post_json(method, body)?;
         serde_json::from_str(&resp).map_err(|e| MessengerError::Json(e.to_string()))
@@ -80,7 +84,8 @@ impl TelegramMessenger {
 
     /// Register bot commands with Telegram (called once at startup).
     pub fn register_commands(&mut self, commands: &[(&str, &str)]) -> Result<(), MessengerError> {
-        let cmds_json: Vec<String> = commands.iter()
+        let cmds_json: Vec<String> = commands
+            .iter()
             .map(|(name, desc)| format!(r#"{{"command":"{}","description":"{}"}}"#, name, desc))
             .collect();
         let body = format!(r#"{{"commands":[{}]}}"#, cmds_json.join(","));
@@ -94,10 +99,7 @@ impl TelegramMessenger {
 impl MessageSink for TelegramMessenger {
     fn send_message(&mut self, text: &str) -> Result<MessageId, MessengerError> {
         let escaped = types::json_escape(text);
-        let body = format!(
-            r#"{{"chat_id":{},"text":"{}"}}"#,
-            self.chat_id, escaped
-        );
+        let body = format!(r#"{{"chat_id":{},"text":"{}"}}"#, self.chat_id, escaped);
         let result: ApiResult<SendMessageResult> = self.post_and_parse("sendMessage", &body)?;
         let r = Self::check_ok(result)?;
         Ok(r.map(|r| r.message_id).unwrap_or(0))
@@ -106,29 +108,41 @@ impl MessageSink for TelegramMessenger {
 
 #[cfg(feature = "esp32")]
 impl MessageSource for TelegramMessenger {
-    fn poll(&mut self, since: i64, timeout_sec: u32) -> Result<Vec<InboundMessage>, MessengerError> {
+    fn poll(
+        &mut self,
+        since: i64,
+        timeout_sec: u32,
+    ) -> Result<Vec<InboundMessage>, MessengerError> {
         let body = format!(
             r#"{{"offset":{},"timeout":{},"limit":100,"allowed_updates":["message"]}}"#,
             since, timeout_sec
         );
         let result: ApiResult<Vec<Update>> = self.post_and_parse("getUpdates", &body)?;
         let updates = Self::check_ok(result)?.unwrap_or_default();
-        let messages = updates.into_iter().filter_map(|u| {
-            let msg = u.message?;
-            // Reject messages from any chat other than the configured one.
-            // Without this, anyone who adds the bot to a group can trigger commands.
-            if msg.chat.id != self.chat_id {
-                log::warn!("[tg] message from unexpected chat {} — ignored", msg.chat.id);
-                return None;
-            }
-            let text = msg.text.clone().unwrap_or_default();
-            if text.is_empty() { return None; }
-            Some(InboundMessage {
-                cursor: u.update_id + 1,
-                text,
-                reply_to: msg.reply_to_message.map(|r| r.message_id),
+        let messages = updates
+            .into_iter()
+            .filter_map(|u| {
+                let msg = u.message?;
+                // Reject messages from any chat other than the configured one.
+                // Without this, anyone who adds the bot to a group can trigger commands.
+                if msg.chat.id != self.chat_id {
+                    log::warn!(
+                        "[tg] message from unexpected chat {} — ignored",
+                        msg.chat.id
+                    );
+                    return None;
+                }
+                let text = msg.text.clone().unwrap_or_default();
+                if text.is_empty() {
+                    return None;
+                }
+                Some(InboundMessage {
+                    cursor: u.update_id + 1,
+                    text,
+                    reply_to: msg.reply_to_message.map(|r| r.message_id),
+                })
             })
-        }).collect();
+            .collect();
         Ok(messages)
     }
 }
