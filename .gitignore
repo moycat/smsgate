@@ -1,6 +1,7 @@
 # Rust build artifacts
 /target/
 fuzz/target/
+/.embuild/
 
 # User configuration — contains secrets, never commit
 /config.toml

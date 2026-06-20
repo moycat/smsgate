@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## Project
 
@@ -35,6 +35,94 @@ cargo +nightly fuzz run urc_parse     -- -max_total_time=60
 cargo +nightly fuzz run command_parse -- -max_total_time=60
 ```
 
+## Commit Messages
+
+Use Conventional Commits for all commits. Prefer the smallest accurate type:
+
+- `feat: ...` for user-visible firmware behavior
+- `fix: ...` for bug fixes
+- `docs: ...` for documentation-only changes
+- `test: ...` for tests and fuzz targets
+- `build: ...` for Cargo, ESP-IDF, partition, or toolchain build changes
+- `ci: ...` for GitHub Actions and release automation
+- `chore: ...` for maintenance that does not affect firmware behavior
+
+Use an optional scope when it adds clarity, for example `fix(modem): ...` or
+`docs(agents): ...`. Mark breaking changes with `!` and include a
+`BREAKING CHANGE:` footer when behavior or configuration compatibility changes.
+
+## Language Policy
+
+Repository documents, code comments, commit messages, branch names, and PR text must be
+written in English. The only exception is user-visible i18n content, which belongs under
+the locale-specific translation files and should use the target language.
+
+Chat with users in the language they use. If the user writes in Chinese, reply in Chinese;
+keep repository edits in English.
+
+## Rust Engineering Practices
+
+Use stable Rust unless this repository already requires nightly for that specific task
+(for example, fuzzing). Prefer current stable language features and standard-library APIs
+when they make the code simpler, but do not change the Rust edition, MSRV expectations, or
+ESP toolchain assumptions without an explicit migration plan and both host and firmware
+verification.
+
+The repository currently uses Rust 2021. Treat Rust 2024 features as an edition migration,
+not as an opportunistic refactor. If a migration is ever needed, update the toolchain notes,
+run `cargo fix --edition`, verify generated diffs carefully, and confirm the Xtensa ESP-IDF
+build still works.
+
+Keep the firmware dependency-inverted and host-testable:
+
+- Business logic should depend on the core traits in `bridge/`, `commands/`, `sms/`, `im/`,
+  `modem/`, and `persist/`, not concrete Telegram, ESP-IDF, or board implementations.
+- Prefer small modules and functions with explicit responsibilities. Split large
+  implementations by domain instead of adding catch-all utility files.
+- Use strong types for IDs, timestamps, phone numbers, and command names when that prevents
+  invalid states from crossing module boundaries.
+- Prefer explicit error enums for library/domain code. Use broad error aggregation only at
+  composition boundaries such as startup, command-line tooling, or tests.
+- Avoid `unwrap()` and `expect()` in firmware paths unless the invariant is local, obvious,
+  and documented. Tests may use them freely when failure output remains useful.
+- Avoid unbounded allocation or queue growth in long-running firmware loops. Prefer bounded
+  buffers, fixed capacities, and backpressure when memory or latency matters.
+- Use `unsafe` only at ESP-IDF/HAL boundaries that cannot be expressed safely. Every unsafe
+  block must have a nearby `SAFETY:` comment explaining the invariant being upheld.
+- Update tests with behavior changes. Parser changes to PDU, URC, or bot command handling
+  also require the fuzz smoke commands listed above.
+
+## Required Quality Gates
+
+Run the relevant gate before committing. For Rust or build-affecting changes, the default
+local gate is:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --no-default-features --features testing --all-targets -- -D warnings
+cargo test --no-default-features --features testing
+cargo +esp build --release --target xtensa-esp32-espidf
+```
+
+If `rustfmt` or `clippy` is missing, install the Rust components instead of skipping the
+gate:
+
+```bash
+rustup component add rustfmt clippy
+```
+
+For documentation-only changes, `git diff --check` is sufficient unless the documentation
+changes commands, build behavior, or hardware procedures that should be verified directly.
+
+For parser changes, also run the fuzz smoke commands in the Commands section. For dependency
+changes, use dependency hygiene tools when available: `cargo deny check` for advisories,
+licenses, bans, and source policy; `cargo machete` as an advisory unused-dependency check
+because it can produce false positives. Do not introduce new dependency-policy config without
+reviewing and committing the config with the change.
+
+The checked-in GitHub CI currently covers the host test command. Local agents are still
+responsible for running the broader gate that matches the change.
+
 ## Toolchain Setup
 
 ```bash
@@ -54,6 +142,31 @@ set these before building:
 $env:LIBCLANG_PATH = "$env:USERPROFILE\.rustup\toolchains\esp\xtensa-esp32-elf-clang\esp-clang\bin\libclang.dll"
 $env:PATH = "$env:USERPROFILE\.rustup\toolchains\esp\xtensa-esp32-elf-clang\esp-clang\bin;$env:USERPROFILE\.rustup\toolchains\esp\xtensa-esp-elf\bin;$env:PATH"
 ```
+
+### Local Setup Notes
+
+After installing the host Rust toolchain, verify the ESP tools before building:
+
+```bash
+cargo +esp --version
+espflash --version
+ldproxy --version
+```
+
+The first `cargo +esp build --release --target xtensa-esp32-espidf` can take several
+minutes. `esp-idf-sys` creates a managed ESP-IDF checkout and Python environment under
+`.embuild/espressif/`, downloads ESP-IDF submodules, installs Python packages, and then
+builds the ESP-IDF C/C++ side before linking the Rust firmware.
+
+The first build needs network access to crates.io/static.crates.io, GitHub,
+PyPI, and `dl.espressif.com`. In sandboxed agent environments, run the firmware
+build outside the network sandbox instead of repeatedly retrying DNS failures.
+
+`config.toml` is not required for host tests and the firmware can still compile
+without it, but the resulting binary uses empty compile-time credentials and will
+enter serial provisioning unless credentials already exist in NVS. For normal
+firmware builds, copy `config.toml.example` to `config.toml` and fill in real
+values before building.
 
 ## Architecture
 
@@ -106,12 +219,18 @@ python $IDF_PATH/components/partition_table/gen_esp32part.py partitions_ota.csv 
   partitions_ota.csv partitions_ota.bin
 ```
 
-### Nightly CI / OTA Release
+### CI / OTA Release Notes
 
-`.github/workflows/nightly.yml` builds firmware every night and publishes a
-`nightly` GitHub Release. The released `smsgate.bin` is an OTA-ready app image.
+The checked-in CI workflow is `.github/workflows/ci.yml`, which runs host tests. Do not
+claim nightly release automation exists unless a nightly workflow is present under
+`.github/workflows/`.
 
-Required GitHub Secrets (Settings → Secrets and variables → Actions):
+`.github/scripts/gen_config.py` can generate release configuration with an OTA URL pointing
+to the repository's `nightly` release asset. Any workflow that builds and publishes OTA
+firmware should verify that the released `smsgate.bin` is an OTA-ready app image.
+
+Nightly or release workflows that use generated production configuration require these
+GitHub Secrets (Settings -> Secrets and variables -> Actions):
 
 | Secret | Example |
 |--------|---------|
@@ -121,8 +240,26 @@ Required GitHub Secrets (Settings → Secrets and variables → Actions):
 | `TELEGRAM_CHAT_ID` | `8024680950` |
 | `UI_LOCALE` *(optional)* | `zh` (default) or `en` |
 
-The OTA URL in the built firmware points to the same repo's nightly release,
-so `/update` always fetches the latest nightly build.
+When OTA release automation is present, keep the firmware's configured OTA URL aligned with
+the asset that `/update` should fetch.
+
+## Agent Workflow and Context Management
+
+Use subagents when there are two or more independent work streams, such as codebase research,
+hardware/toolchain research, test investigation, or documentation review. Keep each subagent
+prompt self-contained and narrow: include exact files, commands, expected output, and the
+decision the main agent needs back.
+
+Prefer explorer subagents for read-only research. Use worker subagents only for clearly
+disjoint write scopes, and tell them not to revert unrelated changes. Continue useful
+non-overlapping work while subagents run, then integrate their findings in the main context.
+
+The main agent remains responsible for final decisions, repository edits that cross module
+boundaries, verification, git staging, and commits. Do not delegate destructive git commands,
+hardware flashing, secret handling, or tightly coupled architectural choices.
+
+Close completed subagents when the tool supports it so stale context does not leak into later
+work.
 
 ## Task Recipes
 
@@ -154,6 +291,45 @@ Minimum verification on board after any change:
 1. Flash and confirm clean boot log (see Boot Sequence Timing below)
 2. Send an SMS to the device — confirm it forwards to Telegram
 3. Send `/status` from Telegram — confirm it replies
+
+## Board and Runtime Stability
+
+Reference hardware is the LilyGo T-A7670X with an A7670G/A76xx AT-command modem and CH9102
+USB bridge. Verify the exact board SKU, modem model, and modem firmware when debugging
+hardware-specific failures.
+
+Reference board wiring and defaults:
+
+- Keep the modem power rail enable GPIO high for the entire program (`MODEM_POWER_PIN`,
+  GPIO12 on the reference board).
+- The modem reset pin is active high (`MODEM_RESET_PIN`, GPIO5 on the reference board).
+- The modem PWRKEY is GPIO4 on the reference board.
+- The modem UART defaults to TX GPIO26, RX GPIO27, 115200 baud.
+
+Do not simplify the cold-start power sequence, warm-reboot detection, reset timing, or AT
+probe loop without hardware logs. These delays are part of modem bring-up stability, not just
+startup cosmetics.
+
+Keep `sdkconfig.defaults` aligned with the board and firmware behavior:
+
+- 4 MB flash size for the reference board.
+- Custom OTA partition table and rollback support.
+- TLS certificate bundle enabled and insecure TLS disabled.
+- Main task stack large enough for current firmware paths.
+- Watchdog timeouts high enough for modem, flash, TLS, and OTA operations while still catching
+  stuck tasks.
+
+Long blocking operations such as modem HTTP, SMS send, flash erase/write, and OTA must yield
+or reset watchdog state often enough for ESP-IDF watchdogs. Avoid long critical sections and
+avoid blocking interrupts around UART or flash work.
+
+The first flash after changing the partition layout must include the generated partition
+table. Regenerate `partitions_ota.bin` from `partitions_ota.csv`, flash it with the firmware,
+and verify rollback behavior before relying on OTA.
+
+For modem issues, check LilyGo/SIMCom firmware notes and known issues before changing the init
+sequence. Preserve the existing SMS storage behavior unless tests and hardware logs prove the
+new sequence is safe.
 
 ## Key Invariants
 
@@ -205,8 +381,11 @@ Copy-Item partitions_ota.csv `
   (Get-ChildItem C:\t\xtensa-esp32-espidf\release\build\esp-idf-sys-*\out | Select-Object -First 1).FullName
 ```
 ```bash
-# bash equivalent
+# bash equivalent for Windows-style short target dir
 cp partitions_ota.csv C:/t/xtensa-esp32-espidf/release/build/esp-idf-sys-*/out/
+
+# macOS/Linux/default target dir
+cp partitions_ota.csv target/xtensa-esp32-espidf/release/build/esp-idf-sys-*/out/
 ```
 Then re-run `cargo +esp build`. The copy is permanent for that esp-idf-sys hash; subsequent
 builds succeed automatically.
@@ -234,8 +413,10 @@ classified as URCs, `send_at("+CREG?")` would siphon the response into the URC b
 registration checks would always return `false`. Do not add them back to `is_urc` unless
 `AT+CREG=1` (or `=2`) is also added to the modem init sequence.
 
-**`AT+CNMI=2,1,0,0,0`** (store + `+CMTI` notify) is the required setting. The alternative
-`mt=2` (direct `+CMT` delivery) requires two-line URC parsing that is not implemented.
+**`AT+CNMI=2,1,0,0,0`** (store + `+CMTI` notify) is the required setting because it preserves
+slot retry/delete semantics. Direct `+CMT` two-line parsing exists as a defensive fallback,
+but do not switch modem init to `mt=2` without tests and hardware validation for two-line
+delivery, storage cleanup, retries, and UART buffering.
 
 **`AT+CPMS` and storage memory**: Some modems (e.g. A7670G on T-A7670X) return `+CMS ERROR`
 to `AT+CPMS?` because the SIM doesn't support SMS management queries. When that happens the
@@ -254,3 +435,7 @@ CMTI notifications for all stored SMS which can overflow the 256-byte UART Rx bu
 - Adding a fifth NVS key to `"smsgate"` without updating the Key Invariants section above
 - ASCII art diagrams in documentation — use Mermaid instead
 - Adding `+CREG:` back to `is_urc` without also enabling `AT+CREG=1` in modem init
+- Non-English repository documents, code, comments, commit messages, branch names, or PR text
+  outside locale-specific i18n content
+- Nightly-only Rust features, Rust edition changes, or toolchain requirement changes without
+  explicit approval plus host and ESP firmware verification
