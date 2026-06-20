@@ -12,4 +12,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --no-default-features --features testing
+        with:
+          components: rustfmt, clippy
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --no-default-features --features testing --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --no-default-features --features testing

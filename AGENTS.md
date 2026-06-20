@@ -120,8 +120,9 @@ licenses, bans, and source policy; `cargo machete` as an advisory unused-depende
 because it can produce false positives. Do not introduce new dependency-policy config without
 reviewing and committing the config with the change.
 
-The checked-in GitHub CI currently covers the host test command. Local agents are still
-responsible for running the broader gate that matches the change.
+The checked-in GitHub CI covers `rustfmt`, `clippy -D warnings`, and host tests.
+Local agents are still responsible for running the broader gate that matches the
+change, including the ESP firmware build when Rust or build-affecting files change.
 
 ## Toolchain Setup
 
@@ -221,7 +222,8 @@ espflash flash target/xtensa-esp32-espidf/release/smsgate --port <PORT>
 
 ### CI / Release Notes
 
-The checked-in CI workflow is `.github/workflows/ci.yml`, which runs host tests.
+The checked-in CI workflow is `.github/workflows/ci.yml`, which runs `rustfmt`,
+`clippy -D warnings`, and host tests.
 
 Workflows that use `.github/scripts/gen_config.py` for production configuration require these
 GitHub Secrets (Settings -> Secrets and variables -> Actions):
