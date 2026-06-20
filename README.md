@@ -15,7 +15,7 @@ Reference hardware: **LilyGo T-A7670X** (A7670G LTE modem, CH9102 USB bridge).
 - Incoming call notification with auto-hangup
 - Multipart SMS reassembly (concatenated SMS)
 - PDU-mode SMS encoding/decoding (GSM-7 + UCS-2)
-- Bot commands: `/status`, `/send`, `/block`, `/unblock`, `/pause`, `/resume`, `/log`, `/queue`, `/restart`
+- Bot commands: `/help`, `/status`, `/send`, `/block`, `/unblock`, `/pause`, `/resume`, `/log`, `/restart`
 - i18n: English and Chinese (compile-time locale selection, zero overhead)
 - NVS persistence for cursor, reply mapping, and block list
 - Outbound SMS queue with exponential-backoff retry
@@ -62,6 +62,8 @@ locale = "zh"
 **`serde_json` for Telegram API parsing** — The Telegram HTTP layer uses `serde_json`, which requires heap allocation. This is a deliberate tradeoff: the ESP32 has ample SRAM (320 KB + optional PSRAM), a typical Telegram API response is a few kilobytes, and `serde-json-core` (the `no_std` alternative) would add significant implementation complexity for marginal gain. If you port this to a more constrained MCU, swapping out `im/telegram/` is the only change needed.
 
 **Compile-time configuration** — WiFi credentials, bot token, and pin assignments all live in `config.toml` and are baked into the binary at build time. Runtime configuration (e.g. over BLE or a captive portal) is out of scope for a single-owner personal device and would add substantial complexity.
+
+**Runtime task split** — Telegram polling and Telegram outbound delivery run in separate worker threads. SMS and modem AT operations keep a single ordered UART owner so URCs, SMS reads/deletes, and `AT+CMGS` prompt handling do not interleave.
 
 ## Architecture
 

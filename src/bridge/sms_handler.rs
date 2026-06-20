@@ -9,6 +9,14 @@ use crate::modem::ModemPort;
 use crate::persist::Store;
 use crate::sms::{codec::parse_sms_pdu, concat::ConcatReassembler, SmsMessage};
 
+/// Raw SMS PDU read from a modem storage slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSms {
+    pub mem: String,
+    pub index: u16,
+    pub pdu_hex: String,
+}
+
 /// Process a +CMTI notification: read the PDU, forward it, delete on success.
 ///
 /// Returns `true` if the modem slot was deleted (forwarded OK or unparseable),
@@ -24,10 +32,36 @@ pub fn handle_new_sms(
     messenger: &mut dyn MessageSink,
     store: &mut dyn Store,
 ) -> bool {
+    let Some(stored) = read_new_sms_pdu(mem, index, modem) else {
+        return false;
+    };
+
+    let delete = process_pdu_hex(
+        &stored.pdu_hex,
+        stored.index,
+        router,
+        log,
+        concat,
+        messenger,
+        store,
+    );
+    if delete {
+        delete_sms_slot(stored.index, modem);
+    } else {
+        log::warn!(
+            "[sms_handler] forward failed — SMS stays at mem={} slot={}",
+            stored.mem,
+            stored.index
+        );
+    }
+    delete
+}
+
+/// Read one SMS PDU from the modem slot reported by a +CMTI notification.
+pub fn read_new_sms_pdu(mem: &str, index: u16, modem: &mut dyn ModemPort) -> Option<StoredSms> {
     log::info!("[sms_handler] +CMTI: mem={} index={}", mem, index);
 
     let _ = modem.send_at(&format!("+CPMS=\"{}\"", mem));
-
     let r = modem.send_at(&format!("+CMGR={}", index));
     let pdu_hex = match &r {
         Ok(resp) if resp.ok => {
@@ -57,23 +91,22 @@ pub fn handle_new_sms(
             mem,
             index
         );
-        return false;
+        return None;
     };
 
-    let delete = process_pdu_hex(&hex, index, router, log, concat, messenger, store);
-    if delete {
-        let _ = modem.send_at(&format!("+CMGD={}", index));
-    } else {
-        log::warn!(
-            "[sms_handler] forward failed — SMS stays at mem={} slot={}",
-            mem,
-            index
-        );
-    }
-    delete
+    Some(StoredSms {
+        mem: mem.to_string(),
+        index,
+        pdu_hex: hex,
+    })
 }
 
-/// Sweep all stored SMS in one memory bank (AT+CMGL=4) at boot time.
+/// Delete an SMS storage slot after the message has been consumed.
+pub fn delete_sms_slot(index: u16, modem: &mut dyn ModemPort) {
+    let _ = modem.send_at(&format!("+CMGD={}", index));
+}
+
+/// Sweep all stored SMS in one memory bank at boot time.
 pub fn sweep_one_storage(
     mem: &str,
     modem: &mut dyn ModemPort,
@@ -83,29 +116,42 @@ pub fn sweep_one_storage(
     messenger: &mut dyn MessageSink,
     store: &mut dyn Store,
 ) {
-    let r = modem.send_at("+CMGL=4");
-    let resp = match r {
-        Ok(r) => r,
-        Err(e) => {
-            log::warn!("[sms_handler] sweep {} AT+CMGL=4 failed: {:?}", mem, e);
-            return;
-        }
-    };
-    if !resp.ok {
-        log::warn!(
-            "[sms_handler] sweep {} AT+CMGL=4 error: {}",
-            mem,
-            resp.body.trim()
+    for stored in read_stored_sms(mem, modem) {
+        let delete = process_pdu_hex(
+            &stored.pdu_hex,
+            stored.index,
+            router,
+            log,
+            concat,
+            messenger,
+            store,
         );
-        return;
+        if delete {
+            delete_sms_slot(stored.index, modem);
+        } else {
+            log::warn!(
+                "[sms_handler] sweep forward failed — SMS stays at {} slot {}",
+                stored.mem,
+                stored.index
+            );
+        }
     }
+}
+
+/// Read all stored SMS PDUs from one memory bank.
+pub fn read_stored_sms(mem: &str, modem: &mut dyn ModemPort) -> Vec<StoredSms> {
+    let Some((cmd, resp)) = list_stored_sms(mem, modem) else {
+        return Vec::new();
+    };
     log::info!(
-        "[sms_handler] sweep {} AT+CMGL=4 body: {:?}",
+        "[sms_handler] sweep {} AT{} body: {:?}",
         mem,
+        cmd,
         resp.body
     );
 
     let body = resp.body.clone();
+    let mut stored = Vec::new();
     let mut lines = body.lines().peekable();
     while let Some(line) = lines.next() {
         if let Some(rest) = line.strip_prefix("+CMGL: ") {
@@ -117,19 +163,41 @@ pub fn sweep_one_storage(
             if let Some(hex) = lines.next() {
                 let hex = hex.trim();
                 log::info!("[sms_handler] sweep found SMS in {} slot {}", mem, slot);
-                let delete = process_pdu_hex(hex, slot, router, log, concat, messenger, store);
-                if delete {
-                    let _ = modem.send_at(&format!("+CMGD={}", slot));
-                } else {
-                    log::warn!(
-                        "[sms_handler] sweep forward failed — SMS stays at {} slot {}",
-                        mem,
-                        slot
-                    );
-                }
+                stored.push(StoredSms {
+                    mem: mem.to_string(),
+                    index: slot,
+                    pdu_hex: hex.to_string(),
+                });
             }
         }
     }
+    stored
+}
+
+fn list_stored_sms(
+    mem: &str,
+    modem: &mut dyn ModemPort,
+) -> Option<(&'static str, crate::modem::AtResponse)> {
+    const LIST_COMMANDS: [&str; 2] = ["+CMGL=4", "+CMGL=\"ALL\""];
+
+    for cmd in LIST_COMMANDS {
+        match modem.send_at(cmd) {
+            Ok(resp) if resp.ok => return Some((cmd, resp)),
+            Ok(resp) => {
+                log::warn!(
+                    "[sms_handler] sweep {} AT{} error: {}",
+                    mem,
+                    cmd,
+                    resp.body.trim()
+                );
+            }
+            Err(e) => {
+                log::warn!("[sms_handler] sweep {} AT{} failed: {:?}", mem, cmd, e);
+            }
+        }
+    }
+
+    None
 }
 
 /// Parse a PDU hex string and forward the SMS.

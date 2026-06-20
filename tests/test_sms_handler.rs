@@ -1,7 +1,9 @@
 //! Tests for bridge::sms_handler — CMTI processing and boot-time sweep.
 
 use smsgate::bridge::reply_router::ReplyRouter;
-use smsgate::bridge::sms_handler::{handle_new_sms, process_pdu_hex, sweep_one_storage};
+use smsgate::bridge::sms_handler::{
+    delete_sms_slot, handle_new_sms, process_pdu_hex, read_new_sms_pdu, sweep_one_storage,
+};
 use smsgate::log_ring::LogRing;
 use smsgate::persist::mem::MemStore;
 use smsgate::sms::concat::ConcatReassembler;
@@ -169,6 +171,28 @@ fn process_pdu_hex_concat_both_parts_forward_once() {
 // ---------------------------------------------------------------------------
 // handle_new_sms
 // ---------------------------------------------------------------------------
+
+#[test]
+fn read_new_sms_pdu_does_not_delete_slot() {
+    let modem = ScriptedModem::new()
+        .expect("+CPMS=\"ME\"", "", true)
+        .expect(
+            "+CMGR=8",
+            &format!("+CMGR: 0,,18\n{}", pdu(HELLO_PDU)),
+            true,
+        )
+        .expect("+CMGD=8", "", true);
+
+    let mut modem = modem;
+
+    let stored = read_new_sms_pdu("ME", 8, &mut modem).expect("SMS PDU should be read");
+    assert_eq!(stored.mem, "ME");
+    assert_eq!(stored.index, 8);
+    assert_eq!(stored.pdu_hex, pdu(HELLO_PDU));
+
+    delete_sms_slot(8, &mut modem);
+    modem.check_consumed();
+}
 
 #[test]
 fn handle_new_sms_reads_and_forwards() {
@@ -362,8 +386,10 @@ fn sweep_multiple_sms() {
 
 #[test]
 fn sweep_cmgl_error_is_silent() {
-    // AT+CMGL=4 returns error (e.g. storage not supported)
-    let modem = ScriptedModem::new().expect("+CMGL=4", "+CMS ERROR: 302", false);
+    // Both list forms return errors (e.g. storage not supported).
+    let modem = ScriptedModem::new()
+        .expect("+CMGL=4", "+CMS ERROR: 302", false)
+        .expect("+CMGL=\"ALL\"", "+CMS ERROR: 302", false);
 
     let mut modem = modem;
     let mut router = ReplyRouter::new();
@@ -384,6 +410,36 @@ fn sweep_cmgl_error_is_silent() {
 
     modem.check_consumed();
     assert_eq!(messenger.sent_count(), 0);
+}
+
+#[test]
+fn sweep_falls_back_to_text_all_list_form() {
+    let cmgl_body = format!("+CMGL: 1,0,,18\n{}", pdu(HELLO_PDU));
+    let modem = ScriptedModem::new()
+        .expect("+CMGL=4", "+CMS ERROR: Invalid text mode parameter", false)
+        .expect("+CMGL=\"ALL\"", &cmgl_body, true)
+        .expect("+CMGD=1", "", true);
+
+    let mut modem = modem;
+    let mut router = ReplyRouter::new();
+    let mut log = LogRing::new();
+    let mut concat = ConcatReassembler::new();
+    let mut messenger = RecordingMessenger::new();
+    let mut store = MemStore::new();
+
+    sweep_one_storage(
+        "ME",
+        &mut modem,
+        &mut router,
+        &mut log,
+        &mut concat,
+        &mut messenger,
+        &mut store,
+    );
+
+    modem.check_consumed();
+    assert_eq!(messenger.sent_count(), 1);
+    assert!(messenger.contains_sent("Hello"));
 }
 
 #[test]

@@ -6,6 +6,8 @@ use std::time::Duration;
 const HOST: &str = "api.telegram.org";
 const PORT: u16 = 443;
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_HEADER_BYTES: usize = 2 * 1024;
+const MAX_BODY_BYTES: usize = 8 * 1024;
 
 /// TLS-backed HTTPS client for api.telegram.org.
 pub struct TelegramHttpClient {
@@ -78,6 +80,9 @@ impl TelegramHttpClient {
                 anyhow::bail!("connection closed before headers received");
             }
             response.push_str(&String::from_utf8_lossy(&buf[..n]));
+            if response.len() > MAX_HEADER_BYTES && !response.contains("\r\n\r\n") {
+                anyhow::bail!("HTTP headers exceeded {} bytes", MAX_HEADER_BYTES);
+            }
             if response.contains("\r\n\r\n") {
                 break;
             }
@@ -93,6 +98,9 @@ impl TelegramHttpClient {
             .and_then(|l| l.splitn(2, ':').nth(1))
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(0);
+        if cl > MAX_BODY_BYTES {
+            anyhow::bail!("HTTP body length {} exceeds {} bytes", cl, MAX_BODY_BYTES);
+        }
 
         // Find body start
         let body_start = response
@@ -100,6 +108,9 @@ impl TelegramHttpClient {
             .map(|i| i + 4)
             .unwrap_or(response.len());
         let mut body = response[body_start..].to_string();
+        if body.len() > MAX_BODY_BYTES {
+            anyhow::bail!("HTTP body exceeded {} bytes", MAX_BODY_BYTES);
+        }
 
         // Read remaining body bytes
         while body.len() < cl {
@@ -109,6 +120,9 @@ impl TelegramHttpClient {
             let n = self.tls.read(&mut buf)?;
             if n == 0 {
                 break;
+            }
+            if body.len() + n > MAX_BODY_BYTES {
+                anyhow::bail!("HTTP body exceeded {} bytes", MAX_BODY_BYTES);
             }
             body.push_str(&String::from_utf8_lossy(&buf[..n]));
         }

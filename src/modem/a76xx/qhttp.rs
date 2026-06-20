@@ -49,6 +49,17 @@ fn escape_at_quotes(s: &str) -> String {
 
 /// POST JSON to `https://api.telegram.org` + `path` (path includes `/bot…/method`).
 pub fn post_json(modem: &mut A76xxModem, path: &str, json: &str) -> Result<String, ModemError> {
+    match post_json_once(modem, path, json) {
+        Ok(body) => Ok(body),
+        Err(first) => {
+            log::warn!("[qhttp] POST failed: {}; repairing PDP and retrying", first);
+            repair_pdp(modem)?;
+            post_json_once(modem, path, json)
+        }
+    }
+}
+
+fn post_json_once(modem: &mut A76xxModem, path: &str, json: &str) -> Result<String, ModemError> {
     let url = format!("{}{}", TELEGRAM_HOST_PATH, path);
 
     // Bind HTTP stack to PDP context 1; enable TLS for HTTPS.
@@ -77,6 +88,21 @@ pub fn post_json(modem: &mut A76xxModem, path: &str, json: &str) -> Result<Strin
     // Some firmware returns payload only after a second read
     let r2 = modem.send_at("+QHTTPREAD=80")?;
     extract_json_object(&r2.body)
+}
+
+fn repair_pdp(modem: &mut A76xxModem) -> Result<(), ModemError> {
+    let _ = modem.send_at("+CGATT=1");
+    let _ = modem.send_at("+QIDEACT=1");
+    let r = modem.send_at("+QIACT=1")?;
+    if r.ok {
+        log::info!("[qhttp] PDP context 1 repaired");
+        Ok(())
+    } else {
+        Err(ModemError::AtError(format!(
+            "QIACT repair failed: {}",
+            r.body.trim()
+        )))
+    }
 }
 
 fn extract_json_object(s: &str) -> Result<String, ModemError> {

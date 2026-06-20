@@ -3,6 +3,8 @@
 #[cfg(feature = "esp32")]
 pub mod http;
 pub mod types;
+#[cfg(feature = "esp32")]
+pub mod worker;
 
 #[cfg(feature = "esp32")]
 use super::{InboundMessage, MessageId, MessageSink, MessageSource, MessengerError};
@@ -14,6 +16,19 @@ use http::TelegramHttpClient;
 use std::sync::{Arc, Mutex};
 #[cfg(feature = "esp32")]
 use types::{ApiResult, SendMessageResult, Update};
+
+const GET_UPDATES_LIMIT: u8 = 10;
+const MIN_POLL_TIMEOUT_SEC: u32 = 1;
+const MAX_POLL_TIMEOUT_SEC: u32 = 30;
+
+/// Build a bounded `getUpdates` request body for the embedded runtime.
+pub fn build_get_updates_body(since: i64, timeout_sec: u32) -> String {
+    let timeout = timeout_sec.clamp(MIN_POLL_TIMEOUT_SEC, MAX_POLL_TIMEOUT_SEC);
+    format!(
+        r#"{{"offset":{},"timeout":{},"limit":{},"allowed_updates":["message"]}}"#,
+        since, timeout, GET_UPDATES_LIMIT
+    )
+}
 
 #[cfg(feature = "esp32")]
 enum Transport {
@@ -113,10 +128,7 @@ impl MessageSource for TelegramMessenger {
         since: i64,
         timeout_sec: u32,
     ) -> Result<Vec<InboundMessage>, MessengerError> {
-        let body = format!(
-            r#"{{"offset":{},"timeout":{},"limit":100,"allowed_updates":["message"]}}"#,
-            since, timeout_sec
-        );
+        let body = build_get_updates_body(since, timeout_sec);
         let result: ApiResult<Vec<Update>> = self.post_and_parse("getUpdates", &body)?;
         let updates = Self::check_ok(result)?.unwrap_or_default();
         let messages = updates

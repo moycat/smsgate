@@ -305,6 +305,9 @@ Keep `sdkconfig.defaults` aligned with the board and firmware behavior:
 
 - 4 MB flash size for the reference board.
 - ESP-IDF built-in single-app-large partition table.
+- 240 MHz CPU frequency for the reference ESP32.
+- Bluetooth disabled; the firmware does not use BT controller or host features.
+- Dual-core FreeRTOS enabled; do not enable unicore builds for the reference board.
 - TLS certificate bundle enabled and insecure TLS disabled.
 - Main task stack large enough for current firmware paths.
 - Watchdog timeouts high enough for modem, flash, and TLS operations while still catching
@@ -313,6 +316,10 @@ Keep `sdkconfig.defaults` aligned with the board and firmware behavior:
 Long blocking operations such as modem HTTP, SMS send, and flash erase/write must yield
 or reset watchdog state often enough for ESP-IDF watchdogs. Avoid long critical sections and
 avoid blocking interrupts around UART or flash work.
+
+Telegram polling (`tg-poll`) and outbound Telegram delivery (`tg-send`) are separate runtime
+threads. Main/SMS code should not own a WiFi TLS client directly. Keep modem UART operations
+single-owner and ordered; do not let multiple tasks issue AT commands concurrently.
 
 After changing the partition layout, run a firmware build so ESP-IDF regenerates
 `target/xtensa-esp32-espidf/release/partition-table.bin`, then flash with `espflash flash`.
@@ -325,6 +332,10 @@ new sequence is safe.
 SIM PIN unlock runs after the basic AT probe and `ATE0`, before PDU mode, CNMI setup,
 storage checks, and network registration. Preserve this ordering: locked SIMs cannot
 register, and SMS setup may fail or behave inconsistently before `+CPIN: READY`.
+
+Cellular fallback is opt-in only. Runtime WiFi failure or Telegram poll staleness may switch
+Telegram transport to modem HTTP only when `[modem].cellular_fallback = true` and APN is
+configured. If fallback is disabled, keep retrying WiFi and do not attach PDP.
 
 ## Key Invariants
 
@@ -381,6 +392,11 @@ slot retry/delete semantics. Direct `+CMT` two-line parsing exists as a defensiv
 but do not switch modem init to `mt=2` without tests and hardware validation for two-line
 delivery, storage cleanup, retries, and UART buffering.
 
+Boot sweep tries `AT+CMGL=4` first, then falls back to `AT+CMGL="ALL"` for SIMCom firmware
+that reports `+CMS ERROR: Invalid text mode parameter` for the numeric PDU-mode list form.
+Keep this fallback unless hardware logs prove both board and modem firmware accept only one
+form. New SMS delivery still relies on stored-slot `+CMTI` plus `AT+CMGR=<index>`.
+
 **`AT+CPIN?` / SIM PIN**: startup checks SIM readiness before SMS and registration setup.
 When the modem reports `+CPIN: SIM PIN`, `[modem].sim_pin` must contain a 4-8 digit PIN;
 the firmware sends `AT+CPIN` once, waits for `+CPIN: READY`, and never logs the PIN. If
@@ -395,6 +411,10 @@ before each `AT+CMGR` to guarantee the read uses the correct storage. SMS is del
 a successful Telegram forward — if `forward_sms` fails the slot stays occupied and sweep on
 next boot retries. Do not add `AT+CPMS="SM","SM","SM"` to modem init: it silently triggers
 CMTI notifications for all stored SMS which can overflow the 256-byte UART Rx buffer during init.
+
+Do not send Telegram messages while holding the modem mutex. Read modem slots and perform
+hang-up/status/CMGS operations under the mutex, then release it before IM delivery; reacquire
+only for short follow-up operations such as `AT+CMGD` after successful forwarding.
 
 ## Forbidden Patterns
 
