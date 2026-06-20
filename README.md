@@ -15,7 +15,7 @@ Reference hardware: **LilyGo T-A7670X** (A7670G LTE modem, CH9102 USB bridge).
 - Incoming call notification with auto-hangup
 - Multipart SMS reassembly (concatenated SMS)
 - PDU-mode SMS encoding/decoding (GSM-7 + UCS-2)
-- Bot commands: `/help`, `/status`, `/send`, `/block`, `/unblock`, `/pause`, `/resume`, `/log`, `/restart`
+- Bot commands: `/help`, `/status`, `/send`, `/block`, `/blocklist`, `/unblock`, `/pause`, `/resume`, `/log`, `/restart`
 - i18n: English and Chinese (compile-time locale selection, zero overhead)
 - NVS persistence for cursor, reply mapping, and block list
 - Outbound SMS queue with exponential-backoff retry

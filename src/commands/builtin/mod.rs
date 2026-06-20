@@ -6,7 +6,7 @@ pub mod restart;
 pub mod send;
 pub mod status;
 
-pub use block::{BlockCommand, UnblockCommand};
+pub use block::{BlockCommand, BlockListCommand, UnblockCommand};
 pub use help::HelpCommand;
 pub use log_cmd::LogCommand;
 pub use pause::{PauseCommand, ResumeCommand};

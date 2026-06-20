@@ -169,6 +169,12 @@ pub fn block_usage() -> &'static str {
 pub fn block_ok(phone: &str) -> String {
     format!("已屏蔽：{}", phone)
 }
+pub fn blocklist_empty() -> &'static str {
+    "屏蔽名单为空。"
+}
+pub fn blocklist_header(n: usize) -> String {
+    format!("屏蔽名单（{} 个）：\n", n)
+}
 
 pub fn unblock_usage() -> &'static str {
     "用法：/unblock <号码>"
@@ -214,6 +220,9 @@ pub fn desc_log() -> &'static str {
 }
 pub fn desc_block() -> &'static str {
     "屏蔽号码"
+}
+pub fn desc_blocklist() -> &'static str {
+    "查看屏蔽名单"
 }
 pub fn desc_unblock() -> &'static str {
     "解除屏蔽"

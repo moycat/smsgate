@@ -169,6 +169,12 @@ pub fn block_usage() -> &'static str {
 pub fn block_ok(phone: &str) -> String {
     format!("Blocked: {}", phone)
 }
+pub fn blocklist_empty() -> &'static str {
+    "Block list is empty."
+}
+pub fn blocklist_header(n: usize) -> String {
+    format!("Blocked numbers ({}):\n", n)
+}
 
 pub fn unblock_usage() -> &'static str {
     "Usage: /unblock <number>"
@@ -214,6 +220,9 @@ pub fn desc_log() -> &'static str {
 }
 pub fn desc_block() -> &'static str {
     "Block SMS from a number"
+}
+pub fn desc_blocklist() -> &'static str {
+    "Show blocked numbers"
 }
 pub fn desc_unblock() -> &'static str {
     "Unblock SMS from a number"

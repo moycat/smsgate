@@ -20,6 +20,7 @@ fn make_registry() -> CommandRegistry {
     r.register(Box::new(SendCommand));
     r.register(Box::new(LogCommand));
     r.register(Box::new(BlockCommand));
+    r.register(Box::new(BlockListCommand));
     r.register(Box::new(UnblockCommand));
     r.register(Box::new(PauseCommand));
     r.register(Box::new(ResumeCommand));

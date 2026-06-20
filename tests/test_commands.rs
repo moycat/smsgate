@@ -16,6 +16,7 @@ fn make_registry() -> CommandRegistry {
     r.register(Box::new(SendCommand));
     r.register(Box::new(LogCommand));
     r.register(Box::new(BlockCommand));
+    r.register(Box::new(BlockListCommand));
     r.register(Box::new(UnblockCommand));
     r.register(Box::new(PauseCommand));
     r.register(Box::new(ResumeCommand));
@@ -66,7 +67,7 @@ fn registry_unknown_command_returns_none() {
 #[test]
 fn registry_command_count_not_exceeded() {
     let reg = make_registry();
-    assert_eq!(reg.command_list().len(), 9);
+    assert_eq!(reg.command_list().len(), 10);
 }
 
 #[test]
@@ -78,6 +79,7 @@ fn registry_command_list_includes_all() {
     assert!(names.contains(&"send"));
     assert!(names.contains(&"log"));
     assert!(names.contains(&"block"));
+    assert!(names.contains(&"blocklist"));
     assert!(names.contains(&"unblock"));
     assert!(names.contains(&"pause"));
     assert!(names.contains(&"resume"));
@@ -218,6 +220,30 @@ fn block_command_missing_number() {
 }
 
 #[test]
+fn blocklist_command_empty() {
+    let store = MemStore::new();
+    let status = ModemStatus::default();
+    let log = LogRing::new();
+    let queue = SmsSender::new();
+    let result = BlockListCommand.handle("", &ctx(&store, &status, &log, &queue));
+    assert!(result.contains(i18n::blocklist_empty()));
+}
+
+#[test]
+fn blocklist_command_lists_blocked_numbers() {
+    let mut store = MemStore::new();
+    smsgate::bridge::forwarder::add_to_blocklist("+86 10086", &mut store).unwrap();
+    smsgate::bridge::forwarder::add_to_blocklist("10010", &mut store).unwrap();
+    let status = ModemStatus::default();
+    let log = LogRing::new();
+    let queue = SmsSender::new();
+    let result = BlockListCommand.handle("", &ctx(&store, &status, &log, &queue));
+    assert!(result.contains(i18n::blocklist_header(2).trim()));
+    assert!(result.contains("+8610086"));
+    assert!(result.contains("10010"));
+}
+
+#[test]
 fn pause_command_default_60min() {
     let store = MemStore::new();
     let status = ModemStatus::default();
@@ -351,6 +377,7 @@ fn registry_help_text_contains_all_commands() {
     assert!(text.contains("/status"));
     assert!(text.contains("/send"));
     assert!(text.contains("/block"));
+    assert!(text.contains("/blocklist"));
     assert!(text.contains("/unblock"));
     assert!(text.contains("/pause"));
     assert!(text.contains("/resume"));
