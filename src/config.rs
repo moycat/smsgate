@@ -24,6 +24,7 @@ impl Config {
     pub const MODEM_APN: &'static str = env!("CFG_MODEM_APN");
     pub const MODEM_APN_USER: &'static str = env!("CFG_MODEM_APN_USER");
     pub const MODEM_APN_PASS: &'static str = env!("CFG_MODEM_APN_PASS");
+    pub const MODEM_SIM_PIN: &'static str = env!("CFG_MODEM_SIM_PIN");
     pub const MAX_FAILURES: u8 = parse_u8_const(env!("CFG_BRIDGE_MAX_FAILURES"));
     pub const POLL_INTERVAL_MS: u32 = parse_u32_const(env!("CFG_BRIDGE_POLL_INTERVAL_MS"));
     pub const WATCHDOG_TIMEOUT_SEC: u32 = parse_u32_const(env!("CFG_BRIDGE_WATCHDOG_SEC"));

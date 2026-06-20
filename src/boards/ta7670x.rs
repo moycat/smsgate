@@ -156,7 +156,7 @@ impl Board for TA7670X {
         let port = HardwareAtPort::new(uart);
         let mut modem = A76xxModem::new(port);
         modem
-            .init(Config::MODEM_CELLULAR_DATA)
+            .init(Config::MODEM_CELLULAR_DATA, Config::MODEM_SIM_PIN)
             .map_err(|e| BoardError::Uart(e.to_string()))?;
 
         Ok(Arc::new(Mutex::new(modem)))

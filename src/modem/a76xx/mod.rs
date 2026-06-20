@@ -1,6 +1,7 @@
 //! A76xx modem driver — ESP32 / UART implementation.
 
 pub mod at;
+pub mod sim;
 
 #[cfg(feature = "esp32")]
 pub mod qhttp;
@@ -32,9 +33,9 @@ impl A76xxModem {
     }
 
     /// Run the initialisation sequence:
-    /// - Echo off, PDU mode, enable CMT URCs, wait for network registration.
+    /// - Echo off, unlock SIM if needed, PDU mode, enable CMT URCs, wait for network registration.
     /// - Optionally attach or detach packet-switched service (`AT+CGATT`).
-    pub fn init(&mut self, cellular_data: bool) -> Result<(), ModemError> {
+    pub fn init(&mut self, cellular_data: bool, sim_pin: &str) -> Result<(), ModemError> {
         // Probe until the modem responds to AT (up to 15 s).
         // A7670G typically takes 5-10 s after power-on to become responsive.
         let probe_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -51,7 +52,16 @@ impl A76xxModem {
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
 
-        for cmd in &["E0", "+CMGF=0", "+CLIP=1"] {
+        let r = self.send_at("E0")?;
+        if r.ok {
+            log::info!("[a76xx] init ATE0 OK");
+        } else {
+            log::warn!("[a76xx] init ATE0 ERROR: {}", r.body.trim());
+        }
+
+        sim::ensure_sim_unlocked(self, sim_pin)?;
+
+        for cmd in &["+CMGF=0", "+CLIP=1"] {
             let r = self.send_at(cmd)?;
             if r.ok {
                 log::info!("[a76xx] init AT{} OK", cmd);

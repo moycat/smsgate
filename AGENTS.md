@@ -168,6 +168,12 @@ enter serial provisioning unless credentials already exist in NVS. For normal
 firmware builds, copy `config.toml.example` to `config.toml` and fill in real
 values before building.
 
+`[modem].sim_pin` is an optional compile-time SIM unlock PIN. Leave it empty for
+an unlocked SIM or a SIM with PIN disabled. If the SIM reports `SIM PIN` during
+startup, the value must be a 4-8 digit string; the firmware sends it once with
+`AT+CPIN` before network registration and SMS setup. Never log or hardcode real
+SIM PIN values.
+
 ## Architecture
 
 The system is built around core traits. All business logic depends only on these;
@@ -316,6 +322,10 @@ For modem issues, check LilyGo/SIMCom firmware notes and known issues before cha
 sequence. Preserve the existing SMS storage behavior unless tests and hardware logs prove the
 new sequence is safe.
 
+SIM PIN unlock runs after the basic AT probe and `ATE0`, before PDU mode, CNMI setup,
+storage checks, and network registration. Preserve this ordering: locked SIMs cannot
+register, and SMS setup may fail or behave inconsistently before `+CPIN: READY`.
+
 ## Key Invariants
 
 Verify after every change:
@@ -370,6 +380,12 @@ registration checks would always return `false`. Do not add them back to `is_urc
 slot retry/delete semantics. Direct `+CMT` two-line parsing exists as a defensive fallback,
 but do not switch modem init to `mt=2` without tests and hardware validation for two-line
 delivery, storage cleanup, retries, and UART buffering.
+
+**`AT+CPIN?` / SIM PIN**: startup checks SIM readiness before SMS and registration setup.
+When the modem reports `+CPIN: SIM PIN`, `[modem].sim_pin` must contain a 4-8 digit PIN;
+the firmware sends `AT+CPIN` once, waits for `+CPIN: READY`, and never logs the PIN. If
+the modem reports `SIM PUK`, do not attempt PIN unlock in firmware; recover the SIM with
+carrier tooling first.
 
 **`AT+CPMS` and storage memory**: Some modems (e.g. A7670G on T-A7670X) return `+CMS ERROR`
 to `AT+CPMS?` because the SIM doesn't support SMS management queries. When that happens the

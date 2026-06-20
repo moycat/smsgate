@@ -93,6 +93,10 @@ fn main() {
         get("modem", "apn_pass")
     );
     println!(
+        "cargo:rustc-env=CFG_MODEM_SIM_PIN={}",
+        get("modem", "sim_pin")
+    );
+    println!(
         "cargo:rustc-env=CFG_BRIDGE_MAX_FAILURES={}",
         get("bridge", "max_failures_before_reboot")
     );
@@ -147,6 +151,7 @@ fn emit_empty_defaults() {
     println!("cargo:rustc-env=CFG_MODEM_APN=");
     println!("cargo:rustc-env=CFG_MODEM_APN_USER=");
     println!("cargo:rustc-env=CFG_MODEM_APN_PASS=");
+    println!("cargo:rustc-env=CFG_MODEM_SIM_PIN=");
     println!("cargo:rustc-env=CFG_BRIDGE_MAX_FAILURES=8");
     println!("cargo:rustc-env=CFG_BRIDGE_POLL_INTERVAL_MS=3000");
     println!("cargo:rustc-env=CFG_BRIDGE_WATCHDOG_SEC=120");
