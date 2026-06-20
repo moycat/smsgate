@@ -2,7 +2,7 @@
 
 use smsgate::bridge::reply_router::ReplyRouter;
 use smsgate::bridge::sms_handler::{
-    delete_sms_slot, process_pdu_hex, read_new_sms_pdu, read_stored_sms,
+    delete_sms_slot, process_pdu_hex, process_stored_sms, read_new_sms_pdu, read_stored_sms,
 };
 use smsgate::log_ring::LogRing;
 use smsgate::persist::mem::MemStore;
@@ -175,6 +175,7 @@ fn process_pdu_hex_concat_both_parts_forward_once() {
 #[test]
 fn read_new_sms_pdu_does_not_delete_slot() {
     let modem = ScriptedModem::new()
+        .expect("+CMGF=0", "", true)
         .expect("+CPMS=\"ME\"", "", true)
         .expect(
             "+CMGR=8",
@@ -197,6 +198,7 @@ fn read_new_sms_pdu_does_not_delete_slot() {
 #[test]
 fn new_sms_read_process_delete_flow() {
     let modem = ScriptedModem::new()
+        .expect("+CMGF=0", "", true)
         .expect("+CPMS=\"ME\"", "", true)
         .expect(
             "+CMGR=1",
@@ -233,6 +235,7 @@ fn new_sms_read_process_delete_flow() {
 #[test]
 fn read_new_sms_pdu_cmgr_error_returns_none() {
     let modem = ScriptedModem::new()
+        .expect("+CMGF=0", "", true)
         .expect("+CPMS=\"ME\"", "", true)
         .expect("+CMGR=2", "+CMS ERROR: 321", false);
 
@@ -244,8 +247,45 @@ fn read_new_sms_pdu_cmgr_error_returns_none() {
 }
 
 #[test]
+fn new_sms_text_mode_ucs2_uses_cmgr_header_metadata() {
+    let modem = ScriptedModem::new()
+        .expect("+CMGF=0", "", true)
+        .expect("+CPMS=\"ME\"", "", true)
+        .expect(
+            "+CMGR=1",
+            "+CMGR: \"REC UNREAD\",\"10086\",\"\",\"26/06/21,05:00:15+32\"\n0031003200330030003800299A7B7F8E56FD",
+            true,
+        );
+
+    let mut modem = modem;
+    let mut router = ReplyRouter::new();
+    let mut log = LogRing::new();
+    let mut concat = ConcatReassembler::new();
+    let mut messenger = RecordingMessenger::new();
+    let mut store = MemStore::new();
+
+    let stored = read_new_sms_pdu("ME", 1, &mut modem).expect("SMS should be read");
+    let delete = process_stored_sms(
+        stored,
+        &mut router,
+        &mut log,
+        &mut concat,
+        &mut messenger,
+        &mut store,
+    );
+
+    modem.check_consumed();
+    assert!(delete);
+    let sent = messenger.last_sent().expect("SMS should be forwarded");
+    assert!(sent.contains("10086"));
+    assert!(sent.contains("2026-06-21T05:00:15+08:00"));
+    assert!(sent.contains("12308)驻美国"));
+}
+
+#[test]
 fn new_sms_invalid_pdu_deletes_slot() {
     let modem = ScriptedModem::new()
+        .expect("+CMGF=0", "", true)
         .expect("+CPMS=\"ME\"", "", true)
         .expect("+CMGR=3", "+CMGR: 0,,2\nDEAD", true)
         .expect("+CMGD=3", "", true);
@@ -281,7 +321,9 @@ fn new_sms_invalid_pdu_deletes_slot() {
 #[test]
 fn read_stored_sms_empty_storage() {
     // AT+CMGL=4 returns OK with empty body
-    let modem = ScriptedModem::new().expect("+CMGL=4", "", true);
+    let modem = ScriptedModem::new()
+        .expect("+CMGF=0", "", true)
+        .expect("+CMGL=4", "", true);
 
     let mut modem = modem;
     let stored = read_stored_sms("ME", &mut modem);
@@ -294,7 +336,9 @@ fn read_stored_sms_empty_storage() {
 fn read_stored_sms_finds_pdu() {
     // AT+CMGL=4 returns one entry at slot 1
     let cmgl_body = format!("+CMGL: 1,0,,18\n{}", pdu(HELLO_PDU));
-    let modem = ScriptedModem::new().expect("+CMGL=4", &cmgl_body, true);
+    let modem = ScriptedModem::new()
+        .expect("+CMGF=0", "", true)
+        .expect("+CMGL=4", &cmgl_body, true);
 
     let mut modem = modem;
     let stored = read_stored_sms("ME", &mut modem);
@@ -314,7 +358,9 @@ fn read_stored_sms_finds_multiple_pdus() {
         pdu(HELLO_PDU),
         pdu(HELLO_PDU)
     );
-    let modem = ScriptedModem::new().expect("+CMGL=4", &cmgl_body, true);
+    let modem = ScriptedModem::new()
+        .expect("+CMGF=0", "", true)
+        .expect("+CMGL=4", &cmgl_body, true);
 
     let mut modem = modem;
     let stored = read_stored_sms("ME", &mut modem);
@@ -329,6 +375,7 @@ fn read_stored_sms_finds_multiple_pdus() {
 fn read_stored_sms_cmgl_errors_return_empty_list() {
     // Both list forms return errors (e.g. storage not supported).
     let modem = ScriptedModem::new()
+        .expect("+CMGF=0", "", true)
         .expect("+CMGL=4", "+CMS ERROR: 302", false)
         .expect("+CMGL=\"ALL\"", "+CMS ERROR: 302", false);
 
@@ -343,6 +390,7 @@ fn read_stored_sms_cmgl_errors_return_empty_list() {
 fn read_stored_sms_falls_back_to_text_all_list_form() {
     let cmgl_body = format!("+CMGL: 1,0,,18\n{}", pdu(HELLO_PDU));
     let modem = ScriptedModem::new()
+        .expect("+CMGF=0", "", true)
         .expect("+CMGL=4", "+CMS ERROR: Invalid text mode parameter", false)
         .expect("+CMGL=\"ALL\"", &cmgl_body, true);
 
@@ -356,10 +404,51 @@ fn read_stored_sms_falls_back_to_text_all_list_form() {
 }
 
 #[test]
+fn read_stored_sms_accepts_text_mode_ucs2_entries() {
+    let modem = ScriptedModem::new().expect(
+        "+CMGF=0",
+        "",
+        true,
+    )
+    .expect(
+        "+CMGL=4",
+        "+CMGL: 1,\"REC UNREAD\",\"10086\",\"\",\"26/06/21,05:00:15+32\"\n0031003200330030003800299A7B7F8E56FD",
+        true,
+    );
+
+    let mut modem = modem;
+    let mut router = ReplyRouter::new();
+    let mut log = LogRing::new();
+    let mut concat = ConcatReassembler::new();
+    let mut messenger = RecordingMessenger::new();
+    let mut store = MemStore::new();
+
+    let stored = read_stored_sms("ME", &mut modem);
+    assert_eq!(stored.len(), 1);
+
+    let delete = process_stored_sms(
+        stored.into_iter().next().unwrap(),
+        &mut router,
+        &mut log,
+        &mut concat,
+        &mut messenger,
+        &mut store,
+    );
+
+    modem.check_consumed();
+    assert!(delete);
+    let sent = messenger.last_sent().expect("SMS should be forwarded");
+    assert!(sent.contains("10086"));
+    assert!(sent.contains("2026-06-21T05:00:15+08:00"));
+    assert!(sent.contains("12308)驻美国"));
+}
+
+#[test]
 fn new_sms_messenger_failure_keeps_slot() {
     // If forward_sms fails (messenger down), the slot must NOT be deleted.
     // The SMS stays for retry on next boot.
     let modem = ScriptedModem::new()
+        .expect("+CMGF=0", "", true)
         .expect("+CPMS=\"ME\"", "", true)
         .expect(
             "+CMGR=4",

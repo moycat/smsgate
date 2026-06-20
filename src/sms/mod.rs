@@ -10,7 +10,7 @@ use thiserror::Error;
 pub const MAX_SMS_PARTS: usize = 10;
 
 /// A fully-decoded inbound SMS message.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmsMessage {
     /// Sender phone number (E.164 or national format).
     pub sender: String,

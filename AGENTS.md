@@ -392,10 +392,17 @@ slot retry/delete semantics. Direct `+CMT` two-line parsing exists as a defensiv
 but do not switch modem init to `mt=2` without tests and hardware validation for two-line
 delivery, storage cleanup, retries, and UART buffering.
 
+`AT+CMGF=0` is volatile modem state, not a permanent firmware invariant. Reassert PDU mode
+before `AT+CMGR` and `AT+CMGL`; if the modem has reset or drifted back to text mode, text-mode
+headers such as `+CMGR: "REC UNREAD","10086",...` contain correct sender/timestamp metadata while
+the following UCS2 hex line is not a PDU. `AT+CMGL="ALL"` does not switch modes; it is only a
+text-mode list argument accepted when `CMGF=1`. Keep the text-mode parser as a fallback, but prefer
+PDU mode so multipart SMS retains UDH and can be reassembled correctly.
+
 Boot sweep tries `AT+CMGL=4` first, then falls back to `AT+CMGL="ALL"` for SIMCom firmware
-that reports `+CMS ERROR: Invalid text mode parameter` for the numeric PDU-mode list form.
-Keep this fallback unless hardware logs prove both board and modem firmware accept only one
-form. New SMS delivery still relies on stored-slot `+CMTI` plus `AT+CMGR=<index>`.
+that reports `+CMS ERROR: Invalid text mode parameter` for the numeric list form. Keep this
+fallback unless hardware logs prove both board and modem firmware accept only one form. New
+SMS delivery still relies on stored-slot `+CMTI` plus `AT+CMGR=<index>`.
 
 **`AT+CPIN?` / SIM PIN**: startup checks SIM readiness before SMS and registration setup.
 When the modem reports `+CPIN: SIM PIN`, `[modem].sim_pin` must contain a 4-8 digit PIN;

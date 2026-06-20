@@ -170,9 +170,10 @@ fn main() {
             read_stored_sms("ME", &mut *md)
         };
         for sms in stored {
-            let delete = process_pdu_hex(
-                &sms.pdu_hex,
-                sms.index,
+            let index = sms.index;
+            let mem = sms.mem.clone();
+            let delete = smsgate::bridge::sms_handler::process_stored_sms(
+                sms,
                 &mut router,
                 &mut log,
                 &mut concat,
@@ -181,12 +182,12 @@ fn main() {
             );
             if delete {
                 let mut md = lock!(modem);
-                delete_sms_slot(sms.index, &mut *md);
+                delete_sms_slot(index, &mut *md);
             } else {
                 log::warn!(
                     "[main] sweep forward failed — SMS stays at {} slot {}",
-                    sms.mem,
-                    sms.index
+                    mem,
+                    index
                 );
             }
         }
@@ -488,9 +489,10 @@ fn main() {
         }
 
         for sms in pending_sms {
-            let delete = process_pdu_hex(
-                &sms.pdu_hex,
-                sms.index,
+            let index = sms.index;
+            let mem = sms.mem.clone();
+            let delete = smsgate::bridge::sms_handler::process_stored_sms(
+                sms,
                 &mut router,
                 &mut log,
                 &mut concat,
@@ -499,12 +501,12 @@ fn main() {
             );
             if delete {
                 let mut md = lock!(modem);
-                delete_sms_slot(sms.index, &mut *md);
+                delete_sms_slot(index, &mut *md);
             } else {
                 log::warn!(
                     "[main] forward failed — SMS stays at mem={} slot={}",
-                    sms.mem,
-                    sms.index
+                    mem,
+                    index
                 );
             }
         }
