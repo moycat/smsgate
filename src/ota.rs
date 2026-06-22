@@ -40,30 +40,25 @@ pub struct RunningSlotSummary<'a> {
     pub partition_label: &'a str,
     pub partition_address: u32,
     pub partition_size: u32,
-    pub firmware_version: &'a str,
     pub firmware_released: &'a str,
     pub build_commit: &'a str,
 }
 
 pub fn format_running_slot_summary(summary: &RunningSlotSummary<'_>) -> String {
     format!(
-        "running slot={} state={} partition={} offset=0x{:x} size={} version={} released={} build={}",
+        "running slot={} state={} partition={} offset=0x{:x} size={} released={} build={}",
         summary.slot_label,
         summary.slot_state,
         summary.partition_label,
         summary.partition_address,
         summary.partition_size,
-        summary.firmware_version,
         summary.firmware_released,
         summary.build_commit
     )
 }
 
-pub fn format_starting_message(firmware_version: &str, build_commit: &str) -> String {
-    format!(
-        "smsgate starting… version={} build={}",
-        firmware_version, build_commit
-    )
+pub fn format_starting_message(build_commit: &str) -> String {
+    format!("smsgate starting… build={}", build_commit)
 }
 
 /// Returns true when a Telegram document caption requests OTA.
@@ -99,48 +94,23 @@ pub fn confirm_running() -> Result<(), OtaError> {
         .map_err(|e| OtaError::Flash(e.to_string()))
 }
 
-/// Returns the version string of the currently running firmware.
-#[cfg(feature = "esp32")]
-pub fn running_version() -> String {
-    match EspOta::new() {
-        Ok(ota) => match ota.get_running_slot() {
-            Ok(slot) => slot
-                .firmware
-                .map(|f| f.version.to_string())
-                .unwrap_or_else(|| "unknown".into()),
-            Err(_) => "unknown".into(),
-        },
-        Err(_) => "unknown".into(),
-    }
-}
-
 /// Return a serial-friendly summary of the currently running OTA slot.
 #[cfg(feature = "esp32")]
 pub fn running_slot_summary(build_commit: &str) -> String {
-    let (slot_label, slot_state, firmware_version, firmware_released) = match EspOta::new() {
+    let (slot_label, slot_state, firmware_released) = match EspOta::new() {
         Ok(ota) => match ota.get_running_slot() {
             Ok(slot) => {
                 let slot_label = slot.label.to_string();
                 let slot_state = format!("{:?}", slot.state);
-                let (firmware_version, firmware_released) = slot
+                let firmware_released = slot
                     .firmware
-                    .map(|firmware| (firmware.version.to_string(), firmware.released.to_string()))
-                    .unwrap_or_else(|| ("unknown".into(), "unknown".into()));
-                (slot_label, slot_state, firmware_version, firmware_released)
+                    .map(|firmware| firmware.released.to_string())
+                    .unwrap_or_else(|| "unknown".into());
+                (slot_label, slot_state, firmware_released)
             }
-            Err(e) => (
-                "unknown".into(),
-                format!("error:{e}"),
-                "unknown".into(),
-                "unknown".into(),
-            ),
+            Err(e) => ("unknown".into(), format!("error:{e}"), "unknown".into()),
         },
-        Err(e) => (
-            "unknown".into(),
-            format!("error:{e}"),
-            "unknown".into(),
-            "unknown".into(),
-        ),
+        Err(e) => ("unknown".into(), format!("error:{e}"), "unknown".into()),
     };
 
     let (partition_label, partition_address, partition_size) =
@@ -152,7 +122,6 @@ pub fn running_slot_summary(build_commit: &str) -> String {
         partition_label: &partition_label,
         partition_address,
         partition_size,
-        firmware_version: &firmware_version,
         firmware_released: &firmware_released,
         build_commit,
     })

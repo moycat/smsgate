@@ -51,9 +51,7 @@ fn main() {
     esp_idf_sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
 
-    let firmware_version = smsgate::ota::running_version();
-    let starting_message =
-        smsgate::ota::format_starting_message(&firmware_version, Config::GIT_COMMIT);
+    let starting_message = smsgate::ota::format_starting_message(Config::GIT_COMMIT);
     log::info!("{}", starting_message);
     log::info!(
         "[boot] {}",

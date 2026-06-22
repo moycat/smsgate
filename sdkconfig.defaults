@@ -34,6 +34,10 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_ota.csv"
 CONFIG_PARTITION_TABLE_OFFSET=0x8000
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
+# Firmware identity is logged by Rust as build=<git short hash>. Do not embed
+# ESP-IDF's PROJECT_VER, because its CMake cache can lag behind Git.
+CONFIG_APP_EXCLUDE_PROJECT_VER_VAR=y
+
 # ---- Logging ----
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_LOG_DEFAULT_LEVEL=3

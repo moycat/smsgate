@@ -44,14 +44,13 @@ fn latest_ota_document_cursor_ignores_non_ota_documents() {
 }
 
 #[test]
-fn running_slot_summary_includes_partition_and_firmware_version() {
+fn running_slot_summary_includes_partition_and_build() {
     let summary = format_running_slot_summary(&RunningSlotSummary {
         slot_label: "ota_0",
         slot_state: "Valid",
         partition_label: "ota_0",
         partition_address: 0x20000,
         partition_size: 0x1e0000,
-        firmware_version: "17c4ac8-dirty",
         firmware_released: "unknown",
         build_commit: "17c4ac8",
     });
@@ -61,17 +60,17 @@ fn running_slot_summary_includes_partition_and_firmware_version() {
     assert!(summary.contains("partition=ota_0"));
     assert!(summary.contains("offset=0x20000"));
     assert!(summary.contains("size=1966080"));
-    assert!(summary.contains("version=17c4ac8-dirty"));
     assert!(summary.contains("build=17c4ac8"));
+    assert!(!summary.contains("version="));
 }
 
 #[test]
-fn starting_message_includes_firmware_version_and_build() {
-    let message = format_starting_message("17c4ac8-dirty", "17c4ac8");
+fn starting_message_includes_build_only() {
+    let message = format_starting_message("17c4ac8");
 
     assert!(message.contains("smsgate starting"));
-    assert!(message.contains("version=17c4ac8-dirty"));
     assert!(message.contains("build=17c4ac8"));
+    assert!(!message.contains("version="));
 }
 
 fn inbound(cursor: i64, text: &str, document: Option<InboundDocument>) -> InboundMessage {
