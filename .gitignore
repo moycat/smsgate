@@ -15,6 +15,7 @@ fuzz/target/
 # IDE
 .vscode/
 .idea/
+docs/superpowers/
 
 # OS
 .DS_Store

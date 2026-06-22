@@ -20,6 +20,8 @@ pub mod a76xx;
 use std::time::Duration;
 use thiserror::Error;
 
+use crate::log_clock::{parse_cclk_time, NetworkDateTime};
+
 /// Raw AT command response.
 #[derive(Debug, Clone)]
 pub struct AtResponse {
@@ -159,5 +161,16 @@ pub trait ModemPort: AtTransport {
             s.registered = creg_registered(&r.body);
         }
         s
+    }
+
+    /// Query modem RTC time. A76xx exposes network-updated local time via CCLK
+    /// once CTZU/NITZ has provided a valid time zone and clock.
+    fn query_network_time(&mut self) -> Result<NetworkDateTime, ModemError> {
+        let r = self.send_at("+CCLK?")?;
+        if !r.ok {
+            return Err(ModemError::AtError(r.body));
+        }
+        parse_cclk_time(&r.body)
+            .ok_or_else(|| ModemError::AtError(format!("invalid CCLK response: {}", r.body)))
     }
 }

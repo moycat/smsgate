@@ -61,6 +61,12 @@ impl A76xxModem {
 
         sim::ensure_sim_unlocked(self, sim_pin)?;
 
+        match self.send_at("+CTZU=1") {
+            Ok(r) if r.ok => log::info!("[a76xx] network time update enabled (CTZU=1)"),
+            Ok(r) => log::warn!("[a76xx] CTZU=1 ERROR: {}", r.body.trim()),
+            Err(e) => log::warn!("[a76xx] CTZU=1 failed: {}", e),
+        }
+
         for cmd in &["+CMGF=0", "+CLIP=1"] {
             let r = self.send_at(cmd)?;
             if r.ok {

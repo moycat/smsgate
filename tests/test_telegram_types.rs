@@ -1,6 +1,9 @@
 //! Tests for Telegram Bot API JSON deserialization (types.rs).
 
-use smsgate::im::telegram::types::{json_escape, ApiResult, SendMessageResult, Update};
+use smsgate::im::telegram::types::{
+    json_escape, ApiResult, SendMessageResult, TelegramFile, Update,
+};
+use smsgate::im::telegram::update_to_inbound_message;
 
 // ---------------------------------------------------------------------------
 // json_escape — used by send_message to build valid JSON bodies
@@ -159,6 +162,91 @@ fn get_updates_with_reply_to() {
 }
 
 #[test]
+fn get_updates_with_document() {
+    let json = r#"{
+        "ok": true,
+        "result": [{
+            "update_id": 250,
+            "message": {
+                "message_id": 11,
+                "caption": "/ota sha256:abc",
+                "chat": {"id": 111},
+                "document": {
+                    "file_id": "BQACAgUAAxkBAAIB",
+                    "file_unique_id": "AgADabc",
+                    "file_name": "smsgate-ota.bin",
+                    "mime_type": "application/octet-stream",
+                    "file_size": 1312656
+                }
+            }
+        }]
+    }"#;
+    let r: ApiResult<Vec<Update>> = serde_json::from_str(json).unwrap();
+    let updates = r.result.unwrap();
+    let msg = updates[0].message.as_ref().unwrap();
+    let doc = msg.document.as_ref().unwrap();
+    assert_eq!(msg.caption.as_deref(), Some("/ota sha256:abc"));
+    assert_eq!(doc.file_id, "BQACAgUAAxkBAAIB");
+    assert_eq!(doc.file_unique_id, "AgADabc");
+    assert_eq!(doc.file_name.as_deref(), Some("smsgate-ota.bin"));
+    assert_eq!(doc.mime_type.as_deref(), Some("application/octet-stream"));
+    assert_eq!(doc.file_size, Some(1_312_656));
+}
+
+#[test]
+fn document_update_maps_to_inbound_message() {
+    let json = r#"{
+        "update_id": 251,
+        "message": {
+            "message_id": 12,
+            "caption": "/ota",
+            "chat": {"id": 111},
+            "document": {
+                "file_id": "file-123",
+                "file_unique_id": "unique-123",
+                "file_name": "smsgate-ota.bin",
+                "file_size": 1312656
+            }
+        }
+    }"#;
+    let update: Update = serde_json::from_str(json).unwrap();
+
+    let inbound = update_to_inbound_message(update, 111).unwrap();
+
+    assert_eq!(inbound.cursor, 252);
+    assert_eq!(inbound.text, "/ota");
+    let document = inbound.document.as_ref().unwrap();
+    assert_eq!(document.file_id, "file-123");
+    assert_eq!(document.file_name.as_deref(), Some("smsgate-ota.bin"));
+    assert_eq!(document.file_size, Some(1_312_656));
+}
+
+#[test]
+fn callback_query_maps_to_inbound_message() {
+    let json = r#"{
+        "update_id": 260,
+        "callback_query": {
+            "id": "callback-1",
+            "data": "log:16",
+            "message": {
+                "message_id": 44,
+                "chat": {"id": 111}
+            }
+        }
+    }"#;
+    let update: Update = serde_json::from_str(json).unwrap();
+
+    let inbound = update_to_inbound_message(update, 111).unwrap();
+
+    assert_eq!(inbound.cursor, 261);
+    assert_eq!(inbound.text, "log:16");
+    let callback = inbound.callback.as_ref().unwrap();
+    assert_eq!(callback.id, "callback-1");
+    assert_eq!(callback.data, "log:16");
+    assert_eq!(callback.message_id, 44);
+}
+
+#[test]
 fn get_updates_message_without_text() {
     // Non-text messages (stickers, photos, etc.) arrive with no "text" field
     let json = r#"{
@@ -212,4 +300,25 @@ fn get_updates_api_error() {
     assert!(!r.ok);
     assert!(r.result.is_none());
     assert!(r.description.unwrap().contains("Too Many Requests"));
+}
+
+#[test]
+fn get_file_result_extracts_download_path() {
+    let json = r#"{
+        "ok": true,
+        "result": {
+            "file_id": "file-123",
+            "file_unique_id": "unique-123",
+            "file_size": 1312656,
+            "file_path": "documents/file_42.bin"
+        }
+    }"#;
+
+    let r: ApiResult<TelegramFile> = serde_json::from_str(json).unwrap();
+
+    let file = r.result.unwrap();
+    assert_eq!(file.file_id, "file-123");
+    assert_eq!(file.file_unique_id, "unique-123");
+    assert_eq!(file.file_size, Some(1_312_656));
+    assert_eq!(file.file_path.as_deref(), Some("documents/file_42.bin"));
 }

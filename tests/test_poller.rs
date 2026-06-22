@@ -4,8 +4,8 @@ use smsgate::bridge::forwarder::is_blocked;
 use smsgate::bridge::poller::poll_and_dispatch;
 use smsgate::bridge::reply_router::ReplyRouter;
 use smsgate::commands::{builtin::*, CommandRegistry};
-use smsgate::im::InboundMessage;
-use smsgate::log_ring::LogRing;
+use smsgate::im::{InboundCallback, InboundMessage, MessageFormat};
+use smsgate::log_ring::{LogKind, LogRing};
 use smsgate::modem::ModemStatus;
 use smsgate::persist::{keys, load_bool, mem::MemStore};
 use smsgate::sms::sender::SmsSender;
@@ -33,6 +33,8 @@ fn msg(text: &str) -> InboundMessage {
         cursor: 1,
         text: text.to_string(),
         reply_to: None,
+        document: None,
+        callback: None,
     }
 }
 
@@ -41,7 +43,106 @@ fn reply_msg(text: &str, reply_to: i64) -> InboundMessage {
         cursor: 1,
         text: text.to_string(),
         reply_to: Some(reply_to),
+        document: None,
+        callback: None,
     }
+}
+
+fn callback_msg(data: &str, message_id: i64) -> InboundMessage {
+    InboundMessage {
+        cursor: 1,
+        text: data.to_string(),
+        reply_to: None,
+        document: None,
+        callback: Some(InboundCallback {
+            id: "callback-1".to_string(),
+            data: data.to_string(),
+            message_id,
+        }),
+    }
+}
+
+fn fill_log(log: &mut LogRing, count: usize) {
+    for i in 0..count {
+        log.push(smsgate::log_ring::LogEntry::sms(
+            format!("+{i}"),
+            format!("body-{i}"),
+            format!("ts-{i}"),
+            true,
+        ));
+    }
+}
+
+#[test]
+fn log_command_sends_inline_keyboard_for_older_page() {
+    let mut store = MemStore::new();
+    let mut messenger = RecordingMessenger::new();
+    let router = ReplyRouter::new();
+    let reg = make_registry();
+    let mut log = LogRing::new();
+    fill_log(&mut log, 20);
+    let status = ModemStatus::default();
+    let mut sender = SmsSender::new();
+
+    poll_and_dispatch(
+        &[msg("/log")],
+        &mut messenger,
+        &mut sender,
+        &router,
+        &reg,
+        &mut store,
+        &log,
+        &status,
+        0,
+        0,
+        "",
+    )
+    .unwrap();
+
+    assert_eq!(messenger.sent_count(), 1);
+    assert!(messenger.last_sent().unwrap().contains("body-19"));
+    assert_eq!(messenger.sent.last().unwrap().format, MessageFormat::Html);
+    let keyboard = messenger.last_sent_keyboard().unwrap();
+    assert_eq!(keyboard.rows[0].len(), 1);
+    assert_eq!(keyboard.rows[0][0].callback_data, "log:16");
+}
+
+#[test]
+fn log_callback_edits_existing_message() {
+    let mut store = MemStore::new();
+    let mut messenger = RecordingMessenger::new();
+    let router = ReplyRouter::new();
+    let reg = make_registry();
+    let mut log = LogRing::new();
+    fill_log(&mut log, 20);
+    let status = ModemStatus::default();
+    let mut sender = SmsSender::new();
+
+    poll_and_dispatch(
+        &[callback_msg("log:16", 555)],
+        &mut messenger,
+        &mut sender,
+        &router,
+        &reg,
+        &mut store,
+        &log,
+        &status,
+        0,
+        0,
+        "",
+    )
+    .unwrap();
+
+    assert_eq!(messenger.sent_count(), 0);
+    assert_eq!(messenger.edited_count(), 1);
+    let edited = messenger.last_edited().unwrap();
+    assert_eq!(edited.id, 555);
+    assert_eq!(edited.format, MessageFormat::Html);
+    assert!(edited.text.contains("body-3"));
+    assert!(!edited.text.contains("body-4"));
+    let keyboard = edited.keyboard.as_ref().unwrap();
+    assert_eq!(keyboard.rows[0][0].callback_data, "log:0");
+    assert_eq!(messenger.answered_callback_count(), 1);
 }
 
 #[test]
@@ -68,7 +169,12 @@ fn send_sentinel_enqueues_sms() {
         "",
     );
     assert!(result.is_ok());
-    assert!(!result.unwrap().0); // no restart
+    let outcome = result.unwrap();
+    assert!(!outcome.restart_requested); // no restart
+    assert_eq!(outcome.events.len(), 1);
+    assert_eq!(outcome.events[0].kind, LogKind::User);
+    assert_eq!(outcome.events[0].sender, "/send");
+    assert!(outcome.events[0].body_preview.contains("+8613800138000"));
 
     // SMS was enqueued
     assert_eq!(sender.len(), 1);
@@ -250,7 +356,7 @@ fn pause_sentinel_returns_duration() {
     let status = ModemStatus::default();
     let mut sender = SmsSender::new();
 
-    let (restart, pause_mins) = poll_and_dispatch(
+    let outcome = poll_and_dispatch(
         &[msg("/pause 45")],
         &mut messenger,
         &mut sender,
@@ -264,9 +370,9 @@ fn pause_sentinel_returns_duration() {
         "",
     )
     .unwrap();
-    assert!(!restart);
+    assert!(!outcome.restart_requested);
     assert_eq!(
-        pause_mins,
+        outcome.pause_mins,
         Some(45),
         "pause duration must be returned to caller"
     );
@@ -329,10 +435,44 @@ fn restart_sentinel_returns_true() {
         "",
     );
     assert!(result.is_ok());
-    assert!(result.unwrap().0, "restart should be signalled");
+    let outcome = result.unwrap();
+    assert!(outcome.restart_requested, "restart should be signalled");
+    assert_eq!(outcome.events.len(), 1);
+    assert_eq!(outcome.events[0].sender, "/restart");
 
     let reply = messenger.last_sent().unwrap();
     assert!(!reply.contains("__RESTART__"), "sentinel leaked: {}", reply);
+}
+
+#[test]
+fn block_sentinel_emits_user_log_event() {
+    let mut store = MemStore::new();
+    let mut messenger = RecordingMessenger::new();
+    let router = ReplyRouter::new();
+    let reg = make_registry();
+    let log = LogRing::new();
+    let status = ModemStatus::default();
+    let mut sender = SmsSender::new();
+
+    let outcome = poll_and_dispatch(
+        &[msg("/block 10086")],
+        &mut messenger,
+        &mut sender,
+        &router,
+        &reg,
+        &mut store,
+        &log,
+        &status,
+        0,
+        0,
+        "",
+    )
+    .unwrap();
+
+    assert_eq!(outcome.events.len(), 1);
+    assert_eq!(outcome.events[0].sender, "/block");
+    assert!(outcome.events[0].body_preview.contains("10086"));
+    assert!(outcome.events[0].forwarded);
 }
 
 #[test]

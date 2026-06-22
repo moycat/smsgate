@@ -8,7 +8,10 @@ fn main() {
     // Instruct Cargo to rerun this script if config.toml changes.
     println!("cargo:rerun-if-changed=config.toml");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=partitions_ota.csv");
     println!("cargo::rustc-check-cfg=cfg(locale_zh)");
+
+    copy_partition_csv_for_esp_idf();
 
     let config_path = Path::new("config.toml");
     if !config_path.exists() {
@@ -114,6 +117,33 @@ fn main() {
     }
 
     emit_git_commit();
+}
+
+fn copy_partition_csv_for_esp_idf() {
+    let Ok(out_dir) = std::env::var("OUT_DIR") else {
+        return;
+    };
+    let src = Path::new("partitions_ota.csv");
+    if !src.exists() {
+        return;
+    }
+
+    // esp-idf-sys runs CMake from its own build output directory. The custom
+    // partition filename is resolved there, so keep a copy beside its sdkconfig.
+    let Some(build_dir) = Path::new(&out_dir).parent().and_then(|p| p.parent()) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(build_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with("esp-idf-sys-") || !entry.path().is_dir() {
+            continue;
+        }
+        let dst = entry.path().join("out").join("partitions_ota.csv");
+        let _ = std::fs::copy(src, dst);
+    }
 }
 
 fn emit_git_commit() {

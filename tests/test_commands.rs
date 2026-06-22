@@ -2,7 +2,7 @@
 
 use smsgate::commands::{builtin::*, Command, CommandContext, CommandRegistry};
 use smsgate::i18n;
-use smsgate::log_ring::{LogEntry, LogRing};
+use smsgate::log_ring::{LogEntry, LogRing, LOG_PAGE_SIZE};
 use smsgate::modem::ModemStatus;
 use smsgate::persist::{keys, mem::MemStore, save_bool};
 use smsgate::sms::sender::SmsSender;
@@ -136,6 +136,11 @@ fn log_command_empty() {
     let queue = SmsSender::new();
     let result = LogCommand.handle("", &ctx(&store, &status, &log, &queue));
     assert!(result.contains(i18n::log_empty()));
+    assert!(result.contains(&i18n::log_header(0, 0, 0, LOG_PAGE_SIZE)));
+    assert!(result.contains("offset 0"));
+    assert!(!result.contains("/log [offset]"));
+    assert!(!result.contains("更旧一页"));
+    assert!(!result.contains("Older page"));
 }
 
 #[test]
@@ -143,17 +148,86 @@ fn log_command_shows_entries() {
     let store = MemStore::new();
     let status = ModemStatus::default();
     let mut log = LogRing::new();
-    log.push(LogEntry {
-        sender: "+1".to_string(),
-        body_preview: "hello".to_string(),
-        timestamp: "ts".to_string(),
-        forwarded: true,
-    });
+    log.push(LogEntry::sms(
+        "+1".to_string(),
+        "hello".to_string(),
+        "ts".to_string(),
+        true,
+    ));
     let queue = SmsSender::new();
-    let result = LogCommand.handle("3", &ctx(&store, &status, &log, &queue));
+    let result = LogCommand.handle("", &ctx(&store, &status, &log, &queue));
     assert!(result.contains("+1"));
     assert!(result.contains("hello"));
-    assert!(result.contains("✅"));
+    assert!(result.contains("<pre>"));
+    assert!(result.contains("</pre>"));
+    assert!(!result.contains("[INFO]"));
+    assert!(!result.contains("[OK]"));
+    assert!(!result.contains("[FAIL]"));
+    assert!(result.contains("SMS"));
+}
+
+#[test]
+fn log_command_defaults_to_latest_16_entries() {
+    let store = MemStore::new();
+    let status = ModemStatus::default();
+    let mut log = LogRing::new();
+    for i in 0..20 {
+        log.push(LogEntry::sms(
+            format!("+{}", i),
+            format!("body-{i}"),
+            format!("ts-{i}"),
+            true,
+        ));
+    }
+    let queue = SmsSender::new();
+
+    let result = LogCommand.handle("", &ctx(&store, &status, &log, &queue));
+
+    assert!(!result.contains("body-3"));
+    assert!(result.contains("body-4"));
+    assert!(result.contains("body-19"));
+    assert!(result.contains(&i18n::log_header(16, 20, 0, LOG_PAGE_SIZE)));
+    assert!(result.contains("offset 0"));
+    assert!(!result.contains("/log 16"));
+    assert!(!result.contains("/log [offset]"));
+    let entry_lines: Vec<_> = result
+        .lines()
+        .filter(|line| line.contains(" SMS "))
+        .collect();
+    assert!(entry_lines[0].contains("body-19"));
+    assert!(entry_lines[15].contains("body-4"));
+    assert_eq!(entry_lines.len(), 16);
+}
+
+#[test]
+fn log_command_offset_paginates_older_entries() {
+    let store = MemStore::new();
+    let status = ModemStatus::default();
+    let mut log = LogRing::new();
+    for i in 0..20 {
+        log.push(LogEntry::sms(
+            format!("+{}", i),
+            format!("body-{i}"),
+            format!("ts-{i}"),
+            true,
+        ));
+    }
+    let queue = SmsSender::new();
+
+    let result = LogCommand.handle("16", &ctx(&store, &status, &log, &queue));
+
+    assert!(result.contains("body-0"));
+    assert!(result.contains("body-3"));
+    assert!(!result.contains("body-4"));
+    assert!(result.contains(&i18n::log_header(4, 20, 16, LOG_PAGE_SIZE)));
+    assert!(result.contains("offset 16"));
+    let entry_lines: Vec<_> = result
+        .lines()
+        .filter(|line| line.contains(" SMS "))
+        .collect();
+    assert!(entry_lines[0].contains("body-3"));
+    assert!(entry_lines[3].contains("body-0"));
+    assert_eq!(entry_lines.len(), 4);
 }
 
 #[test]

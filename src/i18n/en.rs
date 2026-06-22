@@ -33,6 +33,45 @@ pub fn signal_restored(csq: u8) -> String {
 pub fn operator_changed(old: &str, new: &str) -> String {
     format!("⚠️ Operator changed: {} → {}", old, new)
 }
+pub fn ota_wifi_required() -> &'static str {
+    "OTA requires WiFi. Cellular fallback mode cannot download firmware."
+}
+pub fn ota_starting(name: &str, size: Option<u64>) -> String {
+    match size {
+        Some(bytes) => format!("⬇️ OTA starting: {} ({})", name, format_bytes(bytes)),
+        None => format!("⬇️ OTA starting: {} (unknown size)", name),
+    }
+}
+pub fn ota_progress(written: usize, total: Option<usize>) -> String {
+    match total {
+        Some(total) if total > 0 => format!(
+            "⬇️ OTA progress: {} / {} ({}%)",
+            format_bytes(written as u64),
+            format_bytes(total as u64),
+            written.saturating_mul(100) / total
+        ),
+        _ => format!("⬇️ OTA progress: {}", format_bytes(written as u64)),
+    }
+}
+pub fn ota_complete() -> &'static str {
+    "✅ OTA flashed. Rebooting into new firmware."
+}
+pub fn ota_failed(error: &str) -> String {
+    format!("❌ OTA failed: {}", error)
+}
+pub fn ota_ignored_stale(name: &str) -> String {
+    format!("Ignored older OTA file: {name}. The newest OTA file in this batch will be used.")
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.2} MiB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
+    }
+}
 
 // ── Forwarding ────────────────────────────────────────────────────────────────
 
@@ -157,8 +196,17 @@ pub fn send_rate_limited() -> &'static str {
 pub fn log_empty() -> &'static str {
     "No SMS history."
 }
-pub fn log_header(n: usize) -> String {
-    format!("Last {} SMS:\n", n)
+pub fn log_header(page_len: usize, total: usize, offset: usize, _page_size: usize) -> String {
+    format!("Log page: {page_len} entries, total {total}, offset {offset}.\n")
+}
+pub fn log_read_failed(error: &str) -> String {
+    format!("Log read failed: {error}")
+}
+pub fn log_button_newer() -> &'static str {
+    "Newer"
+}
+pub fn log_button_older() -> &'static str {
+    "Older"
 }
 
 // ── /block + /unblock ─────────────────────────────────────────────────────────
@@ -216,7 +264,7 @@ pub fn desc_send() -> &'static str {
     "Send an SMS: /send <number> <text>"
 }
 pub fn desc_log() -> &'static str {
-    "Last N forwarded messages (default 10)"
+    "Show event log page: /log [offset]"
 }
 pub fn desc_block() -> &'static str {
     "Block SMS from a number"

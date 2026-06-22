@@ -6,6 +6,8 @@ use crate::log_ring::{LogEntry, LogRing};
 use crate::persist::{keys, load_bool, Store};
 use crate::sms::{codec::human_readable_phone, SmsMessage};
 
+const SMS_LOG_PREVIEW_CHARS: usize = 160;
+
 /// Process and forward one SMS. Returns the IM MessageId on success.
 pub fn forward_sms(
     sms: &SmsMessage,
@@ -14,11 +16,13 @@ pub fn forward_sms(
     log: &mut LogRing,
     store: &mut dyn Store,
 ) -> Option<MessageId> {
-    let log_entry = |forwarded| LogEntry {
-        sender: sms.sender.clone(),
-        body_preview: sms.body.chars().take(80).collect(),
-        timestamp: sms.timestamp.clone(),
-        forwarded,
+    let log_entry = |forwarded| {
+        LogEntry::sms(
+            sms.sender.clone(),
+            sms.body.chars().take(SMS_LOG_PREVIEW_CHARS).collect(),
+            sms.timestamp.clone(),
+            forwarded,
+        )
     };
 
     if load_bool(store, keys::FWD_ENABLED) == Some(false) {

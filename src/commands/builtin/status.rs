@@ -1,5 +1,5 @@
 use crate::commands::{Command, CommandContext};
-use crate::modem::CSQ_UNKNOWN;
+use crate::{log_ring::LogKind, modem::CSQ_UNKNOWN};
 
 pub struct StatusCommand;
 
@@ -37,9 +37,11 @@ impl Command for StatusCommand {
             crate::persist::load_bool(ctx.store, crate::persist::keys::FWD_ENABLED).unwrap_or(true);
         let free_heap_kb = ctx.free_heap_bytes / 1024;
 
-        let last = ctx.log_ring.last_n(1);
-        let last_sms = last
-            .first()
+        let recent = ctx.log_ring.last_n(50);
+        let last_sms = recent
+            .iter()
+            .rev()
+            .find(|entry| entry.kind == LogKind::Sms)
             .map(|e| (e.sender.as_str(), e.timestamp.as_str()));
 
         let mut out = crate::i18n::format_status(

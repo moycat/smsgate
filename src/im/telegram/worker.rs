@@ -4,7 +4,7 @@
 //! owns the outbound client for notifications and command replies.
 
 use super::{http::TelegramHttpClient, TelegramMessenger};
-use crate::im::{MessageId, MessageSink, MessengerError};
+use crate::im::{InlineKeyboard, MessageFormat, MessageId, MessageSink, MessengerError};
 use crate::modem::ModemPort;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -17,7 +17,21 @@ const OUTBOUND_QUEUE_DEPTH: usize = 8;
 enum Request {
     Send {
         text: String,
+        keyboard: Option<InlineKeyboard>,
+        format: MessageFormat,
         reply: SyncSender<Result<MessageId, MessengerError>>,
+    },
+    Edit {
+        message_id: MessageId,
+        text: String,
+        keyboard: Option<InlineKeyboard>,
+        format: MessageFormat,
+        reply: SyncSender<Result<(), MessengerError>>,
+    },
+    AnswerCallback {
+        callback_query_id: String,
+        text: Option<String>,
+        reply: SyncSender<Result<(), MessengerError>>,
     },
     RegisterCommands {
         commands: Vec<(String, String)>,
@@ -61,9 +75,50 @@ impl TelegramSendWorker {
                     }
 
                     match req {
-                        Request::Send { text, reply } => {
+                        Request::Send {
+                            text,
+                            keyboard,
+                            format,
+                            reply,
+                        } => {
                             let result = match messenger.as_mut() {
-                                Some(m) => m.send_message(&text),
+                                Some(m) => match keyboard.as_ref() {
+                                    Some(keyboard) => m.send_message_with_keyboard_and_format(
+                                        &text, keyboard, format,
+                                    ),
+                                    None => m.send_message_with_format(&text, format),
+                                },
+                                None => Err(MessengerError::Disconnected),
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Request::Edit {
+                            message_id,
+                            text,
+                            keyboard,
+                            format,
+                            reply,
+                        } => {
+                            let result = match messenger.as_mut() {
+                                Some(m) => match keyboard.as_ref() {
+                                    Some(keyboard) => m.edit_message_with_keyboard_and_format(
+                                        message_id, &text, keyboard, format,
+                                    ),
+                                    None => m.edit_message_with_format(message_id, &text, format),
+                                },
+                                None => Err(MessengerError::Disconnected),
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Request::AnswerCallback {
+                            callback_query_id,
+                            text,
+                            reply,
+                        } => {
+                            let result = match messenger.as_mut() {
+                                Some(m) => {
+                                    m.answer_callback_query(&callback_query_id, text.as_deref())
+                                }
                                 None => Err(MessengerError::Disconnected),
                             };
                             let _ = reply.send(result);
@@ -108,6 +163,148 @@ impl MessageSink for TelegramSendWorker {
         self.tx
             .send(Request::Send {
                 text: text.to_string(),
+                keyboard: None,
+                format: MessageFormat::Plain,
+                reply,
+            })
+            .map_err(|_| MessengerError::Disconnected)?;
+        rx.recv().map_err(|_| MessengerError::Disconnected)?
+    }
+
+    fn send_message_with_keyboard(
+        &mut self,
+        text: &str,
+        keyboard: &InlineKeyboard,
+    ) -> Result<MessageId, MessengerError> {
+        let (reply, rx) = sync_channel(1);
+        self.tx
+            .send(Request::Send {
+                text: text.to_string(),
+                keyboard: Some(keyboard.clone()),
+                format: MessageFormat::Plain,
+                reply,
+            })
+            .map_err(|_| MessengerError::Disconnected)?;
+        rx.recv().map_err(|_| MessengerError::Disconnected)?
+    }
+
+    fn send_message_with_format(
+        &mut self,
+        text: &str,
+        format: MessageFormat,
+    ) -> Result<MessageId, MessengerError> {
+        let (reply, rx) = sync_channel(1);
+        self.tx
+            .send(Request::Send {
+                text: text.to_string(),
+                keyboard: None,
+                format,
+                reply,
+            })
+            .map_err(|_| MessengerError::Disconnected)?;
+        rx.recv().map_err(|_| MessengerError::Disconnected)?
+    }
+
+    fn send_message_with_keyboard_and_format(
+        &mut self,
+        text: &str,
+        keyboard: &InlineKeyboard,
+        format: MessageFormat,
+    ) -> Result<MessageId, MessengerError> {
+        let (reply, rx) = sync_channel(1);
+        self.tx
+            .send(Request::Send {
+                text: text.to_string(),
+                keyboard: Some(keyboard.clone()),
+                format,
+                reply,
+            })
+            .map_err(|_| MessengerError::Disconnected)?;
+        rx.recv().map_err(|_| MessengerError::Disconnected)?
+    }
+
+    fn edit_message(&mut self, message_id: MessageId, text: &str) -> Result<(), MessengerError> {
+        let (reply, rx) = sync_channel(1);
+        self.tx
+            .send(Request::Edit {
+                message_id,
+                text: text.to_string(),
+                keyboard: None,
+                format: MessageFormat::Plain,
+                reply,
+            })
+            .map_err(|_| MessengerError::Disconnected)?;
+        rx.recv().map_err(|_| MessengerError::Disconnected)?
+    }
+
+    fn edit_message_with_keyboard(
+        &mut self,
+        message_id: MessageId,
+        text: &str,
+        keyboard: &InlineKeyboard,
+    ) -> Result<(), MessengerError> {
+        let (reply, rx) = sync_channel(1);
+        self.tx
+            .send(Request::Edit {
+                message_id,
+                text: text.to_string(),
+                keyboard: Some(keyboard.clone()),
+                format: MessageFormat::Plain,
+                reply,
+            })
+            .map_err(|_| MessengerError::Disconnected)?;
+        rx.recv().map_err(|_| MessengerError::Disconnected)?
+    }
+
+    fn edit_message_with_format(
+        &mut self,
+        message_id: MessageId,
+        text: &str,
+        format: MessageFormat,
+    ) -> Result<(), MessengerError> {
+        let (reply, rx) = sync_channel(1);
+        self.tx
+            .send(Request::Edit {
+                message_id,
+                text: text.to_string(),
+                keyboard: None,
+                format,
+                reply,
+            })
+            .map_err(|_| MessengerError::Disconnected)?;
+        rx.recv().map_err(|_| MessengerError::Disconnected)?
+    }
+
+    fn edit_message_with_keyboard_and_format(
+        &mut self,
+        message_id: MessageId,
+        text: &str,
+        keyboard: &InlineKeyboard,
+        format: MessageFormat,
+    ) -> Result<(), MessengerError> {
+        let (reply, rx) = sync_channel(1);
+        self.tx
+            .send(Request::Edit {
+                message_id,
+                text: text.to_string(),
+                keyboard: Some(keyboard.clone()),
+                format,
+                reply,
+            })
+            .map_err(|_| MessengerError::Disconnected)?;
+        rx.recv().map_err(|_| MessengerError::Disconnected)?
+    }
+
+    fn answer_callback_query(
+        &mut self,
+        callback_query_id: &str,
+        text: Option<&str>,
+    ) -> Result<(), MessengerError> {
+        let (reply, rx) = sync_channel(1);
+        self.tx
+            .send(Request::AnswerCallback {
+                callback_query_id: callback_query_id.to_string(),
+                text: text.map(str::to_string),
                 reply,
             })
             .map_err(|_| MessengerError::Disconnected)?;

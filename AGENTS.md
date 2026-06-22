@@ -25,7 +25,7 @@ cargo +esp build --release --target xtensa-esp32-espidf
 
 # Flash + monitor
 # PORT: /dev/ttyUSB0 (Linux), /dev/cu.wchusbserial* (macOS), COM3 (Windows)
-espflash flash target/xtensa-esp32-espidf/release/smsgate --port <PORT>
+espflash flash target/xtensa-esp32-espidf/release/smsgate --port <PORT> --partition-table partitions_ota.csv --target-app-partition ota_0 --erase-parts otadata
 espflash monitor --port <PORT> --non-interactive
 
 # Fuzz smoke (nightly, run after touching PDU/URC/command parsers)
@@ -201,23 +201,37 @@ NVS stores exactly four keys: `im_cursor` (i64), `reply_map` (blob), `block_list
 
 ### Partition Table
 
-The project uses ESP-IDF's built-in `PARTITION_TABLE_SINGLE_APP_LARGE` layout:
-single factory app, 1500 KiB app slot. The default ESP-IDF single-app table is
-only 1 MiB and is too small for the current TLS-enabled firmware.
+The project uses `partitions_ota.csv`, a custom 4 MB flash layout with:
 
-No partition CSV is tracked in this repository. ESP-IDF generates the partition
-table during `cargo +esp build` and writes it to:
+- `nvs` at `0x9000`, size `0x6000`
+- `otadata` at `0xf000`, size `0x2000`
+- `phy_init` at `0x11000`, size `0x1000`
+- `ota_0` at `0x20000`, size `0x1E0000`
+- `ota_1` at `0x200000`, size `0x1E0000`
+- `log_ring` at `0x3E0000`, size `0x20000` (128 KiB, flash-backed `/log` event ring)
+
+ESP-IDF generates the binary partition table during `cargo +esp build` and writes it to:
 
 ```bash
 target/xtensa-esp32-espidf/release/partition-table.bin
 ```
 
-Normal flashing does not require manually generating or passing a separate partition
-table file; `espflash flash` writes the bootloader, partition table, and app image
-from the build outputs:
+Normal flashing must pass the tracked CSV and target app partition explicitly:
 
 ```bash
-espflash flash target/xtensa-esp32-espidf/release/smsgate --port <PORT>
+espflash flash target/xtensa-esp32-espidf/release/smsgate --port <PORT> --partition-table partitions_ota.csv --target-app-partition ota_0 --erase-parts otadata
+```
+
+Do not omit these flags for the OTA layout. Direct `espflash flash <ELF> --port <PORT>`
+can produce misleading app-size output and may not target the intended OTA app slot.
+Do not omit `--erase-parts otadata` for USB recovery/development flashes: if OTA data
+still selects `ota_1`, flashing `ota_0` alone leaves the device booting the old slot.
+
+Telegram OTA uses the ESP app image, not the ELF passed to `espflash flash`.
+Generate the `.bin` to send to the bot with:
+
+```bash
+espflash save-image --chip esp32 --flash-size 4mb --partition-table partitions_ota.csv --target-app-partition ota_0 target/xtensa-esp32-espidf/release/smsgate smsgate-ota.bin
 ```
 
 ### CI / Release Notes
@@ -306,7 +320,7 @@ startup cosmetics.
 Keep `sdkconfig.defaults` aligned with the board and firmware behavior:
 
 - 4 MB flash size for the reference board.
-- ESP-IDF built-in single-app-large partition table.
+- Custom dual-OTA partition table with a 128 KiB `log_ring` data partition.
 - 240 MHz CPU frequency for the reference ESP32.
 - Bluetooth disabled; the firmware does not use BT controller or host features.
 - Dual-core FreeRTOS enabled; do not enable unicore builds for the reference board.
@@ -324,7 +338,8 @@ threads. Main/SMS code should not own a WiFi TLS client directly. Keep modem UAR
 single-owner and ordered; do not let multiple tasks issue AT commands concurrently.
 
 After changing the partition layout, run a firmware build so ESP-IDF regenerates
-`target/xtensa-esp32-espidf/release/partition-table.bin`, then flash with `espflash flash`.
+`target/xtensa-esp32-espidf/release/partition-table.bin`, then flash with
+`espflash flash --partition-table partitions_ota.csv --target-app-partition ota_0 --erase-parts otadata`.
 Use `espflash write-bin` only for manual recovery workflows.
 
 For modem issues, check LilyGo/SIMCom firmware notes and known issues before changing the init

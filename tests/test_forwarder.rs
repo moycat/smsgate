@@ -51,9 +51,29 @@ fn forward_updates_log_ring() {
     );
 
     assert_eq!(log.len(), 1);
-    let entry = log.last_n(1)[0];
+    let entries = log.last_n(1);
+    let entry = &entries[0];
     assert!(entry.forwarded);
     assert_eq!(entry.sender, "123");
+}
+
+#[test]
+fn sms_log_preview_keeps_up_to_single_sms_text_length() {
+    let mut store = MemStore::new();
+    let mut messenger = RecordingMessenger::new();
+    let mut router = ReplyRouter::new();
+    let mut log = LogRing::new();
+    let body = "A".repeat(120);
+
+    forward_sms(
+        &make_sms("123", &body),
+        &mut messenger,
+        &mut router,
+        &mut log,
+        &mut store,
+    );
+
+    assert_eq!(log.last_n(1)[0].body_preview.len(), 120);
 }
 
 #[test]

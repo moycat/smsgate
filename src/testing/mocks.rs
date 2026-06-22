@@ -1,6 +1,9 @@
 //! Mock implementations of ModemPort and Messenger.
 
-use crate::im::{InboundMessage, MessageId, MessageSink, MessageSource, MessengerError};
+use crate::im::{
+    InboundMessage, InlineKeyboard, MessageFormat, MessageId, MessageSink, MessageSource,
+    MessengerError,
+};
 use crate::modem::a76xx::at::UartPort;
 use crate::modem::{AtResponse, AtTransport, ModemError, ModemPort};
 use std::collections::VecDeque;
@@ -235,11 +238,24 @@ impl Default for ScriptedModem {
 pub struct SentMessage {
     pub text: String,
     pub id: MessageId,
+    pub keyboard: Option<InlineKeyboard>,
+    pub format: MessageFormat,
+}
+
+/// Captured edited message.
+#[derive(Debug, Clone)]
+pub struct EditedMessage {
+    pub text: String,
+    pub id: MessageId,
+    pub keyboard: Option<InlineKeyboard>,
+    pub format: MessageFormat,
 }
 
 /// Records sent messages and serves injected inbound messages.
 pub struct RecordingMessenger {
     pub sent: Vec<SentMessage>,
+    edited: Vec<EditedMessage>,
+    answered_callbacks: Vec<String>,
     inbound: VecDeque<InboundMessage>,
     next_id: i64,
 }
@@ -248,6 +264,8 @@ impl RecordingMessenger {
     pub fn new() -> Self {
         RecordingMessenger {
             sent: Vec::new(),
+            edited: Vec::new(),
+            answered_callbacks: Vec::new(),
             inbound: VecDeque::new(),
             next_id: 1000,
         }
@@ -259,6 +277,8 @@ impl RecordingMessenger {
             cursor,
             text: text.to_string(),
             reply_to,
+            document: None,
+            callback: None,
         });
     }
 
@@ -268,8 +288,20 @@ impl RecordingMessenger {
     pub fn last_sent(&self) -> Option<&str> {
         self.sent.last().map(|m| m.text.as_str())
     }
+    pub fn last_sent_keyboard(&self) -> Option<&InlineKeyboard> {
+        self.sent.last().and_then(|m| m.keyboard.as_ref())
+    }
     pub fn contains_sent(&self, substr: &str) -> bool {
         self.sent.iter().any(|m| m.text.contains(substr))
+    }
+    pub fn edited_count(&self) -> usize {
+        self.edited.len()
+    }
+    pub fn last_edited(&self) -> Option<&EditedMessage> {
+        self.edited.last()
+    }
+    pub fn answered_callback_count(&self) -> usize {
+        self.answered_callbacks.len()
     }
 }
 
@@ -280,8 +312,124 @@ impl MessageSink for RecordingMessenger {
         self.sent.push(SentMessage {
             text: text.to_string(),
             id,
+            keyboard: None,
+            format: MessageFormat::Plain,
         });
         Ok(id)
+    }
+
+    fn send_message_with_format(
+        &mut self,
+        text: &str,
+        format: MessageFormat,
+    ) -> Result<MessageId, MessengerError> {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.sent.push(SentMessage {
+            text: text.to_string(),
+            id,
+            keyboard: None,
+            format,
+        });
+        Ok(id)
+    }
+
+    fn send_message_with_keyboard(
+        &mut self,
+        text: &str,
+        keyboard: &InlineKeyboard,
+    ) -> Result<MessageId, MessengerError> {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.sent.push(SentMessage {
+            text: text.to_string(),
+            id,
+            keyboard: Some(keyboard.clone()),
+            format: MessageFormat::Plain,
+        });
+        Ok(id)
+    }
+
+    fn send_message_with_keyboard_and_format(
+        &mut self,
+        text: &str,
+        keyboard: &InlineKeyboard,
+        format: MessageFormat,
+    ) -> Result<MessageId, MessengerError> {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.sent.push(SentMessage {
+            text: text.to_string(),
+            id,
+            keyboard: Some(keyboard.clone()),
+            format,
+        });
+        Ok(id)
+    }
+
+    fn edit_message(&mut self, message_id: MessageId, text: &str) -> Result<(), MessengerError> {
+        self.edited.push(EditedMessage {
+            text: text.to_string(),
+            id: message_id,
+            keyboard: None,
+            format: MessageFormat::Plain,
+        });
+        Ok(())
+    }
+
+    fn edit_message_with_format(
+        &mut self,
+        message_id: MessageId,
+        text: &str,
+        format: MessageFormat,
+    ) -> Result<(), MessengerError> {
+        self.edited.push(EditedMessage {
+            text: text.to_string(),
+            id: message_id,
+            keyboard: None,
+            format,
+        });
+        Ok(())
+    }
+
+    fn edit_message_with_keyboard(
+        &mut self,
+        message_id: MessageId,
+        text: &str,
+        keyboard: &InlineKeyboard,
+    ) -> Result<(), MessengerError> {
+        self.edited.push(EditedMessage {
+            text: text.to_string(),
+            id: message_id,
+            keyboard: Some(keyboard.clone()),
+            format: MessageFormat::Plain,
+        });
+        Ok(())
+    }
+
+    fn edit_message_with_keyboard_and_format(
+        &mut self,
+        message_id: MessageId,
+        text: &str,
+        keyboard: &InlineKeyboard,
+        format: MessageFormat,
+    ) -> Result<(), MessengerError> {
+        self.edited.push(EditedMessage {
+            text: text.to_string(),
+            id: message_id,
+            keyboard: Some(keyboard.clone()),
+            format,
+        });
+        Ok(())
+    }
+
+    fn answer_callback_query(
+        &mut self,
+        callback_query_id: &str,
+        _text: Option<&str>,
+    ) -> Result<(), MessengerError> {
+        self.answered_callbacks.push(callback_query_id.to_string());
+        Ok(())
     }
 }
 

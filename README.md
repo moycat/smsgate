@@ -19,6 +19,8 @@ Reference hardware: **LilyGo T-A7670X** (A7670G LTE modem, CH9102 USB bridge).
 - i18n: English and Chinese (compile-time locale selection, zero overhead)
 - NVS persistence for cursor, reply mapping, and block list
 - Outbound SMS queue with exponential-backoff retry
+- Telegram-delivered OTA firmware updates over WiFi HTTPS
+- Flash-backed `/log [offset]` event ring for SMS, boot, network, OTA, and user operations; pages show 16 entries with Telegram inline buttons for paging, and SMS log previews keep up to 160 chars before the fixed-size flash record is trimmed to fit
 - Hardware watchdog (120s timeout)
 - Build commit hash embedded in `/status` output
 
@@ -42,9 +44,26 @@ cargo +esp build --release --target xtensa-esp32-espidf
 
 # 5. Flash
 cargo install espflash
-espflash flash target/xtensa-esp32-espidf/release/smsgate --port <PORT>
+espflash flash target/xtensa-esp32-espidf/release/smsgate --port <PORT> --partition-table partitions_ota.csv --target-app-partition ota_0 --erase-parts otadata
 # PORT is /dev/ttyUSB0 (Linux), /dev/cu.wchusbserial* (macOS), or COM3 (Windows)
 ```
+
+## Telegram OTA
+
+Generate the app image to send to the bot:
+
+```bash
+cargo +esp build --release --target xtensa-esp32-espidf
+espflash save-image --chip esp32 --flash-size 4mb --partition-table partitions_ota.csv --target-app-partition ota_0 target/xtensa-esp32-espidf/release/smsgate smsgate-ota.bin
+```
+
+Send `smsgate-ota.bin` to the configured Telegram chat with caption `/ota`.
+OTA downloads use WiFi HTTPS only; cellular fallback mode will reject OTA.
+
+When flashing over USB, keep the `--partition-table partitions_ota.csv` and
+`--target-app-partition ota_0` flags, and erase `otadata`. The firmware uses a
+custom OTA partition layout; omitting these flags can target the wrong app slot,
+and stale OTA data can keep booting `ota_1` after `ota_0` was flashed.
 
 ## Configuration
 

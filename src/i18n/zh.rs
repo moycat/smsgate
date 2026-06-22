@@ -33,6 +33,45 @@ pub fn signal_restored(csq: u8) -> String {
 pub fn operator_changed(old: &str, new: &str) -> String {
     format!("⚠️ 运营商变更：{} → {}", old, new)
 }
+pub fn ota_wifi_required() -> &'static str {
+    "OTA 需要 WiFi。蜂窝回退模式不能下载固件。"
+}
+pub fn ota_starting(name: &str, size: Option<u64>) -> String {
+    match size {
+        Some(bytes) => format!("⬇️ OTA 开始：{}（{}）", name, format_bytes(bytes)),
+        None => format!("⬇️ OTA 开始：{}（大小未知）", name),
+    }
+}
+pub fn ota_progress(written: usize, total: Option<usize>) -> String {
+    match total {
+        Some(total) if total > 0 => format!(
+            "⬇️ OTA 进度：{} / {}（{}%）",
+            format_bytes(written as u64),
+            format_bytes(total as u64),
+            written.saturating_mul(100) / total
+        ),
+        _ => format!("⬇️ OTA 进度：{}", format_bytes(written as u64)),
+    }
+}
+pub fn ota_complete() -> &'static str {
+    "✅ OTA 写入完成，正在重启到新固件。"
+}
+pub fn ota_failed(error: &str) -> String {
+    format!("❌ OTA 失败：{}", error)
+}
+pub fn ota_ignored_stale(name: &str) -> String {
+    format!("已忽略较旧的 OTA 文件：{name}。本批次将使用最新的 OTA 文件。")
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.2} MiB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
+    }
+}
 
 // ── 转发 ────────────────────────────────────────────────────────────────────
 
@@ -157,8 +196,17 @@ pub fn send_rate_limited() -> &'static str {
 pub fn log_empty() -> &'static str {
     "暂无短信记录。"
 }
-pub fn log_header(n: usize) -> String {
-    format!("最近 {} 条短信：\n", n)
+pub fn log_header(page_len: usize, total: usize, offset: usize, _page_size: usize) -> String {
+    format!("日志页：本页 {page_len} 条，总计 {total} 条，offset {offset}。\n")
+}
+pub fn log_read_failed(error: &str) -> String {
+    format!("读取日志失败：{error}")
+}
+pub fn log_button_newer() -> &'static str {
+    "新日志"
+}
+pub fn log_button_older() -> &'static str {
+    "旧日志"
 }
 
 // ── /block + /unblock ────────────────────────────────────────────────────────
@@ -216,7 +264,7 @@ pub fn desc_send() -> &'static str {
     "发送短信：/send <号码> <内容>"
 }
 pub fn desc_log() -> &'static str {
-    "最近 N 条转发记录（默认 10）"
+    "查看事件日志分页：/log [offset]"
 }
 pub fn desc_block() -> &'static str {
     "屏蔽号码"
