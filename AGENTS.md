@@ -227,6 +227,47 @@ can produce misleading app-size output and may not target the intended OTA app s
 Do not omit `--erase-parts otadata` for USB recovery/development flashes: if OTA data
 still selects `ota_1`, flashing `ota_0` alone leaves the device booting the old slot.
 
+When migrating a board from the old single-factory-app layout, verify the serial boot
+partition table after flashing. If it still lists only `nvs`, `phy_init`, and `factory`,
+the custom partition table was not written. Other symptoms are
+`flash log partition not found: log_ring` and `esp_ota_ops: not found otadata`.
+Do not erase the whole flash unless NVS credentials can be reprovisioned. Use this
+manual recovery flow instead:
+
+```bash
+cargo +esp build --release --target xtensa-esp32-espidf
+
+espflash save-image --chip esp32 --flash-size 4mb --flash-mode dio --flash-freq 40mhz \
+  --partition-table partitions_ota.csv --partition-table-offset 0x8000 \
+  --target-app-partition ota_0 \
+  target/xtensa-esp32-espidf/release/smsgate \
+  target/xtensa-esp32-espidf/release/smsgate-ota0.bin
+
+espflash save-image --chip esp32 --flash-size 4mb --flash-mode dio --flash-freq 40mhz \
+  --partition-table partitions_ota.csv --partition-table-offset 0x8000 \
+  --target-app-partition ota_1 \
+  target/xtensa-esp32-espidf/release/smsgate \
+  target/xtensa-esp32-espidf/release/smsgate-ota1.bin
+
+espflash erase-region --port <PORT> --after no-reset 0xf000 0x3000
+espflash erase-region --port <PORT> --after no-reset 0x3e0000 0x20000
+espflash write-bin --port <PORT> --baud 115200 --after no-reset 0x1000 \
+  target/xtensa-esp32-espidf/release/bootloader.bin
+espflash write-bin --port <PORT> --baud 115200 --after no-reset 0x8000 \
+  target/xtensa-esp32-espidf/release/partition-table.bin
+espflash write-bin --port <PORT> --baud 115200 --after no-reset 0x20000 \
+  target/xtensa-esp32-espidf/release/smsgate-ota0.bin
+espflash write-bin --port <PORT> --baud 115200 --after hard-reset 0x200000 \
+  target/xtensa-esp32-espidf/release/smsgate-ota1.bin
+```
+
+The explicit `write-bin` flow writes both OTA slots because stale `otadata` may select
+either one. Use `--baud 115200` when the CH9102 bridge reports intermittent
+communication errors. The expected verification log is a partition table containing
+`otadata`, `ota_0`, `ota_1`, and `log_ring`, followed by
+`smsgate starting... build=<hash>`, `[boot] ... build=<hash>`, and
+`flash-backed log ring mounted`.
+
 Telegram OTA uses the ESP app image, not the ELF passed to `espflash flash`.
 Generate the `.bin` to send to the bot with:
 

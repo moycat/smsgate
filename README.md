@@ -65,6 +65,49 @@ When flashing over USB, keep the `--partition-table partitions_ota.csv` and
 custom OTA partition layout; omitting these flags can target the wrong app slot,
 and stale OTA data can keep booting `ota_1` after `ota_0` was flashed.
 
+### USB Partition Migration Recovery
+
+If a board was previously flashed with the old single-factory-app layout, a bare
+`espflash flash <ELF> --port <PORT>` can leave the old partition table on flash.
+The symptom is a boot log that lists only `nvs`, `phy_init`, and `factory`, plus
+warnings such as `flash log partition not found: log_ring` or
+`esp_ota_ops: not found otadata`.
+
+For recovery, keep NVS intact and write the OTA layout explicitly:
+
+```bash
+cargo +esp build --release --target xtensa-esp32-espidf
+
+espflash save-image --chip esp32 --flash-size 4mb --flash-mode dio --flash-freq 40mhz \
+  --partition-table partitions_ota.csv --partition-table-offset 0x8000 \
+  --target-app-partition ota_0 \
+  target/xtensa-esp32-espidf/release/smsgate \
+  target/xtensa-esp32-espidf/release/smsgate-ota0.bin
+
+espflash save-image --chip esp32 --flash-size 4mb --flash-mode dio --flash-freq 40mhz \
+  --partition-table partitions_ota.csv --partition-table-offset 0x8000 \
+  --target-app-partition ota_1 \
+  target/xtensa-esp32-espidf/release/smsgate \
+  target/xtensa-esp32-espidf/release/smsgate-ota1.bin
+
+espflash erase-region --port <PORT> --after no-reset 0xf000 0x3000
+espflash erase-region --port <PORT> --after no-reset 0x3e0000 0x20000
+espflash write-bin --port <PORT> --baud 115200 --after no-reset 0x1000 \
+  target/xtensa-esp32-espidf/release/bootloader.bin
+espflash write-bin --port <PORT> --baud 115200 --after no-reset 0x8000 \
+  target/xtensa-esp32-espidf/release/partition-table.bin
+espflash write-bin --port <PORT> --baud 115200 --after no-reset 0x20000 \
+  target/xtensa-esp32-espidf/release/smsgate-ota0.bin
+espflash write-bin --port <PORT> --baud 115200 --after hard-reset 0x200000 \
+  target/xtensa-esp32-espidf/release/smsgate-ota1.bin
+```
+
+Use `--baud 115200` if the CH9102 bridge reports intermittent communication
+errors during `write-bin`. Do not erase the `0x9000` NVS partition unless the
+device will be provisioned again. Verify the next boot lists `otadata`, `ota_0`,
+`ota_1`, and `log_ring`, then confirm `smsgate starting... build=<hash>`,
+`[boot] ... build=<hash>`, and `flash-backed log ring mounted`.
+
 ## Configuration
 
 All configuration is in `config.toml` (compile-time, not runtime). See [`config.toml.example`](config.toml.example) for all options.
