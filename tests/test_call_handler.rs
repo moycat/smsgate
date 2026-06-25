@@ -2,6 +2,7 @@
 
 use smsgate::bridge::call_handler::CallHandler;
 use smsgate::im::MessageSink;
+use smsgate::log_ring::LogKind;
 use smsgate::testing::mocks::{RecordingMessenger, ScriptedModem};
 
 fn make_handler() -> (CallHandler, ScriptedModem, RecordingMessenger) {
@@ -18,8 +19,8 @@ fn handle_urc(
     modem: &mut ScriptedModem,
     messenger: &mut RecordingMessenger,
 ) {
-    if let Some(text) = handler.handle_urc_deferred(line, modem) {
-        messenger.send_message(&text).unwrap();
+    if let Some(notification) = handler.handle_urc_deferred(line, modem) {
+        messenger.send_message(&notification.text).unwrap();
     }
 }
 
@@ -42,6 +43,26 @@ fn ring_then_clip_notifies_im() {
         "no phone in: {:?}",
         messenger.last_sent()
     );
+}
+
+#[test]
+fn ring_then_clip_produces_call_log_event() {
+    let (mut h, mut modem, _messenger) = make_handler();
+
+    assert!(h.handle_urc_deferred("RING", &mut modem).is_none());
+    let notification = h
+        .handle_urc_deferred(r#"+CLIP: "+8613800138000",145,"",,"",0"#, &mut modem)
+        .expect("call notification");
+    let event = notification.log_event();
+
+    assert_eq!(event.kind, LogKind::Call);
+    assert!(
+        event.sender.contains("+86 138-0013-8000") || event.sender.contains("+8613800138000"),
+        "no phone in log sender: {}",
+        event.sender
+    );
+    assert_eq!(event.body_preview, "incoming call; hung up");
+    assert!(event.forwarded);
 }
 
 #[test]
@@ -79,6 +100,31 @@ fn duplicate_ring_in_cooldown_suppressed() {
     // Second RING arrives while in cooldown
     handle_urc(&mut h, "RING", &mut modem, &mut messenger);
     // Still only 1 hang-up and 1 notification (cooldown suppresses it)
+    assert_eq!(modem.hang_up_count, 1);
+    assert_eq!(messenger.sent_count(), 1);
+}
+
+#[test]
+fn no_carrier_after_hangup_keeps_cooldown() {
+    let (mut h, mut modem, mut messenger) = make_handler();
+
+    handle_urc(&mut h, "RING", &mut modem, &mut messenger);
+    handle_urc(
+        &mut h,
+        r#"+CLIP: "+8613800138000",145,"",,"",0"#,
+        &mut modem,
+        &mut messenger,
+    );
+    handle_urc(&mut h, "NO CARRIER", &mut modem, &mut messenger);
+
+    handle_urc(&mut h, "RING", &mut modem, &mut messenger);
+    handle_urc(
+        &mut h,
+        r#"+CLIP: "+8613800138000",145,"",,"",0"#,
+        &mut modem,
+        &mut messenger,
+    );
+
     assert_eq!(modem.hang_up_count, 1);
     assert_eq!(messenger.sent_count(), 1);
 }

@@ -1,6 +1,9 @@
 //! Incoming call state machine: Idle → Ringing → Cooldown.
 
-use crate::modem::ModemPort;
+use crate::{
+    log_ring::{LogEvent, LogKind},
+    modem::ModemPort,
+};
 use std::time::{Duration, Instant};
 
 const CLIP_DEADLINE: Duration = Duration::from_millis(1500);
@@ -23,13 +26,34 @@ pub struct CallHandler {
     state: State,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallNotification {
+    pub text: String,
+    caller_display: String,
+}
+
+impl CallNotification {
+    pub fn log_event(&self) -> LogEvent {
+        LogEvent::new(
+            LogKind::Call,
+            &self.caller_display,
+            "incoming call; hung up",
+            true,
+        )
+    }
+}
+
 impl CallHandler {
     pub fn new() -> Self {
         CallHandler { state: State::Idle }
     }
 
     /// Feed a URC line while deferring IM delivery until after the modem lock is released.
-    pub fn handle_urc_deferred(&mut self, line: &str, modem: &mut dyn ModemPort) -> Option<String> {
+    pub fn handle_urc_deferred(
+        &mut self,
+        line: &str,
+        modem: &mut dyn ModemPort,
+    ) -> Option<CallNotification> {
         if line == "RING" || line.starts_with("RING") {
             self.on_ring();
             return None;
@@ -40,14 +64,14 @@ impl CallHandler {
             }
             return None;
         }
-        if line == "NO CARRIER" {
+        if line == "NO CARRIER" && matches!(self.state, State::Ringing { .. }) {
             self.state = State::Idle;
         }
         None
     }
 
     /// Drive the state machine clock while deferring IM delivery.
-    pub fn tick_deferred(&mut self, modem: &mut dyn ModemPort) -> Option<String> {
+    pub fn tick_deferred(&mut self, modem: &mut dyn ModemPort) -> Option<CallNotification> {
         match &self.state {
             State::Ringing {
                 clip_deadline,
@@ -82,7 +106,7 @@ impl CallHandler {
         }
     }
 
-    fn on_clip(&mut self, number: String, modem: &mut dyn ModemPort) -> Option<String> {
+    fn on_clip(&mut self, number: String, modem: &mut dyn ModemPort) -> Option<CallNotification> {
         if let State::Ringing { .. } = &mut self.state {
             let n = if number.is_empty() {
                 None
@@ -94,7 +118,11 @@ impl CallHandler {
         None
     }
 
-    fn commit_call(&mut self, number: Option<String>, modem: &mut dyn ModemPort) -> String {
+    fn commit_call(
+        &mut self,
+        number: Option<String>,
+        modem: &mut dyn ModemPort,
+    ) -> CallNotification {
         // Auto-hang-up
         if let Err(e) = modem.hang_up() {
             log::warn!("[call] hang_up failed: {}", e);
@@ -111,7 +139,10 @@ impl CallHandler {
         self.state = State::Cooldown {
             until: Instant::now() + COOLDOWN,
         };
-        text
+        CallNotification {
+            text,
+            caller_display: display,
+        }
     }
 }
 

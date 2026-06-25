@@ -14,6 +14,7 @@ const FLASH_LOG_PAYLOAD_SIZE: usize = FLASH_LOG_RECORD_SIZE - FLASH_LOG_HEADER_S
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogKind {
     Sms,
+    Call,
     System,
     Network,
     User,
@@ -24,6 +25,7 @@ impl LogKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Sms => "sms",
+            Self::Call => "call",
             Self::System => "system",
             Self::Network => "network",
             Self::User => "user",
@@ -34,6 +36,7 @@ impl LogKind {
     pub fn label(self) -> &'static str {
         match self {
             Self::Sms => "SMS",
+            Self::Call => "CALL",
             Self::System => "SYS",
             Self::Network => "NET",
             Self::User => "USER",
@@ -44,6 +47,7 @@ impl LogKind {
     fn parse(s: &str) -> Option<Self> {
         match s {
             "sms" => Some(Self::Sms),
+            "call" => Some(Self::Call),
             "system" => Some(Self::System),
             "network" => Some(Self::Network),
             "user" => Some(Self::User),

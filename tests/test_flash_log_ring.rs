@@ -28,6 +28,31 @@ fn flash_log_survives_remount() {
 }
 
 #[test]
+fn flash_log_preserves_call_entries() {
+    let storage = MemFlashLogStorage::new(FLASH_LOG_RECORD_SIZE * 8, FLASH_LOG_RECORD_SIZE * 2);
+    let mut ring = FlashLogRing::mount(storage).unwrap();
+    let entry = LogEvent::new(
+        LogKind::Call,
+        "+86 138-0013-8000",
+        "incoming call; hung up",
+        true,
+    )
+    .at("2026-06-21 20:30:45+08:00");
+
+    ring.append(&entry).unwrap();
+
+    let storage = ring.into_storage();
+    let mut ring = FlashLogRing::mount(storage).unwrap();
+    let entries = ring.last_n(1).unwrap();
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].kind, LogKind::Call);
+    assert_eq!(entries[0].sender, "+86 138-0013-8000");
+    assert_eq!(entries[0].body_preview, "incoming call; hung up");
+    assert!(entries[0].forwarded);
+}
+
+#[test]
 fn flash_log_wraps_by_erasing_oldest_sector() {
     let storage = MemFlashLogStorage::new(FLASH_LOG_RECORD_SIZE * 4, FLASH_LOG_RECORD_SIZE * 2);
     let mut ring = FlashLogRing::mount(storage).unwrap();

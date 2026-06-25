@@ -610,19 +610,21 @@ fn main() {
                         cmt_pdu_pending = true; // next poll_urc() line is the raw PDU
                     }
                     _ => {
-                        if let Some(text) = call_handler.handle_urc_deferred(&urc, &mut *md) {
-                            call_notifications.push(text);
+                        if let Some(notification) = call_handler.handle_urc_deferred(&urc, &mut *md)
+                        {
+                            call_notifications.push(notification);
                         }
                     }
                 }
             }
-            if let Some(text) = call_handler.tick_deferred(&mut *md) {
-                call_notifications.push(text);
+            if let Some(notification) = call_handler.tick_deferred(&mut *md) {
+                call_notifications.push(notification);
             }
         }
 
-        for text in call_notifications {
-            let _ = messenger.send_message(&text);
+        for notification in call_notifications {
+            let _ = messenger.send_message(&notification.text);
+            record_event(&mut log, &log_clock, uptime_ms, notification.log_event());
         }
 
         for pdu in direct_pdus {
