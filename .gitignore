@@ -6,8 +6,8 @@ fuzz/target/
 # User configuration — contains secrets, never commit
 /config.toml
 
-# Generated partition table binary — regenerate from partitions_ota.csv, do not commit
-/partitions_ota.bin
+# Generated OTA firmware image — regenerate from the release build, do not commit
+/smsgate-ota.bin
 
 # PlatformIO artifacts (C++ sibling branches leak into working tree)
 .pio/
