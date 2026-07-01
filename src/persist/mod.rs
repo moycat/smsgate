@@ -9,10 +9,6 @@ use thiserror::Error;
 /// Errors from the persistence layer.
 #[derive(Debug, Error)]
 pub enum StoreError {
-    #[error("storage full")]
-    Full,
-    #[error("key not found")]
-    NotFound,
     #[error("serialisation error: {0}")]
     Serde(String),
     #[error("NVS error: {0}")]
@@ -25,10 +21,6 @@ pub trait Store {
     fn load(&self, key: &str) -> Option<Vec<u8>>;
     /// Save raw bytes for `key`.
     fn save(&mut self, key: &str, data: &[u8]) -> Result<(), StoreError>;
-    /// Delete a key (no-op if absent).
-    fn delete(&mut self, key: &str) -> Result<(), StoreError>;
-    /// Erase all keys (factory reset).
-    fn clear_all(&mut self) -> Result<(), StoreError>;
 }
 
 // ---------------------------------------------------------------------------

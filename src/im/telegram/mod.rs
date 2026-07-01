@@ -148,10 +148,6 @@ fn append_message_content(body: &mut String, text: &str, format: MessageFormat) 
             r#","text":"{}","parse_mode":"HTML""#,
             types::json_escape(text)
         )),
-        MessageFormat::RichHtml => body.push_str(&format!(
-            r#","rich_message":{{"html":"{}"}}"#,
-            types::json_escape(text)
-        )),
     }
 }
 

@@ -6,7 +6,6 @@ pub struct Config;
 impl Config {
     pub const WIFI_SSID: &'static str = env!("CFG_WIFI_SSID");
     pub const WIFI_PASSWORD: &'static str = env!("CFG_WIFI_PASSWORD");
-    pub const IM_BACKEND: &'static str = env!("CFG_IM_BACKEND");
     pub const BOT_TOKEN: &'static str = env!("CFG_IM_BOT_TOKEN");
     pub const CHAT_ID: i64 = {
         // parse at compile time; default 0 if empty/missing
@@ -27,7 +26,6 @@ impl Config {
     pub const MODEM_SIM_PIN: &'static str = env!("CFG_MODEM_SIM_PIN");
     pub const MAX_FAILURES: u8 = parse_u8_const(env!("CFG_BRIDGE_MAX_FAILURES"));
     pub const POLL_INTERVAL_MS: u32 = parse_u32_const(env!("CFG_BRIDGE_POLL_INTERVAL_MS"));
-    pub const WATCHDOG_TIMEOUT_SEC: u32 = parse_u32_const(env!("CFG_BRIDGE_WATCHDOG_SEC"));
     pub const GIT_COMMIT: &'static str = env!("CFG_GIT_COMMIT");
 }
 

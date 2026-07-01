@@ -43,30 +43,6 @@ fn load_bool_missing_returns_none() {
 }
 
 #[test]
-fn memstore_delete_removes_key() {
-    let mut store = MemStore::new();
-    save_bool(&mut store, "k", true).unwrap();
-    store.delete("k").unwrap();
-    assert_eq!(load_bool(&store, "k"), None);
-}
-
-#[test]
-fn memstore_delete_absent_is_ok() {
-    let mut store = MemStore::new();
-    assert!(store.delete("nonexistent").is_ok());
-}
-
-#[test]
-fn memstore_clear_all_removes_everything() {
-    let mut store = MemStore::new();
-    save_bool(&mut store, "a", true).unwrap();
-    save_i64(&mut store, "b", 42).unwrap();
-    store.clear_all().unwrap();
-    assert_eq!(load_bool(&store, "a"), None);
-    assert_eq!(load_i64(&store, "b"), None);
-}
-
-#[test]
 fn memstore_overwrite_key() {
     let mut store = MemStore::new();
     save_i64(&mut store, "x", 1).unwrap();

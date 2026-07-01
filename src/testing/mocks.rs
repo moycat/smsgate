@@ -1,9 +1,6 @@
-//! Mock implementations of ModemPort and Messenger.
+//! Mock implementations of modem and message-sink boundaries.
 
-use crate::im::{
-    InboundMessage, InlineKeyboard, MessageFormat, MessageId, MessageSink, MessageSource,
-    MessengerError,
-};
+use crate::im::{InlineKeyboard, MessageFormat, MessageId, MessageSink, MessengerError};
 use crate::modem::a76xx::at::UartPort;
 use crate::modem::{AtResponse, AtTransport, ModemError, ModemPort};
 use std::collections::VecDeque;
@@ -251,12 +248,11 @@ pub struct EditedMessage {
     pub format: MessageFormat,
 }
 
-/// Records sent messages and serves injected inbound messages.
+/// Records sent messages.
 pub struct RecordingMessenger {
     pub sent: Vec<SentMessage>,
     edited: Vec<EditedMessage>,
     answered_callbacks: Vec<String>,
-    inbound: VecDeque<InboundMessage>,
     next_id: i64,
 }
 
@@ -266,20 +262,8 @@ impl RecordingMessenger {
             sent: Vec::new(),
             edited: Vec::new(),
             answered_callbacks: Vec::new(),
-            inbound: VecDeque::new(),
             next_id: 1000,
         }
-    }
-
-    /// Inject an inbound message that will be returned on the next `poll()`.
-    pub fn inject(&mut self, cursor: i64, text: &str, reply_to: Option<MessageId>) {
-        self.inbound.push_back(InboundMessage {
-            cursor,
-            text: text.to_string(),
-            reply_to,
-            document: None,
-            callback: None,
-        });
     }
 
     pub fn sent_count(&self) -> usize {
@@ -433,17 +417,6 @@ impl MessageSink for RecordingMessenger {
     }
 }
 
-impl MessageSource for RecordingMessenger {
-    fn poll(
-        &mut self,
-        _since: i64,
-        _timeout_sec: u32,
-    ) -> Result<Vec<InboundMessage>, MessengerError> {
-        let msgs: Vec<_> = self.inbound.drain(..).collect();
-        Ok(msgs)
-    }
-}
-
 impl Default for RecordingMessenger {
     fn default() -> Self {
         Self::new()
@@ -460,15 +433,5 @@ pub struct FailingMessenger;
 impl MessageSink for FailingMessenger {
     fn send_message(&mut self, _text: &str) -> Result<MessageId, MessengerError> {
         Err(MessengerError::Http("simulated failure".into()))
-    }
-}
-
-impl MessageSource for FailingMessenger {
-    fn poll(
-        &mut self,
-        _since: i64,
-        _timeout_sec: u32,
-    ) -> Result<Vec<InboundMessage>, MessengerError> {
-        Ok(vec![])
     }
 }

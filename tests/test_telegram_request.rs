@@ -74,23 +74,6 @@ fn send_message_body_can_request_html_format() {
 }
 
 #[test]
-fn send_message_body_can_request_rich_html_format() {
-    let body = build_send_message_body_with_format(
-        123,
-        "<blockquote><b>ts</b> SMS - +1: hello</blockquote>",
-        None,
-        MessageFormat::RichHtml,
-    );
-
-    assert!(body.contains(r#""chat_id":123"#));
-    assert!(body.contains(
-        r#""rich_message":{"html":"<blockquote><b>ts</b> SMS - +1: hello</blockquote>"}"#
-    ));
-    assert!(!body.contains(r#""text":"#));
-    assert!(!body.contains(r#""parse_mode""#));
-}
-
-#[test]
 fn edit_message_body_can_request_html_format() {
     let body = build_edit_message_text_body_with_format(
         123,
@@ -102,23 +85,4 @@ fn edit_message_body_can_request_html_format() {
 
     assert!(body.contains(r#""parse_mode":"HTML""#));
     assert!(body.contains(r#""message_id":456"#));
-}
-
-#[test]
-fn edit_message_body_can_request_rich_html_format() {
-    let body = build_edit_message_text_body_with_format(
-        123,
-        456,
-        "<blockquote><b>ts</b> SMS - +1: hello</blockquote>",
-        None,
-        MessageFormat::RichHtml,
-    );
-
-    assert!(body.contains(r#""chat_id":123"#));
-    assert!(body.contains(r#""message_id":456"#));
-    assert!(body.contains(
-        r#""rich_message":{"html":"<blockquote><b>ts</b> SMS - +1: hello</blockquote>"}"#
-    ));
-    assert!(!body.contains(r#""text":"#));
-    assert!(!body.contains(r#""parse_mode""#));
 }

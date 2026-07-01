@@ -29,26 +29,4 @@ impl Store for NvsStore {
             .set_blob(key, data)
             .map_err(|e| StoreError::Nvs(e.to_string()))
     }
-
-    fn delete(&mut self, key: &str) -> Result<(), StoreError> {
-        self.nvs
-            .remove(key)
-            .map(|_| ())
-            .map_err(|e| StoreError::Nvs(e.to_string()))
-    }
-
-    fn clear_all(&mut self) -> Result<(), StoreError> {
-        for key in &[
-            super::keys::IM_CURSOR,
-            super::keys::REPLY_MAP,
-            super::keys::BLOCK_LIST,
-            super::keys::FWD_ENABLED,
-        ] {
-            self.nvs
-                .remove(key)
-                .map(|_| ())
-                .map_err(|e| StoreError::Nvs(e.to_string()))?;
-        }
-        Ok(())
-    }
 }

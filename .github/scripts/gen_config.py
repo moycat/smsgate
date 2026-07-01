@@ -4,7 +4,7 @@
 Usage:
     python3 .github/scripts/gen_config.py > config.toml
 
-Required environment variables:
+Recognized environment variables:
     WIFI_SSID, WIFI_PASSWORD,
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 
@@ -24,15 +24,6 @@ def toml_str(s: str) -> str:
 def env(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
 
-
-def require(name: str) -> str:
-    v = os.environ.get(name, "")
-    if not v:
-        print(f"error: required environment variable {name!r} is not set", file=sys.stderr)
-        sys.exit(1)
-    return v
-
-
 chat_id_str = env("TELEGRAM_CHAT_ID", "0")
 try:
     chat_id = int(chat_id_str)
@@ -46,7 +37,6 @@ lines = [
     f"password = {toml_str(env('WIFI_PASSWORD'))}",
     "",
     "[im]",
-    'backend   = "telegram"',
     f"bot_token = {toml_str(env('TELEGRAM_BOT_TOKEN'))}",
     f"chat_id   = {chat_id}",
     "",
@@ -64,7 +54,6 @@ lines = [
     "[bridge]",
     "max_failures_before_reboot = 8",
     "poll_interval_ms           = 3000",
-    "watchdog_timeout_sec       = 120",
     "",
     "[ui]",
     f"locale = {toml_str(env('UI_LOCALE', 'en'))}",

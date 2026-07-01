@@ -64,7 +64,7 @@ pub fn render_log_page(ctx: &CommandContext, offset: usize) -> LogPage {
         format: if page_len == 0 {
             MessageFormat::Plain
         } else {
-            MessageFormat::RichHtml
+            MessageFormat::Html
         },
     }
 }

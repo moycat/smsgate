@@ -21,9 +21,6 @@ pub fn sms_sent_ok(phone: &str) -> String {
 pub fn sms_failed(phone: &str) -> String {
     format!("❌ 发往 {} 的短信发送失败（已达最大重试次数）", phone)
 }
-pub fn poll_thread_stale(mins: u32) -> String {
-    format!("⚠️ Telegram 轮询线程已 {} 分钟无响应", mins)
-}
 pub fn low_signal(csq: u8) -> String {
     format!("⚠️ 蜂窝信号弱（CSQ {}）", csq)
 }

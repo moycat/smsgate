@@ -15,14 +15,6 @@ pub enum BoardError {
     Gpio(String),
     #[error("UART init failed: {0}")]
     Uart(String),
-    #[error("power-on sequence failed")]
-    PowerOn,
-}
-
-/// Modem chip family.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ModemVariant {
-    A76xx, // A7670, A7608, A7672, …
 }
 
 /// Board-level abstraction: pin layout + power-on sequence.
@@ -33,13 +25,6 @@ pub enum ModemVariant {
 /// A7608, EC21, …) only requires a new `Board` impl; no other file changes.
 #[cfg(feature = "esp32")]
 pub trait Board {
-    fn modem_variant(&self) -> ModemVariant;
-    fn uart_tx_pin(&self) -> u8;
-    fn uart_rx_pin(&self) -> u8;
-    fn uart_baud(&self) -> u32;
-    fn pwrkey_pin(&self) -> u8;
-    fn reset_pin(&self) -> Option<u8>;
-
     /// Configure GPIO and run the board-specific power-on sequence.
     fn init(
         &self,

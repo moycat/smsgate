@@ -49,7 +49,6 @@ fn main() {
         "cargo:rustc-env=CFG_WIFI_PASSWORD={}",
         get("wifi", "password")
     );
-    println!("cargo:rustc-env=CFG_IM_BACKEND={}", get("im", "backend"));
     println!(
         "cargo:rustc-env=CFG_IM_BOT_TOKEN={}",
         get("im", "bot_token")
@@ -107,11 +106,6 @@ fn main() {
         "cargo:rustc-env=CFG_BRIDGE_POLL_INTERVAL_MS={}",
         get("bridge", "poll_interval_ms")
     );
-    println!(
-        "cargo:rustc-env=CFG_BRIDGE_WATCHDOG_SEC={}",
-        get("bridge", "watchdog_timeout_sec")
-    );
-
     if get("ui", "locale") == "zh" {
         println!("cargo:rustc-cfg=locale_zh");
     }
@@ -166,7 +160,6 @@ fn emit_empty_defaults() {
     for key in &[
         "CFG_WIFI_SSID",
         "CFG_WIFI_PASSWORD",
-        "CFG_IM_BACKEND",
         "CFG_IM_BOT_TOKEN",
         "CFG_IM_CHAT_ID",
     ] {
@@ -184,5 +177,4 @@ fn emit_empty_defaults() {
     println!("cargo:rustc-env=CFG_MODEM_SIM_PIN=");
     println!("cargo:rustc-env=CFG_BRIDGE_MAX_FAILURES=8");
     println!("cargo:rustc-env=CFG_BRIDGE_POLL_INTERVAL_MS=3000");
-    println!("cargo:rustc-env=CFG_BRIDGE_WATCHDOG_SEC=120");
 }

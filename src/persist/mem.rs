@@ -26,14 +26,4 @@ impl Store for MemStore {
         self.data.insert(key.to_string(), data.to_vec());
         Ok(())
     }
-
-    fn delete(&mut self, key: &str) -> Result<(), StoreError> {
-        self.data.remove(key);
-        Ok(())
-    }
-
-    fn clear_all(&mut self) -> Result<(), StoreError> {
-        self.data.clear();
-        Ok(())
-    }
 }

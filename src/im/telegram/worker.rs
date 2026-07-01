@@ -15,7 +15,7 @@ use std::sync::{
     mpsc::{sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender},
     Arc, Mutex,
 };
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 const OUTBOUND_QUEUE_DEPTH: usize = 8;
 
@@ -51,17 +51,6 @@ fn reset_current_task_watchdog() {
     }
 }
 
-fn sleep_with_watchdog(duration: Duration) {
-    let deadline = Instant::now() + duration;
-    loop {
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            break;
-        };
-        std::thread::sleep(remaining.min(Duration::from_secs(1)));
-        reset_current_task_watchdog();
-    }
-}
-
 fn run_with_retries<T, F>(
     operation: &'static str,
     event_tx: &Sender<TelegramSendEvent>,
@@ -74,7 +63,6 @@ where
     let mut attempt: u16 = 1;
 
     loop {
-        reset_current_task_watchdog();
         let attempt_started = Instant::now();
         match operation_fn() {
             Ok(value) => return Ok(value),
@@ -109,7 +97,7 @@ where
                     let remaining_before_reboot =
                         telegram_restart_after().saturating_sub(total_elapsed);
                     let delay = retry_delay.min(remaining_before_reboot);
-                    sleep_with_watchdog(delay);
+                    std::thread::sleep(delay);
                     if should_restart_after_send_retry(started.elapsed()) {
                         let detail = format!(
                             "{} retrying for {}s; rebooting before next retry",

@@ -196,8 +196,10 @@ Large implementations are split into subdirectories (`modem/a76xx/`, `im/telegra
 `commands/builtin/`). Small ones are single files. Trait definitions always live
 in the parent `mod.rs`.
 
-NVS stores exactly four keys: `im_cursor` (i64), `reply_map` (blob), `block_list` (blob),
-`fwd_enabled` (bool). Configuration lives in compile-time `config.toml`, not NVS.
+The `"smsgate"` NVS namespace stores exactly four keys: `im_cursor` (i64),
+`reply_map` (blob), `block_list` (blob), `fwd_enabled` (bool). Runtime credentials
+live in the separate `"smsgcfg"` namespace and override compile-time defaults from
+`config.toml`.
 
 ### Partition Table
 
@@ -280,8 +282,9 @@ espflash save-image --chip esp32 --flash-size 4mb --partition-table partitions_o
 The checked-in CI workflow is `.github/workflows/ci.yml`, which runs `rustfmt`,
 `clippy -D warnings`, and host tests.
 
-Workflows that use `.github/scripts/gen_config.py` for production configuration require these
-GitHub Secrets (Settings -> Secrets and variables -> Actions):
+Production workflows that use `.github/scripts/gen_config.py` should provide these GitHub
+Secrets (Settings -> Secrets and variables -> Actions). Empty credential values build a
+firmware image that enters serial provisioning unless credentials already exist in NVS:
 
 | Secret | Example |
 |--------|---------|
@@ -315,13 +318,14 @@ work.
 1. `src/commands/builtin/<name>.rs` — implement `Command` trait
 2. `src/commands/builtin/mod.rs` — `pub use <name>::<Name>Command;`
 3. `src/main.rs` `build_registry()` — `registry.register(Box::new(<Name>Command));`
-4. `tests/command_dispatch.rs` — add a test using `RecordingMessenger` + `MemStore`
-5. `cargo test --no-default-features --features testing --test command_dispatch`
+4. `tests/test_commands.rs` and/or `tests/test_poller.rs` — add tests using
+   `RecordingMessenger` + `MemStore`
+5. `cargo test --no-default-features --features testing --test test_commands --test test_poller`
 
 ### Add a board
 1. `src/boards/<board>.rs` — implement `Board` trait
-2. `src/boards/mod.rs` — `#[cfg(feature = "board_<board>")]` conditional export
-3. `Cargo.toml` — add feature `board_<board>`
+2. `src/boards/mod.rs` — export the board module behind the appropriate cfg
+3. `src/main.rs` — select the board during startup, or add an explicit feature switch
 4. `config.toml.example` — document default pins for this board
 
 ### Add a test scenario

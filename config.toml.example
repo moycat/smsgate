@@ -13,7 +13,6 @@ ssid     = "YOUR_WIFI_SSID"
 password = "YOUR_WIFI_PASSWORD"  # DO NOT COMMIT
 
 [im]
-backend   = "telegram"
 bot_token = "123456:ABC-DEF..."  # DO NOT COMMIT — revoke at @BotFather if leaked
 chat_id   = 987654321            # Your Telegram user ID (not a group ID)
 
@@ -37,7 +36,6 @@ sim_pin   = ""
 [bridge]
 max_failures_before_reboot = 8
 poll_interval_ms           = 3000
-watchdog_timeout_sec       = 120
 
 [ui]
 # Locale: "en" (default) or "zh"

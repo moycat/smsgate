@@ -3,7 +3,7 @@
 //! Pin defaults are from config.toml; can be overridden for other boards
 //! simply by creating a new Board impl with different constants.
 
-use super::{Board, BoardError, ModemVariant};
+use super::{Board, BoardError};
 use crate::config::Config;
 use crate::modem::{
     a76xx::{at::HardwareAtPort, A76xxModem},
@@ -24,25 +24,6 @@ const MODEM_RESET_PIN: u8 = 5;
 pub struct TA7670X;
 
 impl Board for TA7670X {
-    fn modem_variant(&self) -> ModemVariant {
-        ModemVariant::A76xx
-    }
-    fn uart_tx_pin(&self) -> u8 {
-        Config::UART_TX
-    }
-    fn uart_rx_pin(&self) -> u8 {
-        Config::UART_RX
-    }
-    fn uart_baud(&self) -> u32 {
-        Config::UART_BAUD
-    }
-    fn pwrkey_pin(&self) -> u8 {
-        Config::PWRKEY_PIN
-    }
-    fn reset_pin(&self) -> Option<u8> {
-        Some(MODEM_RESET_PIN)
-    }
-
     fn init(&self, _peripherals: &mut Peripherals) -> Result<(), BoardError> {
         use esp_idf_hal::gpio::AnyOutputPin;
 

@@ -17,11 +17,11 @@ Reference hardware: **LilyGo T-A7670X** (A7670G LTE modem, CH9102 USB bridge).
 - PDU-mode SMS encoding/decoding (GSM-7 + UCS-2)
 - Bot commands: `/help`, `/status`, `/send`, `/block`, `/blocklist`, `/unblock`, `/pause`, `/resume`, `/log`, `/restart`
 - i18n: English and Chinese (compile-time locale selection, zero overhead)
-- NVS persistence for cursor, reply mapping, and block list
+- NVS persistence for runtime credentials, cursor, reply mapping, and block list
 - Outbound SMS queue with exponential-backoff retry
 - Telegram-delivered OTA firmware updates over WiFi HTTPS
 - Flash-backed `/log [offset]` event ring for SMS, boot, network, OTA, and user operations; pages show 16 entries with Telegram inline buttons for paging, and SMS log previews keep up to 160 chars before the fixed-size flash record is trimmed to fit
-- Hardware watchdog (120s timeout)
+- ESP-IDF task watchdog plus Telegram poll/send software watchdogs
 - Build commit hash embedded in `/status` output
 
 ## Quick Start
@@ -32,7 +32,7 @@ cargo install espup && espup install
 
 # 2. Copy and fill in config
 cp config.toml.example config.toml
-# Edit config.toml with your WiFi credentials, Telegram bot token, and chat ID
+# Edit config.toml with WiFi/Telegram credentials, or leave them blank and provision over serial
 
 # 3. Run host tests (no hardware needed)
 cargo test --no-default-features --features testing
@@ -110,7 +110,7 @@ device will be provisioned again. Verify the next boot lists `otadata`, `ota_0`,
 
 ## Configuration
 
-All configuration is in `config.toml` (compile-time, not runtime). See [`config.toml.example`](config.toml.example) for all options.
+`config.toml` supplies compile-time defaults for WiFi, Telegram, modem pins, APN, SIM PIN, and UI locale. WiFi, Telegram, and APN credentials can also be provisioned over serial and are stored in NVS under the `smsgcfg` namespace. See [`config.toml.example`](config.toml.example) for all options.
 
 To build with Chinese UI strings, add to your `config.toml`:
 
@@ -123,19 +123,20 @@ locale = "zh"
 
 **`serde_json` for Telegram API parsing** — The Telegram HTTP layer uses `serde_json`, which requires heap allocation. This is a deliberate tradeoff: the ESP32 has ample SRAM (320 KB + optional PSRAM), a typical Telegram API response is a few kilobytes, and `serde-json-core` (the `no_std` alternative) would add significant implementation complexity for marginal gain. If you port this to a more constrained MCU, swapping out `im/telegram/` is the only change needed.
 
-**Compile-time configuration** — WiFi credentials, bot token, and pin assignments all live in `config.toml` and are baked into the binary at build time. Runtime configuration (e.g. over BLE or a captive portal) is out of scope for a single-owner personal device and would add substantial complexity.
+**Configuration boundaries** — Hardware defaults and locale are compile-time settings. Operational credentials can be baked into `config.toml` for simple deployments or provisioned over serial into NVS without rebuilding the firmware.
 
 **Runtime task split** — Telegram polling and Telegram outbound delivery run in separate worker threads. SMS and modem AT operations keep a single ordered UART owner so URCs, SMS reads/deletes, and `AT+CMGS` prompt handling do not interleave.
 
 ## Architecture
 
-The system is built around four core traits. All business logic depends only on these abstractions:
+The system is built around core traits. Business logic depends on these abstractions rather than concrete Telegram, ESP-IDF, board, or NVS implementations:
 
 | Trait | Abstracts |
 |-------|-----------|
 | `ModemPort` | AT commands, URC polling, PDU SMS send |
 | `MessageSink` / `MessageSource` | Send/poll IM messages (Telegram) |
 | `Store` | NVS key-value persistence |
+| `Board` | Pin layout, power-on sequence, and modem construction |
 | `Command` | Single bot command (name, description, handler) |
 
 ## USB Driver

@@ -32,8 +32,6 @@ pub enum Urc {
     Ring,
     /// Caller ID: (phone, type).
     Clip(String),
-    /// Registration status change.
-    Creg,
     /// Status report available.
     StatusReport,
     /// Other / unrecognised.
@@ -62,17 +60,12 @@ pub fn parse_urc(line: &str) -> Urc {
     if line == "RING" || line.starts_with("RING") {
         return Urc::Ring;
     }
-    if let Some(rest) = line.strip_prefix("+CLIP:") {
-        let rest = rest.trim_start();
-        let number =
-            crate::sms::codec::parse_clip_line(&format!("+CLIP: {}", rest)).unwrap_or_default();
+    if line.starts_with("+CLIP:") {
+        let number = crate::sms::codec::parse_clip_line(line).unwrap_or_default();
         return Urc::Clip(number);
     }
     if line.starts_with("+CDS:") || line.starts_with("+CDSI:") {
         return Urc::StatusReport;
-    }
-    if line.starts_with("+CREG:") || line.starts_with("+CGREG:") || line.starts_with("+CEREG:") {
-        return Urc::Creg;
     }
     Urc::Other(line.to_string())
 }

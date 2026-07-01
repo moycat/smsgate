@@ -127,13 +127,6 @@ fn parse_cdsi_is_status_report() {
 }
 
 #[test]
-fn parse_creg_variants() {
-    assert!(matches!(parse_urc("+CREG: 1"), Urc::Creg));
-    assert!(matches!(parse_urc("+CGREG: 1"), Urc::Creg));
-    assert!(matches!(parse_urc("+CEREG: 1"), Urc::Creg));
-}
-
-#[test]
 fn parse_unknown_is_other() {
     let urc = parse_urc("+UNKNOWNCMD: data");
     assert!(matches!(urc, Urc::Other(_)));

@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 const UART_READ_TICKS: u32 = 10;
 
 const CMD_TIMEOUT: Duration = Duration::from_secs(5);
-const CONNECT_PAYLOAD_TIMEOUT: Duration = Duration::from_secs(90);
 const READLINE_TIMEOUT: Duration = Duration::from_millis(500);
 /// Maximum buffered URC lines. Prevents unbounded queue growth on UART noise flood.
 const MAX_URC_BUF: usize = 32;
@@ -176,16 +175,6 @@ impl<U: UartPort> AtPort<U> {
     /// Write raw bytes to UART (used for AT+CMGS PDU send).
     pub fn write_raw(&mut self, data: &[u8]) -> Result<(), ModemError> {
         self.uart.write_all(data)
-    }
-
-    /// Send a command whose response includes `CONNECT`, write `payload`, then read until `OK`.
-    /// Used for Quectel `AT+QHTTPURL` / `AT+QHTTPPOST` data phases.
-    pub fn send_at_connect_payload(
-        &mut self,
-        cmd: &str,
-        payload: &str,
-    ) -> Result<AtResponse, ModemError> {
-        self.send_at_connect_payload_with_timeout(cmd, payload, CONNECT_PAYLOAD_TIMEOUT)
     }
 
     /// Send a CONNECT-style command with a caller-provided timeout.

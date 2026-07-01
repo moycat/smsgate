@@ -3,9 +3,6 @@
 //! Two orthogonal traits:
 //! - `MessageSink`   — outbound delivery (SMS -> Telegram)
 //! - `MessageSource` — inbound command polling
-//!
-//! The legacy `Messenger` trait is kept as a convenience super-trait for backends
-//! that implement both (e.g. Telegram).
 
 pub mod telegram;
 
@@ -18,7 +15,6 @@ pub type MessageId = i64;
 pub enum MessageFormat {
     Plain,
     Html,
-    RichHtml,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,11 +202,3 @@ pub trait MessageSource {
     fn poll(&mut self, since: i64, timeout_sec: u32)
         -> Result<Vec<InboundMessage>, MessengerError>;
 }
-
-/// Full bidirectional backend (sink + source). Telegram implements this.
-/// All business logic in bridge/, commands/, etc. depends only on `MessageSink`.
-/// Only the polling thread depends on `MessageSource`.
-pub trait Messenger: MessageSink + MessageSource {}
-
-/// Blanket impl: anything that is both a sink and a source is a Messenger.
-impl<T: MessageSink + MessageSource> Messenger for T {}

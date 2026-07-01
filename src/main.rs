@@ -199,13 +199,13 @@ fn main() {
     let mut concat = ConcatReassembler::new();
     let mut call_handler = CallHandler::new();
     let mut modem_status = smsgate::modem::ModemStatus::default();
-    macro_rules! restart_if_tg_send_requested {
+    macro_rules! drain_tg_send {
         () => {
-            if drain_telegram_send_events_since_boot(
+            if drain_telegram_send_events(
                 &tg_send_event_rx,
                 &mut log,
                 &log_clock,
-                boot_ms,
+                elapsed_since(boot_ms, now_ms()),
             ) {
                 esp_idf_hal::reset::restart();
             }
@@ -231,12 +231,12 @@ fn main() {
             ),
         );
     }
-    restart_if_tg_send_requested!();
+    drain_tg_send!();
 
     // Alert if NVS init failed (now that we have a messenger to send the notification)
     if nvs_failed {
         let _ = messenger.send_message(smsgate::i18n::nvs_fail());
-        restart_if_tg_send_requested!();
+        drain_tg_send!();
         record_event(
             &mut log,
             &log_clock,
@@ -277,7 +277,7 @@ fn main() {
                 &mut *store,
                 &log_timestamp,
             );
-            restart_if_tg_send_requested!();
+            drain_tg_send!();
             if delete {
                 let mut md = lock!(modem);
                 delete_sms_slot(index, &mut *md);
@@ -299,14 +299,13 @@ fn main() {
         LogEvent::system("ready", "smsgate ready"),
     );
     let _ = messenger.send_message(smsgate::i18n::started());
-    restart_if_tg_send_requested!();
+    drain_tg_send!();
     match smsgate::ota::confirm_running() {
         Ok(()) => log::info!("[main] OTA running slot marked valid"),
         Err(e) => log::warn!("[main] OTA confirm skipped: {}", e),
     }
 
-    // Subscribe main task to the Task WDT (120s timeout).
-    // The WDT fires if esp_task_wdt_reset() is not called within the timeout.
+    // Subscribe main task to the Task WDT configured by sdkconfig.defaults.
     unsafe {
         esp_idf_sys::esp_task_wdt_add(std::ptr::null_mut());
     }
@@ -362,7 +361,7 @@ fn main() {
             let mut cursor = initial_cursor;
             const HEARTBEAT_INTERVAL: u8 = 20;
             let mut heartbeat_counter: u8 = 0;
-            // Subscribe this thread to the Task WDT (same 120 s timeout as main).
+            // Subscribe this thread to the same Task WDT as main.
             // If poll() hangs indefinitely the WDT fires and reboots the device.
             unsafe {
                 esp_idf_sys::esp_task_wdt_add(std::ptr::null_mut());
@@ -491,7 +490,7 @@ fn main() {
                     true,
                 );
                 let _ = messenger.send_message(smsgate::i18n::resume_ok());
-                restart_if_tg_send_requested!();
+                drain_tg_send!();
                 log::info!("[main] pause expired — forwarding re-enabled");
                 record_event(
                     &mut log,
@@ -529,7 +528,7 @@ fn main() {
 
             // Low-heap alert
             check_low_heap(&mut messenger);
-            restart_if_tg_send_requested!();
+            drain_tg_send!();
 
             // CSQ low-signal alert (threshold: CSQ ≤ 5, roughly < −103 dBm)
             const CSQ_WEAK: u8 = 5;
@@ -537,7 +536,7 @@ fn main() {
                 if modem_status.csq <= CSQ_WEAK && !low_signal_alerted {
                     low_signal_alerted = true;
                     let _ = messenger.send_message(&smsgate::i18n::low_signal(modem_status.csq));
-                    restart_if_tg_send_requested!();
+                    drain_tg_send!();
                     record_event(
                         &mut log,
                         &log_clock,
@@ -552,7 +551,7 @@ fn main() {
                     low_signal_alerted = false;
                     let _ =
                         messenger.send_message(&smsgate::i18n::signal_restored(modem_status.csq));
-                    restart_if_tg_send_requested!();
+                    drain_tg_send!();
                     record_event(
                         &mut log,
                         &log_clock,
@@ -575,7 +574,7 @@ fn main() {
                     &last_operator,
                     &modem_status.operator,
                 ));
-                restart_if_tg_send_requested!();
+                drain_tg_send!();
                 record_event(
                     &mut log,
                     &log_clock,
@@ -714,7 +713,7 @@ fn main() {
                     ),
                 );
             }
-            restart_if_tg_send_requested!();
+            drain_tg_send!();
             record_event(&mut log, &log_clock, uptime_ms, notification.log_event());
         }
 
@@ -729,7 +728,7 @@ fn main() {
                 &mut *store,
                 &log_timestamp,
             );
-            restart_if_tg_send_requested!();
+            drain_tg_send!();
         }
 
         for sms in pending_sms {
@@ -744,7 +743,7 @@ fn main() {
                 &mut *store,
                 &log_timestamp,
             );
-            restart_if_tg_send_requested!();
+            drain_tg_send!();
             if delete {
                 let mut md = lock!(modem);
                 delete_sms_slot(index, &mut *md);
@@ -836,7 +835,7 @@ fn main() {
                             "ignored_stale",
                             &smsgate::i18n::ota_ignored_stale(name),
                         );
-                        restart_if_tg_send_requested!();
+                        drain_tg_send!();
                         continue;
                     }
                     handle_ota_document(
@@ -850,7 +849,7 @@ fn main() {
                         boot_ms,
                         &tg_send_event_rx,
                     );
-                    restart_if_tg_send_requested!();
+                    drain_tg_send!();
                 }
             }
             let dispatch_messages: Vec<smsgate::im::InboundMessage> = tg_messages
@@ -874,7 +873,7 @@ fn main() {
                     &wifi_info,
                 ) {
                     Ok(outcome) => {
-                        restart_if_tg_send_requested!();
+                        drain_tg_send!();
                         consecutive_failures = 0;
                         for event in outcome.events {
                             record_event(&mut log, &log_clock, uptime_ms, event);
@@ -891,12 +890,12 @@ fn main() {
                         if outcome.restart_requested {
                             log::info!("[main] restart requested via /restart command");
                             let _ = messenger.send_message(smsgate::i18n::rebooting());
-                            restart_if_tg_send_requested!();
+                            drain_tg_send!();
                             esp_idf_hal::reset::restart();
                         }
                     }
                     Err(e) => {
-                        restart_if_tg_send_requested!();
+                        drain_tg_send!();
                         consecutive_failures += 1;
                         log::error!("[main] send failed ({}): {}", consecutive_failures, e);
                         record_event(
@@ -926,7 +925,7 @@ fn main() {
         match &drain {
             DrainOutcome::Sent { phone } => {
                 let _ = messenger.send_message(&smsgate::i18n::sms_sent_ok(phone));
-                restart_if_tg_send_requested!();
+                drain_tg_send!();
                 record_event(
                     &mut log,
                     &log_clock,
@@ -936,7 +935,7 @@ fn main() {
             }
             DrainOutcome::Dropped { phone } => {
                 let _ = messenger.send_message(&smsgate::i18n::sms_failed(phone));
-                restart_if_tg_send_requested!();
+                drain_tg_send!();
                 record_event(
                     &mut log,
                     &log_clock,
@@ -1018,16 +1017,6 @@ fn build_log_ring() -> LogRing {
 fn record_event(log: &mut LogRing, clock: &LogClock, uptime_ms: u32, event: LogEvent) {
     let timestamp = clock.timestamp(uptime_ms);
     log.push(event.at(&timestamp));
-}
-
-#[cfg(feature = "esp32")]
-fn drain_telegram_send_events_since_boot(
-    rx: &std::sync::mpsc::Receiver<TelegramSendEvent>,
-    log: &mut LogRing,
-    clock: &LogClock,
-    boot_ms: u32,
-) -> bool {
-    drain_telegram_send_events(rx, log, clock, elapsed_since(boot_ms, now_ms()))
 }
 
 #[cfg(feature = "esp32")]
@@ -1151,9 +1140,14 @@ fn handle_ota_document(
     boot_ms: u32,
     tg_send_event_rx: &std::sync::mpsc::Receiver<TelegramSendEvent>,
 ) {
-    macro_rules! restart_if_ota_send_requested {
+    macro_rules! drain_ota_send {
         () => {
-            if drain_telegram_send_events_since_boot(tg_send_event_rx, log, log_clock, boot_ms) {
+            if drain_telegram_send_events(
+                tg_send_event_rx,
+                log,
+                log_clock,
+                elapsed_since(boot_ms, now_ms()),
+            ) {
                 esp_idf_hal::reset::restart();
             }
         };
@@ -1180,7 +1174,7 @@ fn handle_ota_document(
             "wifi_required",
             smsgate::i18n::ota_wifi_required(),
         );
-        restart_if_ota_send_requested!();
+        drain_ota_send!();
         record_event(
             log,
             log_clock,
@@ -1196,7 +1190,7 @@ fn handle_ota_document(
         "starting",
         &smsgate::i18n::ota_starting(name, document.file_size),
     );
-    restart_if_ota_send_requested!();
+    drain_ota_send!();
     record_event(
         log,
         log_clock,
@@ -1214,7 +1208,7 @@ fn handle_ota_document(
                 "http_init_failed",
                 &smsgate::i18n::ota_failed(&e.to_string()),
             );
-            restart_if_ota_send_requested!();
+            drain_ota_send!();
             record_event(
                 log,
                 log_clock,
@@ -1245,7 +1239,7 @@ fn handle_ota_document(
                         message_id,
                         &smsgate::i18n::ota_progress(written, total),
                     );
-                    restart_if_ota_send_requested!();
+                    drain_ota_send!();
                 }
             }
         });
@@ -1263,7 +1257,7 @@ fn handle_ota_document(
             } else {
                 let _ = send_ota_message(messenger, "complete", smsgate::i18n::ota_complete());
             }
-            restart_if_ota_send_requested!();
+            drain_ota_send!();
             record_event(
                 log,
                 log_clock,
@@ -1281,7 +1275,7 @@ fn handle_ota_document(
             } else {
                 let _ = send_ota_message(messenger, "failed", &failed);
             }
-            restart_if_ota_send_requested!();
+            drain_ota_send!();
             record_event(
                 log,
                 log_clock,

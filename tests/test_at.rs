@@ -153,7 +153,11 @@ fn send_at_connect_payload_ok() {
     uart.queue_response_line("OK");
     let mut p = port(uart);
     let r = p
-        .send_at_connect_payload("+QHTTPPOST=52,60,60", "{\"test\":1}")
+        .send_at_connect_payload_with_timeout(
+            "+QHTTPPOST=52,60,60",
+            "{\"test\":1}",
+            std::time::Duration::from_secs(30),
+        )
         .unwrap();
     assert!(r.ok);
     let sent = p.inner().sent_str();
@@ -166,7 +170,11 @@ fn send_at_connect_payload_error_before_connect() {
     uart.queue_response_line("ERROR");
     let mut p = port(uart);
     let r = p
-        .send_at_connect_payload("+QHTTPPOST=52,60,60", "body")
+        .send_at_connect_payload_with_timeout(
+            "+QHTTPPOST=52,60,60",
+            "body",
+            std::time::Duration::from_secs(30),
+        )
         .unwrap();
     assert!(!r.ok);
 }

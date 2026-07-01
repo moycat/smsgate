@@ -4,7 +4,7 @@
 //!
 //! Provides:
 //! - `mocks::ScriptedModem` — programmable AT response script
-//! - `mocks::RecordingMessenger` — captures sent messages; injects inbound
+//! - `mocks::RecordingMessenger` — captures sent messages
 //! - `mocks::FailingMessenger` — always errors on send
 //! - `Scenario` — declarative end-to-end test DSL
 
