@@ -77,7 +77,7 @@ fn format_bytes(bytes: u64) -> String {
 
 pub fn sms_received(sender: &str, ts: &str, body: &str) -> String {
     format!(
-        "📱 来自 <code>{}</code>\n🕐 {}\n\n{}",
+        "📱 <code>{}</code>\n🕐 {}\n\n{}",
         super::html_escape(sender),
         super::html_escape(ts),
         super::html_escape(body)
@@ -189,8 +189,12 @@ pub fn send_too_long() -> &'static str {
     "消息过长（超过 10 条短信）"
 }
 
-pub fn send_queued(phone: &str, preview: &str, parts: usize) -> String {
-    format!("已入队：{} → \"{}…\"（{} 条）", phone, preview, parts)
+pub fn send_queued(phone: &str, preview: &str, truncated: bool, parts: usize) -> String {
+    let ellipsis = if truncated { "…" } else { "" };
+    format!(
+        "已入队：{} → \"{}{}\"（{} 条）",
+        phone, preview, ellipsis, parts
+    )
 }
 pub fn send_rate_limited() -> &'static str {
     "频率限制：每分钟最多发送 5 条 /send 命令。"

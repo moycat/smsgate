@@ -32,7 +32,9 @@ impl Command for SendCommand {
         if parts == 0 {
             return crate::i18n::send_too_long().to_string();
         }
-        let preview: String = body.chars().take(50).collect();
+        let mut chars = body.chars();
+        let preview: String = chars.by_ref().take(50).collect();
+        let truncated = chars.next().is_some();
         let body_encoded = body
             .replace('\\', "\\\\")
             .replace('\n', "\\n")
@@ -42,7 +44,7 @@ impl Command for SendCommand {
             SEND_SENTINEL,
             phone,
             body_encoded,
-            crate::i18n::send_queued(&phone, &preview, parts)
+            crate::i18n::send_queued(&phone, &preview, truncated, parts)
         )
     }
 }

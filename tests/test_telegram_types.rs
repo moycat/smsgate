@@ -43,8 +43,8 @@ fn json_escape_double_quote() {
 #[test]
 fn json_escape_sms_forward_format() {
     // Matches the actual format used in forward_sms:
-    // format!("📱 SMS from <code>{}</code>\n🕐 {}\n\n{}", sender, ts, body)
-    let text = "📱 SMS from <code>+8613812345678</code>\n🕐 2024-01-01 12:00\n\nHello world";
+    // format!("📱 <code>{}</code>\n🕐 {}\n\n{}", sender, ts, body)
+    let text = "📱 <code>+8613812345678</code>\n🕐 2024-01-01 12:00\n\nHello world";
     let escaped = json_escape(text);
     // Verify the result can be embedded in a JSON string without breaking parsing
     let json = format!(r#"{{"text":"{}"}}"#, escaped);

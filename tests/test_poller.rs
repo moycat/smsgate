@@ -62,6 +62,28 @@ fn callback_msg(data: &str, message_id: i64) -> InboundMessage {
     }
 }
 
+#[cfg(locale_zh)]
+fn queued_line(phone: &str, preview: &str, truncated: bool, parts: usize) -> String {
+    format!(
+        "已入队：{} → \"{}{}\"（{} 条）",
+        phone,
+        preview,
+        if truncated { "…" } else { "" },
+        parts
+    )
+}
+
+#[cfg(not(locale_zh))]
+fn queued_line(phone: &str, preview: &str, truncated: bool, parts: usize) -> String {
+    format!(
+        "Queued: {} → \"{}{}\" ({} part(s))",
+        phone,
+        preview,
+        if truncated { "…" } else { "" },
+        parts
+    )
+}
+
 fn fill_log(log: &mut LogRing, count: usize) {
     for i in 0..count {
         log.push(smsgate::log_ring::LogEntry::sms(
@@ -194,6 +216,44 @@ fn send_sentinel_enqueues_sms() {
         reply
     );
     assert!(reply.contains("+8613800138000"));
+}
+
+#[test]
+fn send_short_body_reply_does_not_append_ellipsis() {
+    let mut store = MemStore::new();
+    let mut messenger = RecordingMessenger::new();
+    let router = ReplyRouter::new();
+    let reg = make_registry();
+    let log = LogRing::new();
+    let status = ModemStatus::default();
+    let mut sender = SmsSender::new();
+
+    poll_and_dispatch(
+        &[msg("/send 95516 同意24")],
+        &mut messenger,
+        &mut sender,
+        &router,
+        &reg,
+        &mut store,
+        &log,
+        &status,
+        0,
+        0,
+        "",
+    )
+    .unwrap();
+
+    let reply = messenger.last_sent().unwrap();
+    assert!(
+        reply.contains(&queued_line("95516", "同意24", false, 1)),
+        "queued preview line expected, got: {}",
+        reply
+    );
+    assert!(
+        !reply.contains("同意24…"),
+        "short body should not show ellipsis: {}",
+        reply
+    );
 }
 
 #[test]
@@ -642,8 +702,8 @@ fn send_body_preview_truncated_at_50_chars() {
     let reply = messenger.last_sent().unwrap();
     let preview_50: String = "A".repeat(50);
     assert!(
-        reply.contains(&preview_50),
-        "reply should show 50-char preview: {}",
+        reply.contains(&queued_line("+1", &preview_50, true, 1)),
+        "reply should show truncated 50-char preview: {}",
         reply
     );
 }

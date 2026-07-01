@@ -67,6 +67,56 @@ fn forward_sms_sends_sender_as_html_code() {
     assert!(sent.text.contains("<code>+86 138-0013-8000</code>"));
 }
 
+#[cfg(not(locale_zh))]
+#[test]
+fn forward_sms_en_message_starts_with_sender_code() {
+    let mut store = MemStore::new();
+    let mut messenger = RecordingMessenger::new();
+    let mut router = ReplyRouter::new();
+    let mut log = LogRing::new();
+
+    let sms = make_sms("+8613800138000", "Hello test");
+    forward_sms(
+        &sms,
+        &mut messenger,
+        &mut router,
+        &mut log,
+        &mut store,
+        TEST_LOG_TS,
+    );
+
+    let sent = messenger.sent.last().expect("SMS should be forwarded");
+    assert_eq!(
+        sent.text.lines().next(),
+        Some("📱 <code>+86 138-0013-8000</code>")
+    );
+}
+
+#[cfg(locale_zh)]
+#[test]
+fn forward_sms_zh_message_starts_with_sender_code() {
+    let mut store = MemStore::new();
+    let mut messenger = RecordingMessenger::new();
+    let mut router = ReplyRouter::new();
+    let mut log = LogRing::new();
+
+    let sms = make_sms("+8613800138000", "Hello test");
+    forward_sms(
+        &sms,
+        &mut messenger,
+        &mut router,
+        &mut log,
+        &mut store,
+        TEST_LOG_TS,
+    );
+
+    let sent = messenger.sent.last().expect("SMS should be forwarded");
+    assert_eq!(
+        sent.text.lines().next(),
+        Some("📱 <code>+86 138-0013-8000</code>")
+    );
+}
+
 #[test]
 fn forward_sms_escapes_sms_body_for_html() {
     let mut store = MemStore::new();
