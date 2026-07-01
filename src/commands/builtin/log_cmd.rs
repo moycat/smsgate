@@ -48,22 +48,24 @@ pub fn render_log_page(ctx: &CommandContext, offset: usize) -> LogPage {
     if entries.is_empty() {
         out.push_str(crate::i18n::log_empty());
     } else {
-        out.push_str("<pre>\n");
-        for e in entries {
+        for e in &entries {
             out.push_str(&format!(
-                "{} {} - {}: {}\n",
+                "<blockquote><b>{}</b> {} - {}: {}</blockquote>\n",
                 html_escape(&e.timestamp),
                 e.kind.label(),
                 html_escape(&e.sender),
                 html_escape(&e.body_preview)
             ));
         }
-        out.push_str("</pre>\n");
     }
     LogPage {
         text: out,
         keyboard: log_keyboard(total, offset, page_len),
-        format: MessageFormat::Html,
+        format: if page_len == 0 {
+            MessageFormat::Plain
+        } else {
+            MessageFormat::RichHtml
+        },
     }
 }
 

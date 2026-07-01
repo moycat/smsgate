@@ -18,6 +18,7 @@ pub type MessageId = i64;
 pub enum MessageFormat {
     Plain,
     Html,
+    RichHtml,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

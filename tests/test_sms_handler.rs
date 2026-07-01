@@ -23,6 +23,7 @@ const CONCAT_PART1_PDU: &str = "00440D91683108108300F0000062400110000000 09 0500
 // Concat part 2/2: same sender, ref=1, total=2, part=2; body "!" (0x21 GSM-7)
 // UDL=08 septets (7 header + 1 body), UD=UDH(05 00 03 01 02 02)+body(42)
 const CONCAT_PART2_PDU: &str = "00440D91683108108300F0000062400110000000 08 050003010202 42";
+const TEST_LOG_TS: &str = "2026-04-10T20:00:00Z";
 
 // ---------------------------------------------------------------------------
 // process_pdu_hex
@@ -47,6 +48,7 @@ fn process_pdu_hex_concat_partial_deletes_slot_no_forward() {
         &mut concat,
         &mut messenger,
         &mut store,
+        TEST_LOG_TS,
     );
 
     assert!(result, "concat partial should return true (delete slot)");
@@ -70,6 +72,7 @@ fn process_pdu_hex_forwards_valid_sms() {
         &mut concat,
         &mut messenger,
         &mut store,
+        TEST_LOG_TS,
     );
 
     assert!(result, "valid PDU should return true (delete slot)");
@@ -94,6 +97,7 @@ fn process_pdu_hex_invalid_hex_returns_true() {
         &mut concat,
         &mut messenger,
         &mut store,
+        TEST_LOG_TS,
     );
 
     assert!(result, "unparseable PDU should return true (delete slot)");
@@ -116,6 +120,7 @@ fn process_pdu_hex_records_log_entry() {
         &mut concat,
         &mut messenger,
         &mut store,
+        TEST_LOG_TS,
     );
 
     assert_eq!(log.len(), 1);
@@ -140,6 +145,7 @@ fn process_pdu_hex_concat_both_parts_forward_once() {
         &mut concat,
         &mut messenger,
         &mut store,
+        TEST_LOG_TS,
     );
     assert!(r1, "part 1 should return true (delete slot)");
     assert_eq!(messenger.sent_count(), 0);
@@ -154,6 +160,7 @@ fn process_pdu_hex_concat_both_parts_forward_once() {
         &mut concat,
         &mut messenger,
         &mut store,
+        TEST_LOG_TS,
     );
     assert!(r2, "part 2 should return true (forwarded OK)");
     assert_eq!(messenger.sent_count(), 1);
@@ -223,6 +230,7 @@ fn new_sms_read_process_delete_flow() {
         &mut concat,
         &mut messenger,
         &mut store,
+        TEST_LOG_TS,
     );
     assert!(delete);
     delete_sms_slot(stored.index, &mut modem);
@@ -272,6 +280,7 @@ fn new_sms_text_mode_ucs2_uses_cmgr_header_metadata() {
         &mut concat,
         &mut messenger,
         &mut store,
+        TEST_LOG_TS,
     );
 
     modem.check_consumed();
@@ -306,6 +315,7 @@ fn new_sms_invalid_pdu_deletes_slot() {
         &mut concat,
         &mut messenger,
         &mut store,
+        TEST_LOG_TS,
     );
     assert!(delete);
     delete_sms_slot(stored.index, &mut modem);
@@ -433,6 +443,7 @@ fn read_stored_sms_accepts_text_mode_ucs2_entries() {
         &mut concat,
         &mut messenger,
         &mut store,
+        TEST_LOG_TS,
     );
 
     modem.check_consumed();
@@ -473,6 +484,7 @@ fn new_sms_messenger_failure_keeps_slot() {
         &mut concat,
         &mut messenger,
         &mut store,
+        TEST_LOG_TS,
     );
 
     assert!(!delete);

@@ -3,10 +3,12 @@
 use smsgate::bridge::forwarder::*;
 use smsgate::bridge::reply_router::ReplyRouter;
 use smsgate::im::MessageFormat;
-use smsgate::log_ring::LogRing;
+use smsgate::log_ring::{LogKind, LogRing};
 use smsgate::persist::{keys, mem::MemStore, save_bool};
 use smsgate::sms::SmsMessage;
 use smsgate::testing::mocks::{FailingMessenger, RecordingMessenger};
+
+const TEST_LOG_TS: &str = "2026-04-10T20:00:00Z";
 
 fn make_sms(sender: &str, body: &str) -> SmsMessage {
     SmsMessage {
@@ -25,7 +27,14 @@ fn forward_sms_sends_to_im() {
     let mut log = LogRing::new();
 
     let sms = make_sms("+8613800138000", "Hello test");
-    let result = forward_sms(&sms, &mut messenger, &mut router, &mut log, &mut store);
+    let result = forward_sms(
+        &sms,
+        &mut messenger,
+        &mut router,
+        &mut log,
+        &mut store,
+        TEST_LOG_TS,
+    );
 
     assert!(result.is_some());
     assert_eq!(messenger.sent_count(), 1);
@@ -44,7 +53,14 @@ fn forward_sms_sends_sender_as_html_code() {
     let mut log = LogRing::new();
 
     let sms = make_sms("+8613800138000", "Hello test");
-    forward_sms(&sms, &mut messenger, &mut router, &mut log, &mut store);
+    forward_sms(
+        &sms,
+        &mut messenger,
+        &mut router,
+        &mut log,
+        &mut store,
+        TEST_LOG_TS,
+    );
 
     let sent = messenger.sent.last().expect("SMS should be forwarded");
     assert_eq!(sent.format, MessageFormat::Html);
@@ -59,7 +75,14 @@ fn forward_sms_escapes_sms_body_for_html() {
     let mut log = LogRing::new();
 
     let sms = make_sms("ACME", "2 < 3 & 5 > 4");
-    forward_sms(&sms, &mut messenger, &mut router, &mut log, &mut store);
+    forward_sms(
+        &sms,
+        &mut messenger,
+        &mut router,
+        &mut log,
+        &mut store,
+        TEST_LOG_TS,
+    );
 
     let sent = messenger.last_sent().expect("SMS should be forwarded");
     assert!(sent.contains("2 &lt; 3 &amp; 5 &gt; 4"));
@@ -78,6 +101,7 @@ fn forward_updates_log_ring() {
         &mut router,
         &mut log,
         &mut store,
+        TEST_LOG_TS,
     );
 
     assert_eq!(log.len(), 1);
@@ -85,10 +109,15 @@ fn forward_updates_log_ring() {
     let entry = &entries[0];
     assert!(entry.forwarded);
     assert_eq!(entry.sender, "123");
+    assert_eq!(entry.timestamp, TEST_LOG_TS);
+    assert!(entry
+        .body_preview
+        .contains("sms_time=2026-04-10T12:00:00+08:00"));
+    assert!(entry.body_preview.contains("hi"));
 }
 
 #[test]
-fn sms_log_preview_keeps_up_to_single_sms_text_length() {
+fn sms_log_preview_includes_sms_timestamp_before_sms_text() {
     let mut store = MemStore::new();
     let mut messenger = RecordingMessenger::new();
     let mut router = ReplyRouter::new();
@@ -101,9 +130,12 @@ fn sms_log_preview_keeps_up_to_single_sms_text_length() {
         &mut router,
         &mut log,
         &mut store,
+        TEST_LOG_TS,
     );
 
-    assert_eq!(log.last_n(1)[0].body_preview.len(), 120);
+    let preview = &log.last_n(1)[0].body_preview;
+    assert!(preview.starts_with("sms_time=2026-04-10T12:00:00+08:00 "));
+    assert!(preview.ends_with(&body));
 }
 
 #[test]
@@ -121,6 +153,7 @@ fn blocked_number_not_forwarded() {
         &mut router,
         &mut log,
         &mut store,
+        TEST_LOG_TS,
     );
 
     assert!(result.is_none());
@@ -145,6 +178,7 @@ fn forwarding_paused_drops_message() {
         &mut router,
         &mut log,
         &mut store,
+        TEST_LOG_TS,
     );
 
     assert!(result.is_none());
@@ -226,7 +260,14 @@ fn forward_sms_stores_reply_mapping() {
     let mut log = LogRing::new();
 
     let sms = make_sms("+8613800138000", "please reply");
-    let msg_id = forward_sms(&sms, &mut messenger, &mut router, &mut log, &mut store);
+    let msg_id = forward_sms(
+        &sms,
+        &mut messenger,
+        &mut router,
+        &mut log,
+        &mut store,
+        TEST_LOG_TS,
+    );
 
     assert!(msg_id.is_some());
     let id = msg_id.unwrap();
@@ -268,6 +309,7 @@ fn forwarding_paused_log_entry_not_forwarded() {
         &mut router,
         &mut log,
         &mut store,
+        TEST_LOG_TS,
     );
 
     assert_eq!(log.len(), 1);
@@ -285,9 +327,26 @@ fn messenger_failure_returns_none_and_no_router_entry() {
     let mut log = LogRing::new();
 
     let sms = make_sms("+8613800138000", "test");
-    let result = forward_sms(&sms, &mut messenger, &mut router, &mut log, &mut store);
+    let result = forward_sms(
+        &sms,
+        &mut messenger,
+        &mut router,
+        &mut log,
+        &mut store,
+        TEST_LOG_TS,
+    );
 
     assert!(result.is_none(), "failure should return None");
     // No reply mapping stored
     assert_eq!(router.lookup(1000), None);
+
+    let entries = log.last_n(2);
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].kind, LogKind::Sms);
+    assert_eq!(entries[0].timestamp, TEST_LOG_TS);
+    assert!(!entries[0].forwarded);
+    assert_eq!(entries[1].kind, LogKind::Network);
+    assert_eq!(entries[1].sender, "telegram");
+    assert!(entries[1].body_preview.contains("send failed"));
+    assert!(!entries[1].forwarded);
 }

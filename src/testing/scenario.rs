@@ -6,6 +6,8 @@ use crate::persist::mem::MemStore;
 use crate::sms::{codec::parse_sms_pdu, SmsMessage};
 use crate::testing::mocks::{RecordingMessenger, ScriptedModem};
 
+const TEST_LOG_TS: &str = "2026-04-10T20:00:00Z";
+
 /// Assertion to check after the scenario runs.
 enum Assertion {
     ImSentContains(String),
@@ -101,6 +103,7 @@ impl Scenario {
                 &mut router,
                 &mut log,
                 &mut self.store,
+                TEST_LOG_TS,
             );
         }
 

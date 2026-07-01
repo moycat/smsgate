@@ -158,8 +158,11 @@ fn log_command_shows_entries() {
     let result = LogCommand.handle("", &ctx(&store, &status, &log, &queue));
     assert!(result.contains("+1"));
     assert!(result.contains("hello"));
-    assert!(result.contains("<pre>"));
-    assert!(result.contains("</pre>"));
+    assert!(result.contains("<blockquote>"));
+    assert!(result.contains("<b>ts</b> SMS - +1: hello"));
+    assert!(result.contains("</blockquote>"));
+    assert!(!result.contains("<pre>"));
+    assert!(!result.contains("</pre>"));
     assert!(!result.contains("[INFO]"));
     assert!(!result.contains("[OK]"));
     assert!(!result.contains("[FAIL]"));

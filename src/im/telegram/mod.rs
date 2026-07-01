@@ -24,6 +24,7 @@ use types::{ApiResult, SendMessageResult};
 const GET_UPDATES_LIMIT: u8 = 10;
 const MIN_POLL_TIMEOUT_SEC: u32 = 1;
 const MAX_POLL_TIMEOUT_SEC: u32 = 30;
+const POLL_ERROR_LOG_EVERY: u16 = 12;
 
 /// Build a bounded `getUpdates` request body for the embedded runtime.
 pub fn build_get_updates_body(since: i64, timeout_sec: u32) -> String {
@@ -32,6 +33,14 @@ pub fn build_get_updates_body(since: i64, timeout_sec: u32) -> String {
         r#"{{"offset":{},"timeout":{},"limit":{},"allowed_updates":["message","callback_query"]}}"#,
         since, timeout, GET_UPDATES_LIMIT
     )
+}
+
+pub fn should_log_poll_error(consecutive_errors: u16) -> bool {
+    consecutive_errors == 1 || consecutive_errors.is_multiple_of(POLL_ERROR_LOG_EVERY)
+}
+
+pub fn poll_error_log_detail(consecutive_errors: u16, error: &str) -> String {
+    format!("poll error x{}: {}", consecutive_errors, error)
 }
 
 pub fn build_send_message_body(
@@ -48,12 +57,8 @@ pub fn build_send_message_body_with_format(
     keyboard: Option<&InlineKeyboard>,
     format: MessageFormat,
 ) -> String {
-    let mut body = format!(
-        r#"{{"chat_id":{},"text":"{}""#,
-        chat_id,
-        types::json_escape(text)
-    );
-    append_parse_mode(&mut body, format);
+    let mut body = format!(r#"{{"chat_id":{}"#, chat_id);
+    append_message_content(&mut body, text, format);
     append_reply_markup(&mut body, keyboard);
     body.push('}');
     body
@@ -81,13 +86,8 @@ pub fn build_edit_message_text_body_with_format(
     keyboard: Option<&InlineKeyboard>,
     format: MessageFormat,
 ) -> String {
-    let mut body = format!(
-        r#"{{"chat_id":{},"message_id":{},"text":"{}""#,
-        chat_id,
-        message_id,
-        types::json_escape(text)
-    );
-    append_parse_mode(&mut body, format);
+    let mut body = format!(r#"{{"chat_id":{},"message_id":{}"#, chat_id, message_id);
+    append_message_content(&mut body, text, format);
     append_reply_markup(&mut body, keyboard);
     body.push('}');
     body
@@ -116,10 +116,19 @@ fn append_reply_markup(body: &mut String, keyboard: Option<&InlineKeyboard>) {
     body.push_str(&inline_keyboard_json(keyboard));
 }
 
-fn append_parse_mode(body: &mut String, format: MessageFormat) {
+fn append_message_content(body: &mut String, text: &str, format: MessageFormat) {
     match format {
-        MessageFormat::Plain => {}
-        MessageFormat::Html => body.push_str(r#","parse_mode":"HTML""#),
+        MessageFormat::Plain => {
+            body.push_str(&format!(r#","text":"{}""#, types::json_escape(text)))
+        }
+        MessageFormat::Html => body.push_str(&format!(
+            r#","text":"{}","parse_mode":"HTML""#,
+            types::json_escape(text)
+        )),
+        MessageFormat::RichHtml => body.push_str(&format!(
+            r#","rich_message":{{"html":"{}"}}"#,
+            types::json_escape(text)
+        )),
     }
 }
 

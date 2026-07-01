@@ -101,7 +101,10 @@ fn log_command_sends_inline_keyboard_for_older_page() {
 
     assert_eq!(messenger.sent_count(), 1);
     assert!(messenger.last_sent().unwrap().contains("body-19"));
-    assert_eq!(messenger.sent.last().unwrap().format, MessageFormat::Html);
+    assert_eq!(
+        messenger.sent.last().unwrap().format,
+        MessageFormat::RichHtml
+    );
     let keyboard = messenger.last_sent_keyboard().unwrap();
     assert_eq!(keyboard.rows[0].len(), 1);
     assert_eq!(keyboard.rows[0][0].callback_data, "log:16");
@@ -137,7 +140,7 @@ fn log_callback_edits_existing_message() {
     assert_eq!(messenger.edited_count(), 1);
     let edited = messenger.last_edited().unwrap();
     assert_eq!(edited.id, 555);
-    assert_eq!(edited.format, MessageFormat::Html);
+    assert_eq!(edited.format, MessageFormat::RichHtml);
     assert!(edited.text.contains("body-3"));
     assert!(!edited.text.contains("body-4"));
     let keyboard = edited.keyboard.as_ref().unwrap();

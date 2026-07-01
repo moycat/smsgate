@@ -2,7 +2,7 @@
 
 use crate::bridge::reply_router::ReplyRouter;
 use crate::im::{MessageFormat, MessageId, MessageSink};
-use crate::log_ring::{LogEntry, LogRing};
+use crate::log_ring::{LogEntry, LogEvent, LogRing};
 use crate::persist::{keys, load_bool, Store};
 use crate::sms::{codec::human_readable_phone, SmsMessage};
 
@@ -15,12 +15,13 @@ pub fn forward_sms(
     router: &mut ReplyRouter,
     log: &mut LogRing,
     store: &mut dyn Store,
+    log_timestamp: &str,
 ) -> Option<MessageId> {
     let log_entry = |forwarded| {
         LogEntry::sms(
             sms.sender.clone(),
-            sms.body.chars().take(SMS_LOG_PREVIEW_CHARS).collect(),
-            sms.timestamp.clone(),
+            sms_log_preview(sms),
+            log_timestamp.to_string(),
             forwarded,
         )
     };
@@ -60,8 +61,28 @@ pub fn forward_sms(
         }
         Err(e) => {
             log::error!("[forwarder] send failed: {}", e);
+            log.push(log_entry(false));
+            log.push(
+                LogEvent::network("telegram", &format!("send failed: {}", e), false)
+                    .at(log_timestamp),
+            );
             None
         }
+    }
+}
+
+fn sms_log_preview(sms: &SmsMessage) -> String {
+    let body: String = sms.body.chars().take(SMS_LOG_PREVIEW_CHARS).collect();
+    let formatted_sms_time = crate::sms::codec::timestamp_to_rfc3339(&sms.timestamp, 480);
+    let sms_time = if formatted_sms_time.is_empty() {
+        sms.timestamp.as_str()
+    } else {
+        formatted_sms_time.as_str()
+    };
+    if sms_time.is_empty() {
+        body
+    } else {
+        format!("sms_time={} {}", sms_time, body)
     }
 }
 

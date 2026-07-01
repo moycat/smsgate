@@ -8,6 +8,8 @@ use smsgate::sms::{codec::build_sms_submit_pdus, SmsMessage};
 use smsgate::testing::mocks::RecordingMessenger;
 use smsgate::testing::{pdu, Scenario};
 
+const TEST_LOG_TS: &str = "2026-04-10T20:00:00Z";
+
 // A known-good GSM-7 single-part DELIVER PDU for "+8613800138000", "Hello"
 // We build it by hand-coding a minimal SMS-DELIVER:
 // SCA=00, FO=04 (MTI=00 DELIVER, no flags), OA=0D918136001380F0 (+8613800138000)
@@ -39,7 +41,14 @@ fn scenario_blocked_number_not_forwarded() {
         timestamp: "".to_string(),
         slot: 0,
     };
-    forward_sms(&sms, &mut messenger, &mut router, &mut log, &mut store);
+    forward_sms(
+        &sms,
+        &mut messenger,
+        &mut router,
+        &mut log,
+        &mut store,
+        TEST_LOG_TS,
+    );
 
     assert_eq!(
         messenger.sent_count(),
@@ -68,6 +77,7 @@ fn scenario_paused_forwarding() {
         &mut router,
         &mut log,
         &mut store,
+        TEST_LOG_TS,
     );
 
     assert_eq!(

@@ -17,7 +17,10 @@ use smsgate::{
     config::Config,
     creds::RuntimeCreds,
     im::{
-        telegram::{http::TelegramHttpClient, worker::TelegramSendWorker, TelegramMessenger},
+        telegram::{
+            http::TelegramHttpClient, poll_error_log_detail, should_log_poll_error,
+            worker::TelegramSendWorker, TelegramMessenger,
+        },
         MessageSink, MessageSource,
     },
     log_clock::LogClock,
@@ -44,6 +47,12 @@ macro_rules! lock {
     ($m:expr) => {
         $m.lock().unwrap_or_else(|e| e.into_inner())
     };
+}
+
+#[cfg(feature = "esp32")]
+enum TgPollEvent {
+    Batch(Vec<smsgate::im::InboundMessage>),
+    Log(LogEvent),
 }
 
 #[cfg(feature = "esp32")]
@@ -195,6 +204,16 @@ fn main() {
     // Register bot commands with Telegram
     if let Err(e) = messenger.register_commands(&registry.command_list()) {
         log::warn!("[main] register_commands failed: {} — continuing", e);
+        record_event(
+            &mut log,
+            &log_clock,
+            elapsed_since(boot_ms, now_ms()),
+            LogEvent::network(
+                "telegram",
+                &format!("register commands failed: {}", e),
+                false,
+            ),
+        );
     }
 
     // Alert if NVS init failed (now that we have a messenger to send the notification)
@@ -227,6 +246,8 @@ fn main() {
             read_stored_sms("ME", &mut *md)
         };
         for sms in stored {
+            let uptime_ms = elapsed_since(boot_ms, now_ms());
+            let log_timestamp = log_clock.timestamp(uptime_ms);
             let index = sms.index;
             let mem = sms.mem.clone();
             let delete = smsgate::bridge::sms_handler::process_stored_sms(
@@ -236,6 +257,7 @@ fn main() {
                 &mut concat,
                 &mut messenger,
                 &mut *store,
+                &log_timestamp,
             );
             if delete {
                 let mut md = lock!(modem);
@@ -274,7 +296,7 @@ fn main() {
     // waiting for the network. The channel delivers batches of inbound messages.
     let initial_cursor =
         smsgate::persist::load_i64(&*store, smsgate::persist::keys::IM_CURSOR).unwrap_or(0);
-    let (tg_tx, tg_rx) = std::sync::mpsc::channel::<Vec<smsgate::im::InboundMessage>>();
+    let (tg_tx, tg_rx) = std::sync::mpsc::channel::<TgPollEvent>();
     let modem_tg = modem.clone();
     let tg_token_poll = creds.bot_token.clone();
     let tg_chat_id_poll = creds.chat_id;
@@ -284,6 +306,7 @@ fn main() {
         .stack_size(16 * 1024)
         .spawn(move || {
             let mut poll_cellular = tg_transport_cellular.load(std::sync::atomic::Ordering::SeqCst);
+            let mut consecutive_poll_errors: u16 = 0;
             let mut poll_messenger = loop {
                 match build_telegram_messenger(
                     poll_cellular,
@@ -294,12 +317,28 @@ fn main() {
                     Ok(m) => break m,
                     Err(e) => {
                         log::error!("[tg-poll] messenger init failed: {}", e);
+                        consecutive_poll_errors = consecutive_poll_errors.saturating_add(1);
+                        if should_log_poll_error(consecutive_poll_errors) {
+                            let detail = poll_error_log_detail(
+                                consecutive_poll_errors,
+                                &format!("init failed: {}", e),
+                            );
+                            if tg_tx
+                                .send(TgPollEvent::Log(LogEvent::network(
+                                    "telegram", &detail, false,
+                                )))
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
                         std::thread::sleep(std::time::Duration::from_secs(5));
                         poll_cellular =
                             tg_transport_cellular.load(std::sync::atomic::Ordering::SeqCst);
                     }
                 }
             };
+            consecutive_poll_errors = 0;
             let mut cursor = initial_cursor;
             const HEARTBEAT_INTERVAL: u8 = 20;
             let mut heartbeat_counter: u8 = 0;
@@ -325,6 +364,7 @@ fn main() {
                             poll_messenger = m;
                             poll_cellular = desired_cellular;
                             heartbeat_counter = 0;
+                            consecutive_poll_errors = 0;
                             log::info!(
                                 "[tg-poll] switched to {} transport",
                                 if poll_cellular { "cellular" } else { "WiFi" }
@@ -332,6 +372,21 @@ fn main() {
                         }
                         Err(e) => {
                             log::error!("[tg-poll] transport switch failed: {}", e);
+                            consecutive_poll_errors = consecutive_poll_errors.saturating_add(1);
+                            if should_log_poll_error(consecutive_poll_errors) {
+                                let detail = poll_error_log_detail(
+                                    consecutive_poll_errors,
+                                    &format!("transport switch failed: {}", e),
+                                );
+                                if tg_tx
+                                    .send(TgPollEvent::Log(LogEvent::network(
+                                        "telegram", &detail, false,
+                                    )))
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
                             std::thread::sleep(std::time::Duration::from_secs(5));
                             continue;
                         }
@@ -341,22 +396,37 @@ fn main() {
                 match poll_messenger.poll(cursor, poll_secs) {
                     Ok(msgs) if !msgs.is_empty() => {
                         heartbeat_counter = 0;
+                        consecutive_poll_errors = 0;
                         cursor = msgs.iter().map(|m| m.cursor).max().unwrap_or(cursor);
-                        if tg_tx.send(msgs).is_err() {
+                        if tg_tx.send(TgPollEvent::Batch(msgs)).is_err() {
                             break;
                         }
                     }
                     Ok(_) => {
+                        consecutive_poll_errors = 0;
                         heartbeat_counter += 1;
                         if heartbeat_counter >= HEARTBEAT_INTERVAL {
                             heartbeat_counter = 0;
-                            if tg_tx.send(Vec::new()).is_err() {
+                            if tg_tx.send(TgPollEvent::Batch(Vec::new())).is_err() {
                                 break;
                             }
                         }
                     }
                     Err(e) => {
                         log::error!("[tg-poll] error: {}", e);
+                        consecutive_poll_errors = consecutive_poll_errors.saturating_add(1);
+                        if should_log_poll_error(consecutive_poll_errors) {
+                            let detail =
+                                poll_error_log_detail(consecutive_poll_errors, &e.to_string());
+                            if tg_tx
+                                .send(TgPollEvent::Log(LogEvent::network(
+                                    "telegram", &detail, false,
+                                )))
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
                         std::thread::sleep(std::time::Duration::from_secs(5));
                     }
                 }
@@ -381,6 +451,7 @@ fn main() {
     loop {
         let now = now_ms();
         let uptime_ms = elapsed_since(boot_ms, now);
+        let log_timestamp = log_clock.timestamp(uptime_ms);
 
         // Kick the hardware watchdog
         unsafe {
@@ -623,7 +694,18 @@ fn main() {
         }
 
         for notification in call_notifications {
-            let _ = messenger.send_message(&notification.text);
+            if let Err(e) = messenger.send_message(&notification.text) {
+                record_event(
+                    &mut log,
+                    &log_clock,
+                    uptime_ms,
+                    LogEvent::network(
+                        "telegram",
+                        &format!("call notification send failed: {}", e),
+                        false,
+                    ),
+                );
+            }
             record_event(&mut log, &log_clock, uptime_ms, notification.log_event());
         }
 
@@ -636,6 +718,7 @@ fn main() {
                 &mut concat,
                 &mut messenger,
                 &mut *store,
+                &log_timestamp,
             );
         }
 
@@ -649,6 +732,7 @@ fn main() {
                 &mut concat,
                 &mut messenger,
                 &mut *store,
+                &log_timestamp,
             );
             if delete {
                 let mut md = lock!(modem);
@@ -668,9 +752,12 @@ fn main() {
             let mut channel_active = false;
             loop {
                 match tg_rx.try_recv() {
-                    Ok(msgs) => {
+                    Ok(TgPollEvent::Batch(msgs)) => {
                         channel_active = true;
                         batch.extend(msgs);
+                    }
+                    Ok(TgPollEvent::Log(event)) => {
+                        record_event(&mut log, &log_clock, uptime_ms, event);
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -796,6 +883,16 @@ fn main() {
                     Err(e) => {
                         consecutive_failures += 1;
                         log::error!("[main] send failed ({}): {}", consecutive_failures, e);
+                        record_event(
+                            &mut log,
+                            &log_clock,
+                            uptime_ms,
+                            LogEvent::network(
+                                "telegram",
+                                &format!("dispatch send failed x{}: {}", consecutive_failures, e),
+                                false,
+                            ),
+                        );
                         if consecutive_failures >= Config::MAX_FAILURES {
                             log::error!("[main] max failures reached — rebooting");
                             esp_idf_hal::reset::restart();

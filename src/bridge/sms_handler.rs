@@ -155,6 +155,10 @@ fn ensure_pdu_mode(modem: &mut dyn ModemPort) {
 /// - unparseable PDU (no point retaining)
 ///
 /// Returns `false` if forwarding failed (keep for retry on next boot).
+///
+/// This is the SMS ingestion composition point; dependencies stay explicit so
+/// host tests can inject each side effect independently.
+#[allow(clippy::too_many_arguments)]
 pub fn process_pdu_hex(
     hex: &str,
     slot: u16,
@@ -163,6 +167,7 @@ pub fn process_pdu_hex(
     concat: &mut ConcatReassembler,
     messenger: &mut dyn MessageSink,
     store: &mut dyn Store,
+    log_timestamp: &str,
 ) -> bool {
     let pdu = match parse_sms_pdu(hex) {
         Ok(p) => p,
@@ -191,7 +196,7 @@ pub fn process_pdu_hex(
         }
     };
 
-    forward_sms(&sms, messenger, router, log, store).is_some()
+    forward_sms(&sms, messenger, router, log, store, log_timestamp).is_some()
 }
 
 /// Forward an SMS storage entry, whether it came from PDU mode or modem text mode.
@@ -202,9 +207,10 @@ pub fn process_stored_sms(
     concat: &mut ConcatReassembler,
     messenger: &mut dyn MessageSink,
     store: &mut dyn Store,
+    log_timestamp: &str,
 ) -> bool {
     if let Some(sms) = stored.decoded {
-        return forward_sms(&sms, messenger, router, log, store).is_some();
+        return forward_sms(&sms, messenger, router, log, store, log_timestamp).is_some();
     }
 
     process_pdu_hex(
@@ -215,6 +221,7 @@ pub fn process_stored_sms(
         concat,
         messenger,
         store,
+        log_timestamp,
     )
 }
 
