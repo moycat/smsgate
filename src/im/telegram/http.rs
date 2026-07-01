@@ -4,7 +4,7 @@ use super::{
     build_get_file_body,
     types::{ApiResult, TelegramFile},
 };
-use esp_idf_svc::tls::{EspTls, InternalSocket, KeepAliveConfig, X509};
+use esp_idf_svc::tls::{Config as TlsConfig, EspTls, InternalSocket, KeepAliveConfig, X509};
 use std::time::Duration;
 
 const HOST: &str = "api.telegram.org";
@@ -18,26 +18,32 @@ const STREAM_BUF_BYTES: usize = 4096;
 /// TLS-backed HTTPS client for api.telegram.org.
 pub struct TelegramHttpClient {
     tls: EspTls<InternalSocket>,
+    ca_bundle: Option<&'static [u8]>,
 }
 
 impl TelegramHttpClient {
     /// Create a new client with optional CA bundle for server verification.
     pub fn new(ca_bundle: Option<&'static [u8]>) -> anyhow::Result<Self> {
-        let conf = esp_idf_svc::tls::Config {
-            ca_cert: ca_bundle.map(|b| X509::pem_until_nul(b)),
-            keep_alive_cfg: Some(KeepAliveConfig {
-                enable: true,
-                idle: std::time::Duration::from_secs(60),
-                interval: std::time::Duration::from_secs(10),
-                count: 5,
-            }),
-            ..Default::default()
-        };
+        let conf = Self::tls_config(ca_bundle);
         log::debug!("[http] connecting TLS to {}:{}", HOST, PORT);
         let mut tls = EspTls::new()?;
         tls.connect(HOST, PORT, &conf)?;
         log::debug!("[http] TLS connected to {}:{}", HOST, PORT);
-        Ok(TelegramHttpClient { tls })
+        Ok(TelegramHttpClient { tls, ca_bundle })
+    }
+
+    fn tls_config(ca_bundle: Option<&'static [u8]>) -> TlsConfig<'static> {
+        TlsConfig {
+            ca_cert: ca_bundle.map(X509::pem_until_nul),
+            timeout_ms: READ_TIMEOUT.as_millis() as u32,
+            keep_alive_cfg: Some(KeepAliveConfig {
+                enable: true,
+                idle: Duration::from_secs(60),
+                interval: Duration::from_secs(10),
+                count: 5,
+            }),
+            ..Default::default()
+        }
     }
 
     /// POST JSON to a Telegram Bot API path; returns the response body.
@@ -278,15 +284,7 @@ impl TelegramHttpClient {
     }
 
     fn reconnect(&mut self) -> anyhow::Result<()> {
-        let conf = esp_idf_svc::tls::Config {
-            keep_alive_cfg: Some(KeepAliveConfig {
-                enable: true,
-                idle: std::time::Duration::from_secs(60),
-                interval: std::time::Duration::from_secs(10),
-                count: 5,
-            }),
-            ..Default::default()
-        };
+        let conf = Self::tls_config(self.ca_bundle);
         let mut tls = EspTls::new()?;
         log::debug!("[http] reconnecting TLS to {}:{}", HOST, PORT);
         tls.connect(HOST, PORT, &conf)?;

@@ -17,6 +17,7 @@ use crate::modem::ModemPort;
 use http::TelegramHttpClient;
 #[cfg(feature = "esp32")]
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use types::Update;
 #[cfg(feature = "esp32")]
 use types::{ApiResult, SendMessageResult};
@@ -25,6 +26,8 @@ const GET_UPDATES_LIMIT: u8 = 10;
 const MIN_POLL_TIMEOUT_SEC: u32 = 1;
 const MAX_POLL_TIMEOUT_SEC: u32 = 30;
 const POLL_ERROR_LOG_EVERY: u16 = 12;
+const TELEGRAM_SEND_RETRY_INTERVAL_SECS: u64 = 30;
+const TELEGRAM_RESTART_AFTER_SECS: u64 = 5 * 60;
 
 /// Build a bounded `getUpdates` request body for the embedded runtime.
 pub fn build_get_updates_body(since: i64, timeout_sec: u32) -> String {
@@ -41,6 +44,26 @@ pub fn should_log_poll_error(consecutive_errors: u16) -> bool {
 
 pub fn poll_error_log_detail(consecutive_errors: u16, error: &str) -> String {
     format!("poll error x{}: {}", consecutive_errors, error)
+}
+
+pub fn telegram_send_retry_interval() -> Duration {
+    Duration::from_secs(TELEGRAM_SEND_RETRY_INTERVAL_SECS)
+}
+
+pub fn telegram_restart_after() -> Duration {
+    Duration::from_secs(TELEGRAM_RESTART_AFTER_SECS)
+}
+
+pub fn send_retry_delay_after(attempt_elapsed: Duration) -> Duration {
+    telegram_send_retry_interval().saturating_sub(attempt_elapsed)
+}
+
+pub fn should_restart_after_stale_poll(elapsed: Duration) -> bool {
+    elapsed >= telegram_restart_after()
+}
+
+pub fn should_restart_after_send_retry(elapsed: Duration) -> bool {
+    elapsed >= telegram_restart_after()
 }
 
 pub fn build_send_message_body(

@@ -76,6 +76,17 @@ fn send_at_multiline_body() {
     assert_eq!(lines.len(), 2);
 }
 
+#[test]
+fn send_at_with_timeout_returns_quick_timeout() {
+    let uart = MockUart::new();
+    let mut p = port(uart);
+    let started = std::time::Instant::now();
+    let result = p.send_at_with_timeout("+QHTTPREAD=30", std::time::Duration::from_millis(50));
+
+    assert!(matches!(result, Err(smsgate::modem::ModemError::Timeout)));
+    assert!(started.elapsed() < std::time::Duration::from_millis(250));
+}
+
 // ── URC handling ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -158,6 +169,21 @@ fn send_at_connect_payload_error_before_connect() {
         .send_at_connect_payload("+QHTTPPOST=52,60,60", "body")
         .unwrap();
     assert!(!r.ok);
+}
+
+#[test]
+fn send_at_connect_payload_with_timeout_returns_quick_timeout() {
+    let uart = MockUart::new();
+    let mut p = port(uart);
+    let started = std::time::Instant::now();
+    let result = p.send_at_connect_payload_with_timeout(
+        "+QHTTPPOST=52,30,30",
+        "body",
+        std::time::Duration::from_millis(50),
+    );
+
+    assert!(matches!(result, Err(smsgate::modem::ModemError::Timeout)));
+    assert!(started.elapsed() < std::time::Duration::from_millis(250));
 }
 
 // ── buffer caps ───────────────────────────────────────────────────────────────

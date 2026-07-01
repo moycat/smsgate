@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 const UART_READ_TICKS: u32 = 10;
 
 const CMD_TIMEOUT: Duration = Duration::from_secs(5);
+const CONNECT_PAYLOAD_TIMEOUT: Duration = Duration::from_secs(90);
 const READLINE_TIMEOUT: Duration = Duration::from_millis(500);
 /// Maximum buffered URC lines. Prevents unbounded queue growth on UART noise flood.
 const MAX_URC_BUF: usize = 32;
@@ -46,12 +47,21 @@ impl<U: UartPort> AtPort<U> {
 
     /// Send "AT<cmd>\r" and collect lines until OK/ERROR/timeout.
     pub fn send_at(&mut self, cmd: &str) -> Result<AtResponse, ModemError> {
+        self.send_at_with_timeout(cmd, CMD_TIMEOUT)
+    }
+
+    /// Send "AT<cmd>\r" with a caller-provided timeout.
+    pub fn send_at_with_timeout(
+        &mut self,
+        cmd: &str,
+        timeout: Duration,
+    ) -> Result<AtResponse, ModemError> {
         self.drain_urcs();
 
         let command = format!("AT{}\r", cmd);
         self.uart.write_all(command.as_bytes())?;
 
-        let deadline = Instant::now() + CMD_TIMEOUT;
+        let deadline = Instant::now() + timeout;
         let mut body_lines: Vec<String> = Vec::new();
         if let Some(err) = self.collect_until_ok(deadline, &mut body_lines)? {
             return Ok(err);
@@ -99,10 +109,13 @@ impl<U: UartPort> AtPort<U> {
         body_lines: &mut Vec<String>,
     ) -> Result<Option<AtResponse>, ModemError> {
         loop {
-            if Instant::now() > deadline {
+            let Some(read_timeout) = deadline
+                .checked_duration_since(Instant::now())
+                .map(|remaining| remaining.min(READLINE_TIMEOUT))
+            else {
                 return Err(ModemError::Timeout);
-            }
-            if let Some(line) = self.read_line(READLINE_TIMEOUT) {
+            };
+            if let Some(line) = self.read_line(read_timeout) {
                 let line = line.trim().to_string();
                 if line.is_empty() {
                     continue;
@@ -172,18 +185,31 @@ impl<U: UartPort> AtPort<U> {
         cmd: &str,
         payload: &str,
     ) -> Result<AtResponse, ModemError> {
+        self.send_at_connect_payload_with_timeout(cmd, payload, CONNECT_PAYLOAD_TIMEOUT)
+    }
+
+    /// Send a CONNECT-style command with a caller-provided timeout.
+    pub fn send_at_connect_payload_with_timeout(
+        &mut self,
+        cmd: &str,
+        payload: &str,
+        timeout: Duration,
+    ) -> Result<AtResponse, ModemError> {
         self.drain_urcs();
         let command = format!("AT{}\r", cmd);
         self.uart.write_all(command.as_bytes())?;
 
-        let deadline = Instant::now() + Duration::from_secs(90);
+        let deadline = Instant::now() + timeout;
         let mut body_lines: Vec<String> = Vec::new();
 
         loop {
-            if Instant::now() > deadline {
+            let Some(read_timeout) = deadline
+                .checked_duration_since(Instant::now())
+                .map(|remaining| remaining.min(READLINE_TIMEOUT))
+            else {
                 return Err(ModemError::Timeout);
-            }
-            if let Some(line) = self.read_line(READLINE_TIMEOUT) {
+            };
+            if let Some(line) = self.read_line(read_timeout) {
                 let line = line.trim().to_string();
                 if line.is_empty() {
                     continue;

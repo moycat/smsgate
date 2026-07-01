@@ -7,6 +7,9 @@ use crate::modem::{AtTransport, ModemError, ModemPort};
 use std::time::Duration;
 
 const TELEGRAM_HOST_PATH: &str = "https://api.telegram.org";
+const QHTTP_TIMEOUT_SECS: u16 = 30;
+const QHTTP_LOCAL_TIMEOUT: Duration = Duration::from_secs(30);
+const QHTTP_SETTLE_DELAY: Duration = Duration::from_millis(300);
 
 /// Attach PDP context 1 (IPv4) using Quectel `AT+QICSGP` / `AT+QIACT`.
 /// Takes `dyn ModemPort` so this can be called with any modem handle,
@@ -52,9 +55,11 @@ pub fn post_json(modem: &mut A76xxModem, path: &str, json: &str) -> Result<Strin
     match post_json_once(modem, path, json) {
         Ok(body) => Ok(body),
         Err(first) => {
-            log::warn!("[qhttp] POST failed: {}; repairing PDP and retrying", first);
-            repair_pdp(modem)?;
-            post_json_once(modem, path, json)
+            log::warn!("[qhttp] POST failed: {}; repairing PDP", first);
+            repair_pdp(modem).map_err(|repair| {
+                ModemError::AtError(format!("{}; PDP repair failed: {}", first, repair))
+            })?;
+            Err(first)
         }
     }
 }
@@ -70,24 +75,48 @@ fn post_json_once(modem: &mut A76xxModem, path: &str, json: &str) -> Result<Stri
     let _ = modem.send_at("+QSSLCFG=\"seclevel\",1,2");
 
     let url_len = url.len();
-    let cmd = format!("+QHTTPURL={},80", url_len);
-    modem.port_mut().send_at_connect_payload(&cmd, &url)?;
+    let cmd = qhttp_url_command(url_len);
+    modem
+        .port_mut()
+        .send_at_connect_payload_with_timeout(&cmd, &url, QHTTP_LOCAL_TIMEOUT)?;
 
     let body_len = json.len();
-    let post_cmd = format!("+QHTTPPOST={},80,80", body_len);
-    modem.port_mut().send_at_connect_payload(&post_cmd, json)?;
+    let post_cmd = qhttp_post_command(body_len);
+    modem
+        .port_mut()
+        .send_at_connect_payload_with_timeout(&post_cmd, json, QHTTP_LOCAL_TIMEOUT)?;
 
-    std::thread::sleep(Duration::from_millis(300));
+    std::thread::sleep(QHTTP_SETTLE_DELAY);
 
-    let r = modem.send_at("+QHTTPREAD=80")?;
+    let read_cmd = qhttp_read_command();
+    let r = modem
+        .port_mut()
+        .send_at_with_timeout(&read_cmd, QHTTP_LOCAL_TIMEOUT)?;
     let text = extract_json_object(&r.body)?;
     if !text.is_empty() {
         return Ok(text);
     }
 
     // Some firmware returns payload only after a second read
-    let r2 = modem.send_at("+QHTTPREAD=80")?;
+    let r2 = modem
+        .port_mut()
+        .send_at_with_timeout(&read_cmd, QHTTP_LOCAL_TIMEOUT)?;
     extract_json_object(&r2.body)
+}
+
+fn qhttp_url_command(url_len: usize) -> String {
+    format!("+QHTTPURL={},{}", url_len, QHTTP_TIMEOUT_SECS)
+}
+
+fn qhttp_post_command(body_len: usize) -> String {
+    format!(
+        "+QHTTPPOST={},{},{}",
+        body_len, QHTTP_TIMEOUT_SECS, QHTTP_TIMEOUT_SECS
+    )
+}
+
+fn qhttp_read_command() -> String {
+    format!("+QHTTPREAD={}", QHTTP_TIMEOUT_SECS)
 }
 
 fn repair_pdp(modem: &mut A76xxModem) -> Result<(), ModemError> {

@@ -18,8 +18,10 @@ use smsgate::{
     creds::RuntimeCreds,
     im::{
         telegram::{
-            http::TelegramHttpClient, poll_error_log_detail, should_log_poll_error,
-            worker::TelegramSendWorker, TelegramMessenger,
+            http::TelegramHttpClient,
+            poll_error_log_detail, should_log_poll_error, should_restart_after_stale_poll,
+            worker::{TelegramSendEvent, TelegramSendWorker},
+            TelegramMessenger,
         },
         MessageSink, MessageSource,
     },
@@ -181,11 +183,13 @@ fn main() {
     // ---- IM (Telegram) ----
     let transport_cellular =
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(using_cellular));
+    let (tg_send_event_tx, tg_send_event_rx) = std::sync::mpsc::channel::<TelegramSendEvent>();
     let mut messenger = TelegramSendWorker::spawn(
         modem.clone(),
         creds.bot_token.clone(),
         creds.chat_id,
         transport_cellular.clone(),
+        tg_send_event_tx,
     );
 
     // ---- Subsystems ----
@@ -195,6 +199,18 @@ fn main() {
     let mut concat = ConcatReassembler::new();
     let mut call_handler = CallHandler::new();
     let mut modem_status = smsgate::modem::ModemStatus::default();
+    macro_rules! restart_if_tg_send_requested {
+        () => {
+            if drain_telegram_send_events_since_boot(
+                &tg_send_event_rx,
+                &mut log,
+                &log_clock,
+                boot_ms,
+            ) {
+                esp_idf_hal::reset::restart();
+            }
+        };
+    }
 
     // ---- Command registry ----
     // Two-pass: first pass generates help text, second bakes it into HelpCommand.
@@ -215,10 +231,12 @@ fn main() {
             ),
         );
     }
+    restart_if_tg_send_requested!();
 
     // Alert if NVS init failed (now that we have a messenger to send the notification)
     if nvs_failed {
         let _ = messenger.send_message(smsgate::i18n::nvs_fail());
+        restart_if_tg_send_requested!();
         record_event(
             &mut log,
             &log_clock,
@@ -259,6 +277,7 @@ fn main() {
                 &mut *store,
                 &log_timestamp,
             );
+            restart_if_tg_send_requested!();
             if delete {
                 let mut md = lock!(modem);
                 delete_sms_slot(index, &mut *md);
@@ -280,6 +299,7 @@ fn main() {
         LogEvent::system("ready", "smsgate ready"),
     );
     let _ = messenger.send_message(smsgate::i18n::started());
+    restart_if_tg_send_requested!();
     match smsgate::ota::confirm_running() {
         Ok(()) => log::info!("[main] OTA running slot marked valid"),
         Err(e) => log::warn!("[main] OTA confirm skipped: {}", e),
@@ -440,7 +460,6 @@ fn main() {
     let mut pause_until: Option<std::time::Instant> = None;
     let mut wifi_info = fmt_network(using_cellular, wifi_ok, None, &creds.wifi_ssid);
     let mut last_tg_activity = std::time::Instant::now();
-    let mut tg_stale_alerted = false;
     let mut low_signal_alerted = false;
     let mut last_operator = String::new();
     // +CMT direct delivery is two lines: header then raw PDU hex.
@@ -458,6 +477,10 @@ fn main() {
             esp_idf_sys::esp_task_wdt_reset();
         }
 
+        if drain_telegram_send_events(&tg_send_event_rx, &mut log, &log_clock, uptime_ms) {
+            esp_idf_hal::reset::restart();
+        }
+
         // Auto-resume after timed /pause
         if let Some(until) = pause_until {
             if std::time::Instant::now() >= until {
@@ -468,6 +491,7 @@ fn main() {
                     true,
                 );
                 let _ = messenger.send_message(smsgate::i18n::resume_ok());
+                restart_if_tg_send_requested!();
                 log::info!("[main] pause expired — forwarding re-enabled");
                 record_event(
                     &mut log,
@@ -505,6 +529,7 @@ fn main() {
 
             // Low-heap alert
             check_low_heap(&mut messenger);
+            restart_if_tg_send_requested!();
 
             // CSQ low-signal alert (threshold: CSQ ≤ 5, roughly < −103 dBm)
             const CSQ_WEAK: u8 = 5;
@@ -512,6 +537,7 @@ fn main() {
                 if modem_status.csq <= CSQ_WEAK && !low_signal_alerted {
                     low_signal_alerted = true;
                     let _ = messenger.send_message(&smsgate::i18n::low_signal(modem_status.csq));
+                    restart_if_tg_send_requested!();
                     record_event(
                         &mut log,
                         &log_clock,
@@ -526,6 +552,7 @@ fn main() {
                     low_signal_alerted = false;
                     let _ =
                         messenger.send_message(&smsgate::i18n::signal_restored(modem_status.csq));
+                    restart_if_tg_send_requested!();
                     record_event(
                         &mut log,
                         &log_clock,
@@ -548,6 +575,7 @@ fn main() {
                     &last_operator,
                     &modem_status.operator,
                 ));
+                restart_if_tg_send_requested!();
                 record_event(
                     &mut log,
                     &log_clock,
@@ -615,41 +643,21 @@ fn main() {
                 }
             }
 
-            const POLL_STALE_SECS: u64 = 300;
-            let stale_secs = last_tg_activity.elapsed().as_secs();
-            if stale_secs >= POLL_STALE_SECS && !tg_stale_alerted {
-                tg_stale_alerted = true;
-                let mins = (stale_secs / 60) as u32;
-                log::warn!("[main] tg-poll stale for {} min", mins);
+            let stale_elapsed = last_tg_activity.elapsed();
+            if should_restart_after_stale_poll(stale_elapsed) {
+                let mins = (stale_elapsed.as_secs() / 60) as u32;
+                log::error!("[main] tg-poll stale for {} min — rebooting", mins);
                 record_event(
                     &mut log,
                     &log_clock,
                     uptime_ms,
-                    LogEvent::network("telegram", &format!("poll stale for {} min", mins), false),
+                    LogEvent::network(
+                        "telegram",
+                        &format!("poll stale for {} min; rebooting", mins),
+                        false,
+                    ),
                 );
-                if !using_cellular {
-                    let switched = try_enable_cellular_fallback(
-                        "Telegram polling stale",
-                        &modem,
-                        &creds,
-                        &mut using_cellular,
-                        &transport_cellular,
-                    );
-                    if switched {
-                        wifi_info = fmt_network(using_cellular, wifi_ok, None, &creds.wifi_ssid);
-                        record_event(
-                            &mut log,
-                            &log_clock,
-                            uptime_ms,
-                            LogEvent::network(
-                                "cellular",
-                                "fallback enabled after Telegram poll stale",
-                                true,
-                            ),
-                        );
-                    }
-                }
-                let _ = messenger.send_message(&smsgate::i18n::poll_thread_stale(mins));
+                esp_idf_hal::reset::restart();
             }
         }
 
@@ -706,6 +714,7 @@ fn main() {
                     ),
                 );
             }
+            restart_if_tg_send_requested!();
             record_event(&mut log, &log_clock, uptime_ms, notification.log_event());
         }
 
@@ -720,6 +729,7 @@ fn main() {
                 &mut *store,
                 &log_timestamp,
             );
+            restart_if_tg_send_requested!();
         }
 
         for sms in pending_sms {
@@ -734,6 +744,7 @@ fn main() {
                 &mut *store,
                 &log_timestamp,
             );
+            restart_if_tg_send_requested!();
             if delete {
                 let mut md = lock!(modem);
                 delete_sms_slot(index, &mut *md);
@@ -775,7 +786,6 @@ fn main() {
             if channel_active {
                 log::debug!("[main] drained Telegram batch: {} message(s)", batch.len());
                 last_tg_activity = std::time::Instant::now();
-                tg_stale_alerted = false;
             }
             batch
         };
@@ -826,6 +836,7 @@ fn main() {
                             "ignored_stale",
                             &smsgate::i18n::ota_ignored_stale(name),
                         );
+                        restart_if_tg_send_requested!();
                         continue;
                     }
                     handle_ota_document(
@@ -837,7 +848,9 @@ fn main() {
                         &mut log,
                         &log_clock,
                         boot_ms,
+                        &tg_send_event_rx,
                     );
+                    restart_if_tg_send_requested!();
                 }
             }
             let dispatch_messages: Vec<smsgate::im::InboundMessage> = tg_messages
@@ -861,6 +874,7 @@ fn main() {
                     &wifi_info,
                 ) {
                     Ok(outcome) => {
+                        restart_if_tg_send_requested!();
                         consecutive_failures = 0;
                         for event in outcome.events {
                             record_event(&mut log, &log_clock, uptime_ms, event);
@@ -877,10 +891,12 @@ fn main() {
                         if outcome.restart_requested {
                             log::info!("[main] restart requested via /restart command");
                             let _ = messenger.send_message(smsgate::i18n::rebooting());
+                            restart_if_tg_send_requested!();
                             esp_idf_hal::reset::restart();
                         }
                     }
                     Err(e) => {
+                        restart_if_tg_send_requested!();
                         consecutive_failures += 1;
                         log::error!("[main] send failed ({}): {}", consecutive_failures, e);
                         record_event(
@@ -910,6 +926,7 @@ fn main() {
         match &drain {
             DrainOutcome::Sent { phone } => {
                 let _ = messenger.send_message(&smsgate::i18n::sms_sent_ok(phone));
+                restart_if_tg_send_requested!();
                 record_event(
                     &mut log,
                     &log_clock,
@@ -919,6 +936,7 @@ fn main() {
             }
             DrainOutcome::Dropped { phone } => {
                 let _ = messenger.send_message(&smsgate::i18n::sms_failed(phone));
+                restart_if_tg_send_requested!();
                 record_event(
                     &mut log,
                     &log_clock,
@@ -1000,6 +1018,47 @@ fn build_log_ring() -> LogRing {
 fn record_event(log: &mut LogRing, clock: &LogClock, uptime_ms: u32, event: LogEvent) {
     let timestamp = clock.timestamp(uptime_ms);
     log.push(event.at(&timestamp));
+}
+
+#[cfg(feature = "esp32")]
+fn drain_telegram_send_events_since_boot(
+    rx: &std::sync::mpsc::Receiver<TelegramSendEvent>,
+    log: &mut LogRing,
+    clock: &LogClock,
+    boot_ms: u32,
+) -> bool {
+    drain_telegram_send_events(rx, log, clock, elapsed_since(boot_ms, now_ms()))
+}
+
+#[cfg(feature = "esp32")]
+fn drain_telegram_send_events(
+    rx: &std::sync::mpsc::Receiver<TelegramSendEvent>,
+    log: &mut LogRing,
+    clock: &LogClock,
+    uptime_ms: u32,
+) -> bool {
+    let mut restart = false;
+    loop {
+        match rx.try_recv() {
+            Ok(TelegramSendEvent::Log(event)) => record_event(log, clock, uptime_ms, event),
+            Ok(TelegramSendEvent::Restart(event)) => {
+                record_event(log, clock, uptime_ms, event);
+                restart = true;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => break,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                record_event(
+                    log,
+                    clock,
+                    uptime_ms,
+                    LogEvent::network("telegram", "send worker event channel closed", false),
+                );
+                restart = true;
+                break;
+            }
+        }
+    }
+    restart
 }
 
 #[cfg(feature = "esp32")]
@@ -1090,7 +1149,16 @@ fn handle_ota_document(
     log: &mut LogRing,
     log_clock: &LogClock,
     boot_ms: u32,
+    tg_send_event_rx: &std::sync::mpsc::Receiver<TelegramSendEvent>,
 ) {
+    macro_rules! restart_if_ota_send_requested {
+        () => {
+            if drain_telegram_send_events_since_boot(tg_send_event_rx, log, log_clock, boot_ms) {
+                esp_idf_hal::reset::restart();
+            }
+        };
+    }
+
     log::info!(
         "[ota] document handler entered: caption_len={} file_name={} mime={} size={:?} using_cellular={}",
         caption.len(),
@@ -1112,6 +1180,7 @@ fn handle_ota_document(
             "wifi_required",
             smsgate::i18n::ota_wifi_required(),
         );
+        restart_if_ota_send_requested!();
         record_event(
             log,
             log_clock,
@@ -1127,6 +1196,7 @@ fn handle_ota_document(
         "starting",
         &smsgate::i18n::ota_starting(name, document.file_size),
     );
+    restart_if_ota_send_requested!();
     record_event(
         log,
         log_clock,
@@ -1144,6 +1214,7 @@ fn handle_ota_document(
                 "http_init_failed",
                 &smsgate::i18n::ota_failed(&e.to_string()),
             );
+            restart_if_ota_send_requested!();
             record_event(
                 log,
                 log_clock,
@@ -1174,6 +1245,7 @@ fn handle_ota_document(
                         message_id,
                         &smsgate::i18n::ota_progress(written, total),
                     );
+                    restart_if_ota_send_requested!();
                 }
             }
         });
@@ -1191,6 +1263,7 @@ fn handle_ota_document(
             } else {
                 let _ = send_ota_message(messenger, "complete", smsgate::i18n::ota_complete());
             }
+            restart_if_ota_send_requested!();
             record_event(
                 log,
                 log_clock,
@@ -1208,6 +1281,7 @@ fn handle_ota_document(
             } else {
                 let _ = send_ota_message(messenger, "failed", &failed);
             }
+            restart_if_ota_send_requested!();
             record_event(
                 log,
                 log_clock,

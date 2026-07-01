@@ -106,6 +106,8 @@ pub enum MessengerError {
     Json(String),
     #[error("API error: {0}")]
     Api(String),
+    #[error("timeout: {0}")]
+    Timeout(String),
     #[error("not connected")]
     Disconnected,
 }

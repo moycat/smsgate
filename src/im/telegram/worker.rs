@@ -3,16 +3,129 @@
 //! The polling thread owns its own Telegram client for `getUpdates`; this worker
 //! owns the outbound client for notifications and command replies.
 
-use super::{http::TelegramHttpClient, TelegramMessenger};
+use super::{
+    http::TelegramHttpClient, send_retry_delay_after, should_restart_after_send_retry,
+    telegram_restart_after, telegram_send_retry_interval, TelegramMessenger,
+};
 use crate::im::{InlineKeyboard, MessageFormat, MessageId, MessageSink, MessengerError};
+use crate::log_ring::LogEvent;
 use crate::modem::ModemPort;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    mpsc::{sync_channel, SyncSender},
+    mpsc::{sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender},
     Arc, Mutex,
 };
+use std::time::{Duration, Instant};
 
 const OUTBOUND_QUEUE_DEPTH: usize = 8;
+
+#[derive(Debug, Clone)]
+pub enum TelegramSendEvent {
+    Log(LogEvent),
+    Restart(LogEvent),
+}
+
+fn emit_event(tx: &Sender<TelegramSendEvent>, event: TelegramSendEvent) {
+    let _ = tx.send(event);
+}
+
+fn emit_log(tx: &Sender<TelegramSendEvent>, detail: &str) {
+    log::error!("[tg-send] {}", detail);
+    emit_event(
+        tx,
+        TelegramSendEvent::Log(LogEvent::network("telegram", detail, false)),
+    );
+}
+
+fn emit_restart(tx: &Sender<TelegramSendEvent>, detail: &str) {
+    log::error!("[tg-send] {}", detail);
+    emit_event(
+        tx,
+        TelegramSendEvent::Restart(LogEvent::network("telegram", detail, false)),
+    );
+}
+
+fn reset_current_task_watchdog() {
+    unsafe {
+        let _ = esp_idf_sys::esp_task_wdt_reset();
+    }
+}
+
+fn sleep_with_watchdog(duration: Duration) {
+    let deadline = Instant::now() + duration;
+    loop {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            break;
+        };
+        std::thread::sleep(remaining.min(Duration::from_secs(1)));
+        reset_current_task_watchdog();
+    }
+}
+
+fn run_with_retries<T, F>(
+    operation: &'static str,
+    event_tx: &Sender<TelegramSendEvent>,
+    mut operation_fn: F,
+) -> Result<T, MessengerError>
+where
+    F: FnMut() -> Result<T, MessengerError>,
+{
+    let started = Instant::now();
+    let mut attempt: u16 = 1;
+
+    loop {
+        reset_current_task_watchdog();
+        let attempt_started = Instant::now();
+        match operation_fn() {
+            Ok(value) => return Ok(value),
+            Err(e) => {
+                let attempt_elapsed = attempt_started.elapsed();
+                let total_elapsed = started.elapsed();
+                let error = e.to_string();
+                emit_log(
+                    event_tx,
+                    &format!(
+                        "{} failed attempt {} after {}s: {}",
+                        operation,
+                        attempt,
+                        attempt_elapsed.as_secs(),
+                        error
+                    ),
+                );
+
+                if should_restart_after_send_retry(total_elapsed) {
+                    let detail = format!(
+                        "{} retrying for {}s; rebooting: {}",
+                        operation,
+                        total_elapsed.as_secs(),
+                        error
+                    );
+                    emit_restart(event_tx, &detail);
+                    return Err(MessengerError::Timeout(detail));
+                }
+
+                let retry_delay = send_retry_delay_after(attempt_elapsed);
+                if !retry_delay.is_zero() {
+                    let remaining_before_reboot =
+                        telegram_restart_after().saturating_sub(total_elapsed);
+                    let delay = retry_delay.min(remaining_before_reboot);
+                    sleep_with_watchdog(delay);
+                    if should_restart_after_send_retry(started.elapsed()) {
+                        let detail = format!(
+                            "{} retrying for {}s; rebooting before next retry",
+                            operation,
+                            started.elapsed().as_secs()
+                        );
+                        emit_restart(event_tx, &detail);
+                        return Err(MessengerError::Timeout(detail));
+                    }
+                }
+
+                attempt = attempt.saturating_add(1);
+            }
+        }
+    }
+}
 
 enum Request {
     Send {
@@ -42,6 +155,7 @@ enum Request {
 /// Synchronous `MessageSink` facade backed by a dedicated Telegram worker task.
 pub struct TelegramSendWorker {
     tx: SyncSender<Request>,
+    event_tx: Sender<TelegramSendEvent>,
 }
 
 impl TelegramSendWorker {
@@ -50,8 +164,10 @@ impl TelegramSendWorker {
         token: String,
         chat_id: i64,
         transport_cellular: Arc<AtomicBool>,
+        event_tx: Sender<TelegramSendEvent>,
     ) -> Self {
         let (tx, rx) = sync_channel::<Request>(OUTBOUND_QUEUE_DEPTH);
+        let worker_event_tx = event_tx.clone();
         std::thread::Builder::new()
             .name("tg-send".into())
             .stack_size(16 * 1024)
@@ -81,15 +197,28 @@ impl TelegramSendWorker {
                             format,
                             reply,
                         } => {
-                            let result = match messenger.as_mut() {
-                                Some(m) => match keyboard.as_ref() {
-                                    Some(keyboard) => m.send_message_with_keyboard_and_format(
-                                        &text, keyboard, format,
-                                    ),
-                                    None => m.send_message_with_format(&text, format),
-                                },
-                                None => Err(MessengerError::Disconnected),
-                            };
+                            let result = run_with_retries("sendMessage", &worker_event_tx, || {
+                                ensure_worker_messenger(
+                                    &mut messenger,
+                                    current_cellular,
+                                    &modem,
+                                    &token,
+                                    chat_id,
+                                );
+                                let result = match messenger.as_mut() {
+                                    Some(m) => match keyboard.as_ref() {
+                                        Some(keyboard) => m.send_message_with_keyboard_and_format(
+                                            &text, keyboard, format,
+                                        ),
+                                        None => m.send_message_with_format(&text, format),
+                                    },
+                                    None => Err(MessengerError::Disconnected),
+                                };
+                                if result.is_err() {
+                                    messenger = None;
+                                }
+                                result
+                            });
                             let _ = reply.send(result);
                         }
                         Request::Edit {
@@ -99,15 +228,32 @@ impl TelegramSendWorker {
                             format,
                             reply,
                         } => {
-                            let result = match messenger.as_mut() {
-                                Some(m) => match keyboard.as_ref() {
-                                    Some(keyboard) => m.edit_message_with_keyboard_and_format(
-                                        message_id, &text, keyboard, format,
-                                    ),
-                                    None => m.edit_message_with_format(message_id, &text, format),
-                                },
-                                None => Err(MessengerError::Disconnected),
-                            };
+                            let result =
+                                run_with_retries("editMessageText", &worker_event_tx, || {
+                                    ensure_worker_messenger(
+                                        &mut messenger,
+                                        current_cellular,
+                                        &modem,
+                                        &token,
+                                        chat_id,
+                                    );
+                                    let result = match messenger.as_mut() {
+                                        Some(m) => match keyboard.as_ref() {
+                                            Some(keyboard) => m
+                                                .edit_message_with_keyboard_and_format(
+                                                    message_id, &text, keyboard, format,
+                                                ),
+                                            None => m.edit_message_with_format(
+                                                message_id, &text, format,
+                                            ),
+                                        },
+                                        None => Err(MessengerError::Disconnected),
+                                    };
+                                    if result.is_err() {
+                                        messenger = None;
+                                    }
+                                    result
+                                });
                             let _ = reply.send(result);
                         }
                         Request::AnswerCallback {
@@ -115,25 +261,54 @@ impl TelegramSendWorker {
                             text,
                             reply,
                         } => {
-                            let result = match messenger.as_mut() {
-                                Some(m) => {
-                                    m.answer_callback_query(&callback_query_id, text.as_deref())
-                                }
-                                None => Err(MessengerError::Disconnected),
-                            };
+                            let result =
+                                run_with_retries("answerCallbackQuery", &worker_event_tx, || {
+                                    ensure_worker_messenger(
+                                        &mut messenger,
+                                        current_cellular,
+                                        &modem,
+                                        &token,
+                                        chat_id,
+                                    );
+                                    let result = match messenger.as_mut() {
+                                        Some(m) => m.answer_callback_query(
+                                            &callback_query_id,
+                                            text.as_deref(),
+                                        ),
+                                        None => Err(MessengerError::Disconnected),
+                                    };
+                                    if result.is_err() {
+                                        messenger = None;
+                                    }
+                                    result
+                                });
                             let _ = reply.send(result);
                         }
                         Request::RegisterCommands { commands, reply } => {
-                            let result = match messenger.as_mut() {
-                                Some(m) => {
-                                    let refs: Vec<(&str, &str)> = commands
-                                        .iter()
-                                        .map(|(name, desc)| (name.as_str(), desc.as_str()))
-                                        .collect();
-                                    m.register_commands(&refs)
-                                }
-                                None => Err(MessengerError::Disconnected),
-                            };
+                            let result =
+                                run_with_retries("setMyCommands", &worker_event_tx, || {
+                                    ensure_worker_messenger(
+                                        &mut messenger,
+                                        current_cellular,
+                                        &modem,
+                                        &token,
+                                        chat_id,
+                                    );
+                                    let result = match messenger.as_mut() {
+                                        Some(m) => {
+                                            let refs: Vec<(&str, &str)> = commands
+                                                .iter()
+                                                .map(|(name, desc)| (name.as_str(), desc.as_str()))
+                                                .collect();
+                                            m.register_commands(&refs)
+                                        }
+                                        None => Err(MessengerError::Disconnected),
+                                    };
+                                    if result.is_err() {
+                                        messenger = None;
+                                    }
+                                    result
+                                });
                             let _ = reply.send(result);
                         }
                     }
@@ -141,7 +316,7 @@ impl TelegramSendWorker {
             })
             .expect("failed to spawn tg-send thread");
 
-        TelegramSendWorker { tx }
+        TelegramSendWorker { tx, event_tx }
     }
 
     pub fn register_commands(&mut self, commands: &[(&str, &str)]) -> Result<(), MessengerError> {
@@ -153,7 +328,45 @@ impl TelegramSendWorker {
         self.tx
             .send(Request::RegisterCommands { commands, reply })
             .map_err(|_| MessengerError::Disconnected)?;
-        rx.recv().map_err(|_| MessengerError::Disconnected)?
+        self.wait_for_reply("setMyCommands", rx)
+    }
+
+    fn wait_for_reply<T>(
+        &self,
+        operation: &'static str,
+        rx: Receiver<Result<T, MessengerError>>,
+    ) -> Result<T, MessengerError> {
+        let started = Instant::now();
+        let mut timeouts: u16 = 0;
+        loop {
+            match rx.recv_timeout(telegram_send_retry_interval()) {
+                Ok(result) => return result,
+                Err(RecvTimeoutError::Timeout) => {
+                    reset_current_task_watchdog();
+                    timeouts = timeouts.saturating_add(1);
+                    let elapsed = started.elapsed();
+                    emit_log(
+                        &self.event_tx,
+                        &format!(
+                            "{} request timed out waiting for tg-send worker x{} after {}s",
+                            operation,
+                            timeouts,
+                            elapsed.as_secs()
+                        ),
+                    );
+                    if should_restart_after_send_retry(elapsed) {
+                        let detail = format!(
+                            "{} request stuck for {}s; rebooting",
+                            operation,
+                            elapsed.as_secs()
+                        );
+                        emit_restart(&self.event_tx, &detail);
+                        return Err(MessengerError::Timeout(detail));
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => return Err(MessengerError::Disconnected),
+            }
+        }
     }
 }
 
@@ -168,7 +381,7 @@ impl MessageSink for TelegramSendWorker {
                 reply,
             })
             .map_err(|_| MessengerError::Disconnected)?;
-        rx.recv().map_err(|_| MessengerError::Disconnected)?
+        self.wait_for_reply("sendMessage", rx)
     }
 
     fn send_message_with_keyboard(
@@ -185,7 +398,7 @@ impl MessageSink for TelegramSendWorker {
                 reply,
             })
             .map_err(|_| MessengerError::Disconnected)?;
-        rx.recv().map_err(|_| MessengerError::Disconnected)?
+        self.wait_for_reply("sendMessage", rx)
     }
 
     fn send_message_with_format(
@@ -202,7 +415,7 @@ impl MessageSink for TelegramSendWorker {
                 reply,
             })
             .map_err(|_| MessengerError::Disconnected)?;
-        rx.recv().map_err(|_| MessengerError::Disconnected)?
+        self.wait_for_reply("sendMessage", rx)
     }
 
     fn send_message_with_keyboard_and_format(
@@ -220,7 +433,7 @@ impl MessageSink for TelegramSendWorker {
                 reply,
             })
             .map_err(|_| MessengerError::Disconnected)?;
-        rx.recv().map_err(|_| MessengerError::Disconnected)?
+        self.wait_for_reply("sendMessage", rx)
     }
 
     fn edit_message(&mut self, message_id: MessageId, text: &str) -> Result<(), MessengerError> {
@@ -234,7 +447,7 @@ impl MessageSink for TelegramSendWorker {
                 reply,
             })
             .map_err(|_| MessengerError::Disconnected)?;
-        rx.recv().map_err(|_| MessengerError::Disconnected)?
+        self.wait_for_reply("editMessageText", rx)
     }
 
     fn edit_message_with_keyboard(
@@ -253,7 +466,7 @@ impl MessageSink for TelegramSendWorker {
                 reply,
             })
             .map_err(|_| MessengerError::Disconnected)?;
-        rx.recv().map_err(|_| MessengerError::Disconnected)?
+        self.wait_for_reply("editMessageText", rx)
     }
 
     fn edit_message_with_format(
@@ -272,7 +485,7 @@ impl MessageSink for TelegramSendWorker {
                 reply,
             })
             .map_err(|_| MessengerError::Disconnected)?;
-        rx.recv().map_err(|_| MessengerError::Disconnected)?
+        self.wait_for_reply("editMessageText", rx)
     }
 
     fn edit_message_with_keyboard_and_format(
@@ -292,7 +505,7 @@ impl MessageSink for TelegramSendWorker {
                 reply,
             })
             .map_err(|_| MessengerError::Disconnected)?;
-        rx.recv().map_err(|_| MessengerError::Disconnected)?
+        self.wait_for_reply("editMessageText", rx)
     }
 
     fn answer_callback_query(
@@ -308,7 +521,20 @@ impl MessageSink for TelegramSendWorker {
                 reply,
             })
             .map_err(|_| MessengerError::Disconnected)?;
-        rx.recv().map_err(|_| MessengerError::Disconnected)?
+        self.wait_for_reply("answerCallbackQuery", rx)
+    }
+}
+
+fn ensure_worker_messenger(
+    messenger: &mut Option<TelegramMessenger>,
+    use_cellular: bool,
+    modem: &Arc<Mutex<dyn ModemPort + Send>>,
+    token: &str,
+    chat_id: i64,
+) {
+    if messenger.is_none() {
+        *messenger =
+            build_worker_messenger(use_cellular, modem.clone(), token.to_string(), chat_id).ok();
     }
 }
 
