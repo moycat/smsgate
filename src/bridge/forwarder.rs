@@ -1,7 +1,7 @@
 //! SMS → IM forwarding core logic.
 
 use crate::bridge::reply_router::ReplyRouter;
-use crate::im::{MessageId, MessageSink};
+use crate::im::{MessageFormat, MessageId, MessageSink};
 use crate::log_ring::{LogEntry, LogRing};
 use crate::persist::{keys, load_bool, Store};
 use crate::sms::{codec::human_readable_phone, SmsMessage};
@@ -47,7 +47,7 @@ pub fn forward_sms(
         &sms.body,
     );
 
-    match messenger.send_message(&text) {
+    match messenger.send_message_with_format(&text, MessageFormat::Html) {
         Ok(msg_id) => {
             router.put(msg_id, &sms.sender, store);
             log.push(log_entry(true));

@@ -2,6 +2,7 @@
 
 use smsgate::bridge::forwarder::*;
 use smsgate::bridge::reply_router::ReplyRouter;
+use smsgate::im::MessageFormat;
 use smsgate::log_ring::LogRing;
 use smsgate::persist::{keys, mem::MemStore, save_bool};
 use smsgate::sms::SmsMessage;
@@ -33,6 +34,35 @@ fn forward_sms_sends_to_im() {
         "should include formatted phone"
     );
     assert!(messenger.contains_sent("Hello test"));
+}
+
+#[test]
+fn forward_sms_sends_sender_as_html_code() {
+    let mut store = MemStore::new();
+    let mut messenger = RecordingMessenger::new();
+    let mut router = ReplyRouter::new();
+    let mut log = LogRing::new();
+
+    let sms = make_sms("+8613800138000", "Hello test");
+    forward_sms(&sms, &mut messenger, &mut router, &mut log, &mut store);
+
+    let sent = messenger.sent.last().expect("SMS should be forwarded");
+    assert_eq!(sent.format, MessageFormat::Html);
+    assert!(sent.text.contains("<code>+86 138-0013-8000</code>"));
+}
+
+#[test]
+fn forward_sms_escapes_sms_body_for_html() {
+    let mut store = MemStore::new();
+    let mut messenger = RecordingMessenger::new();
+    let mut router = ReplyRouter::new();
+    let mut log = LogRing::new();
+
+    let sms = make_sms("ACME", "2 < 3 & 5 > 4");
+    forward_sms(&sms, &mut messenger, &mut router, &mut log, &mut store);
+
+    let sent = messenger.last_sent().expect("SMS should be forwarded");
+    assert!(sent.contains("2 &lt; 3 &amp; 5 &gt; 4"));
 }
 
 #[test]

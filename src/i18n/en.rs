@@ -76,7 +76,12 @@ fn format_bytes(bytes: u64) -> String {
 // ── Forwarding ────────────────────────────────────────────────────────────────
 
 pub fn sms_received(sender: &str, ts: &str, body: &str) -> String {
-    format!("📱 SMS from {}\n🕐 {}\n\n{}", sender, ts, body)
+    format!(
+        "📱 SMS from <code>{}</code>\n🕐 {}\n\n{}",
+        super::html_escape(sender),
+        super::html_escape(ts),
+        super::html_escape(body)
+    )
 }
 pub fn incoming_call(display: &str) -> String {
     format!("📞 Incoming call from {}", display)

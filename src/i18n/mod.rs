@@ -12,3 +12,9 @@ pub use zh::*;
 mod en;
 #[cfg(not(locale_zh))]
 pub use en::*;
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}

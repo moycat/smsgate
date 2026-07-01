@@ -76,7 +76,12 @@ fn format_bytes(bytes: u64) -> String {
 // ── 转发 ────────────────────────────────────────────────────────────────────
 
 pub fn sms_received(sender: &str, ts: &str, body: &str) -> String {
-    format!("📱 来自 {}\n🕐 {}\n\n{}", sender, ts, body)
+    format!(
+        "📱 来自 <code>{}</code>\n🕐 {}\n\n{}",
+        super::html_escape(sender),
+        super::html_escape(ts),
+        super::html_escape(body)
+    )
 }
 pub fn incoming_call(display: &str) -> String {
     format!("📞 来电：{}", display)
