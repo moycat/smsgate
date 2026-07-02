@@ -18,6 +18,15 @@ fn poll_error_log_detail_includes_count_and_error() {
 }
 
 #[test]
+fn poll_errors_request_recovery_after_first_summary() {
+    let recovered: Vec<u16> = (1..=25)
+        .filter(|n| smsgate::im::telegram::should_recover_after_poll_errors(*n))
+        .collect();
+
+    assert_eq!(recovered, vec![12, 24]);
+}
+
+#[test]
 fn send_retry_delay_limits_attempts_to_one_per_30_seconds() {
     assert_eq!(
         smsgate::im::telegram::send_retry_delay_after(Duration::from_secs(5)),

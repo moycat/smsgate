@@ -4,6 +4,7 @@ use super::{
     build_get_file_body,
     types::{ApiResult, TelegramFile},
 };
+use anyhow::Context;
 use esp_idf_svc::tls::{Config as TlsConfig, EspTls, InternalSocket, KeepAliveConfig, X509};
 use std::time::Duration;
 
@@ -26,8 +27,9 @@ impl TelegramHttpClient {
     pub fn new(ca_bundle: Option<&'static [u8]>) -> anyhow::Result<Self> {
         let conf = Self::tls_config(ca_bundle);
         log::debug!("[http] connecting TLS to {}:{}", HOST, PORT);
-        let mut tls = EspTls::new()?;
-        tls.connect(HOST, PORT, &conf)?;
+        let mut tls = EspTls::new().context("tls client allocation failed")?;
+        tls.connect(HOST, PORT, &conf)
+            .with_context(|| format!("tls connect {}:{} failed", HOST, PORT))?;
         log::debug!("[http] TLS connected to {}:{}", HOST, PORT);
         Ok(TelegramHttpClient { tls, ca_bundle })
     }
@@ -51,12 +53,28 @@ impl TelegramHttpClient {
     /// On connection-level failure (server closed keep-alive, timeout, etc.),
     /// reconnects once and retries automatically.
     pub fn post(&mut self, path: &str, json_body: &str) -> anyhow::Result<String> {
-        match self.do_post(path, json_body) {
+        let method = bot_api_method(path);
+        match self.do_post(path, json_body, "initial") {
             Ok(body) => Ok(body),
             Err(e) => {
-                log::warn!("[http] request failed ({}), reconnecting…", e);
-                self.reconnect()?;
-                self.do_post(path, json_body)
+                let initial_error = format!("{:#}", e);
+                log::warn!(
+                    "[http] {} request failed ({}), reconnecting",
+                    method,
+                    initial_error
+                );
+                self.reconnect().with_context(|| {
+                    format!(
+                        "{} reconnect failed after initial error: {}",
+                        method, initial_error
+                    )
+                })?;
+                self.do_post(path, json_body, "retry").with_context(|| {
+                    format!(
+                        "{} retry failed after reconnect; initial error: {}",
+                        method, initial_error
+                    )
+                })
             }
         }
     }
@@ -112,7 +130,9 @@ impl TelegramHttpClient {
              \r\n",
             path, HOST
         );
-        self.tls.write_all(request.as_bytes())?;
+        self.tls
+            .write_all(request.as_bytes())
+            .context("file download request write failed")?;
 
         let headers = self.read_binary_headers()?;
         if !(200..300).contains(&headers.status) {
@@ -146,7 +166,10 @@ impl TelegramHttpClient {
             if std::time::Instant::now() > deadline {
                 anyhow::bail!("file download idle timeout");
             }
-            let n = self.tls.read(&mut buf)?;
+            let n = self
+                .tls
+                .read(&mut buf)
+                .context("file download body read failed")?;
             if n == 0 {
                 break;
             }
@@ -170,7 +193,8 @@ impl TelegramHttpClient {
         Ok(received)
     }
 
-    fn do_post(&mut self, path: &str, json_body: &str) -> anyhow::Result<String> {
+    fn do_post(&mut self, path: &str, json_body: &str, attempt: &str) -> anyhow::Result<String> {
+        let method = bot_api_method(path);
         let body_bytes = json_body.as_bytes();
         log::debug!(
             "[http] POST request: path_len={} body_len={}",
@@ -191,7 +215,9 @@ impl TelegramHttpClient {
             json_body
         );
 
-        self.tls.write_all(request.as_bytes())?;
+        self.tls
+            .write_all(request.as_bytes())
+            .with_context(|| format!("{} {} write failed", method, attempt))?;
 
         let mut response = String::with_capacity(4096);
         let mut buf = [0u8; 1024];
@@ -202,7 +228,10 @@ impl TelegramHttpClient {
             if std::time::Instant::now() > deadline {
                 anyhow::bail!("read timeout");
             }
-            let n = self.tls.read(&mut buf)?;
+            let n = self
+                .tls
+                .read(&mut buf)
+                .with_context(|| format!("{} {} header read failed", method, attempt))?;
             if n == 0 {
                 // Server closed the connection — trigger reconnect
                 anyhow::bail!("connection closed before headers received");
@@ -245,7 +274,10 @@ impl TelegramHttpClient {
             if std::time::Instant::now() > deadline {
                 anyhow::bail!("body read timeout");
             }
-            let n = self.tls.read(&mut buf)?;
+            let n = self
+                .tls
+                .read(&mut buf)
+                .with_context(|| format!("{} {} body read failed", method, attempt))?;
             if n == 0 {
                 break;
             }
@@ -267,7 +299,10 @@ impl TelegramHttpClient {
             if std::time::Instant::now() > deadline {
                 anyhow::bail!("header read timeout");
             }
-            let n = self.tls.read(&mut buf)?;
+            let n = self
+                .tls
+                .read(&mut buf)
+                .context("file download header read failed")?;
             if n == 0 {
                 anyhow::bail!("connection closed before headers received");
             }
@@ -285,13 +320,21 @@ impl TelegramHttpClient {
 
     fn reconnect(&mut self) -> anyhow::Result<()> {
         let conf = Self::tls_config(self.ca_bundle);
-        let mut tls = EspTls::new()?;
+        let mut tls = EspTls::new().context("tls client allocation failed")?;
         log::debug!("[http] reconnecting TLS to {}:{}", HOST, PORT);
-        tls.connect(HOST, PORT, &conf)?;
+        tls.connect(HOST, PORT, &conf)
+            .with_context(|| format!("tls reconnect {}:{} failed", HOST, PORT))?;
         self.tls = tls;
         log::debug!("[http] TLS reconnect complete");
         Ok(())
     }
+}
+
+fn bot_api_method(path: &str) -> &str {
+    path.rsplit('/')
+        .next()
+        .filter(|method| !method.is_empty())
+        .unwrap_or("telegram")
 }
 
 struct ResponseHeaders {

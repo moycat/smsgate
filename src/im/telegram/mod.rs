@@ -26,6 +26,7 @@ const GET_UPDATES_LIMIT: u8 = 10;
 const MIN_POLL_TIMEOUT_SEC: u32 = 1;
 const MAX_POLL_TIMEOUT_SEC: u32 = 30;
 const POLL_ERROR_LOG_EVERY: u16 = 12;
+const POLL_ERROR_RECOVERY_EVERY: u16 = POLL_ERROR_LOG_EVERY;
 const TELEGRAM_SEND_RETRY_INTERVAL_SECS: u64 = 30;
 const TELEGRAM_RESTART_AFTER_SECS: u64 = 5 * 60;
 
@@ -40,6 +41,11 @@ pub fn build_get_updates_body(since: i64, timeout_sec: u32) -> String {
 
 pub fn should_log_poll_error(consecutive_errors: u16) -> bool {
     consecutive_errors == 1 || consecutive_errors.is_multiple_of(POLL_ERROR_LOG_EVERY)
+}
+
+pub fn should_recover_after_poll_errors(consecutive_errors: u16) -> bool {
+    consecutive_errors >= POLL_ERROR_RECOVERY_EVERY
+        && consecutive_errors.is_multiple_of(POLL_ERROR_RECOVERY_EVERY)
 }
 
 pub fn poll_error_log_detail(consecutive_errors: u16, error: &str) -> String {
@@ -302,7 +308,7 @@ impl TelegramMessenger {
         match &mut self.transport {
             Transport::Wifi(http) => http
                 .post(&path, body)
-                .map_err(|e| MessengerError::Http(e.to_string())),
+                .map_err(|e| MessengerError::Http(format!("{:#}", e))),
             Transport::Modem(m) => {
                 let mut g = m.lock().map_err(|_| MessengerError::Disconnected)?;
                 let raw = g

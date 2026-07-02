@@ -19,7 +19,8 @@ use smsgate::{
     im::{
         telegram::{
             http::TelegramHttpClient,
-            poll_error_log_detail, should_log_poll_error, should_restart_after_stale_poll,
+            poll_error_log_detail, should_log_poll_error, should_recover_after_poll_errors,
+            should_restart_after_stale_poll,
             worker::{TelegramSendEvent, TelegramSendWorker},
             TelegramMessenger,
         },
@@ -55,6 +56,7 @@ macro_rules! lock {
 enum TgPollEvent {
     Batch(Vec<smsgate::im::InboundMessage>),
     Log(LogEvent),
+    RecoverTransport { reason: String },
 }
 
 #[cfg(feature = "esp32")]
@@ -337,11 +339,9 @@ fn main() {
                     Err(e) => {
                         log::error!("[tg-poll] messenger init failed: {}", e);
                         consecutive_poll_errors = consecutive_poll_errors.saturating_add(1);
+                        let error = format!("init failed: {}", e);
                         if should_log_poll_error(consecutive_poll_errors) {
-                            let detail = poll_error_log_detail(
-                                consecutive_poll_errors,
-                                &format!("init failed: {}", e),
-                            );
+                            let detail = poll_error_log_detail(consecutive_poll_errors, &error);
                             if tg_tx
                                 .send(TgPollEvent::Log(LogEvent::network(
                                     "telegram", &detail, false,
@@ -351,6 +351,15 @@ fn main() {
                                 return;
                             }
                         }
+                        if should_recover_after_poll_errors(consecutive_poll_errors)
+                            && tg_tx
+                                .send(TgPollEvent::RecoverTransport {
+                                    reason: poll_error_log_detail(consecutive_poll_errors, &error),
+                                })
+                                .is_err()
+                        {
+                            return;
+                        }
                         std::thread::sleep(std::time::Duration::from_secs(5));
                         poll_cellular =
                             tg_transport_cellular.load(std::sync::atomic::Ordering::SeqCst);
@@ -359,8 +368,6 @@ fn main() {
             };
             consecutive_poll_errors = 0;
             let mut cursor = initial_cursor;
-            const HEARTBEAT_INTERVAL: u8 = 20;
-            let mut heartbeat_counter: u8 = 0;
             // Subscribe this thread to the same Task WDT as main.
             // If poll() hangs indefinitely the WDT fires and reboots the device.
             unsafe {
@@ -382,7 +389,6 @@ fn main() {
                         Ok(m) => {
                             poll_messenger = m;
                             poll_cellular = desired_cellular;
-                            heartbeat_counter = 0;
                             consecutive_poll_errors = 0;
                             log::info!(
                                 "[tg-poll] switched to {} transport",
@@ -392,11 +398,9 @@ fn main() {
                         Err(e) => {
                             log::error!("[tg-poll] transport switch failed: {}", e);
                             consecutive_poll_errors = consecutive_poll_errors.saturating_add(1);
+                            let error = format!("transport switch failed: {}", e);
                             if should_log_poll_error(consecutive_poll_errors) {
-                                let detail = poll_error_log_detail(
-                                    consecutive_poll_errors,
-                                    &format!("transport switch failed: {}", e),
-                                );
+                                let detail = poll_error_log_detail(consecutive_poll_errors, &error);
                                 if tg_tx
                                     .send(TgPollEvent::Log(LogEvent::network(
                                         "telegram", &detail, false,
@@ -406,6 +410,18 @@ fn main() {
                                     break;
                                 }
                             }
+                            if should_recover_after_poll_errors(consecutive_poll_errors)
+                                && tg_tx
+                                    .send(TgPollEvent::RecoverTransport {
+                                        reason: poll_error_log_detail(
+                                            consecutive_poll_errors,
+                                            &error,
+                                        ),
+                                    })
+                                    .is_err()
+                            {
+                                break;
+                            }
                             std::thread::sleep(std::time::Duration::from_secs(5));
                             continue;
                         }
@@ -414,7 +430,6 @@ fn main() {
                 let poll_secs = telegram_poll_timeout_secs(poll_cellular);
                 match poll_messenger.poll(cursor, poll_secs) {
                     Ok(msgs) if !msgs.is_empty() => {
-                        heartbeat_counter = 0;
                         consecutive_poll_errors = 0;
                         cursor = msgs.iter().map(|m| m.cursor).max().unwrap_or(cursor);
                         if tg_tx.send(TgPollEvent::Batch(msgs)).is_err() {
@@ -423,20 +438,16 @@ fn main() {
                     }
                     Ok(_) => {
                         consecutive_poll_errors = 0;
-                        heartbeat_counter += 1;
-                        if heartbeat_counter >= HEARTBEAT_INTERVAL {
-                            heartbeat_counter = 0;
-                            if tg_tx.send(TgPollEvent::Batch(Vec::new())).is_err() {
-                                break;
-                            }
+                        if tg_tx.send(TgPollEvent::Batch(Vec::new())).is_err() {
+                            break;
                         }
                     }
                     Err(e) => {
                         log::error!("[tg-poll] error: {}", e);
                         consecutive_poll_errors = consecutive_poll_errors.saturating_add(1);
+                        let error = e.to_string();
                         if should_log_poll_error(consecutive_poll_errors) {
-                            let detail =
-                                poll_error_log_detail(consecutive_poll_errors, &e.to_string());
+                            let detail = poll_error_log_detail(consecutive_poll_errors, &error);
                             if tg_tx
                                 .send(TgPollEvent::Log(LogEvent::network(
                                     "telegram", &detail, false,
@@ -445,6 +456,15 @@ fn main() {
                             {
                                 break;
                             }
+                        }
+                        if should_recover_after_poll_errors(consecutive_poll_errors)
+                            && tg_tx
+                                .send(TgPollEvent::RecoverTransport {
+                                    reason: poll_error_log_detail(consecutive_poll_errors, &error),
+                                })
+                                .is_err()
+                        {
+                            break;
                         }
                         std::thread::sleep(std::time::Duration::from_secs(5));
                     }
@@ -757,6 +777,7 @@ fn main() {
         }
 
         // Collect any Telegram messages delivered by the polling thread
+        let mut telegram_recovery_reason = None;
         let tg_messages: Vec<smsgate::im::InboundMessage> = {
             let mut batch = Vec::new();
             let mut channel_active = false;
@@ -768,6 +789,11 @@ fn main() {
                     }
                     Ok(TgPollEvent::Log(event)) => {
                         record_event(&mut log, &log_clock, uptime_ms, event);
+                    }
+                    Ok(TgPollEvent::RecoverTransport { reason }) => {
+                        if telegram_recovery_reason.is_none() {
+                            telegram_recovery_reason = Some(reason);
+                        }
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -788,6 +814,23 @@ fn main() {
             }
             batch
         };
+
+        if let Some(reason) = telegram_recovery_reason {
+            recover_wifi_after_telegram_failure(
+                &reason,
+                &mut wifi,
+                &modem,
+                &creds,
+                &mut using_cellular,
+                &transport_cellular,
+                &mut log,
+                &log_clock,
+                uptime_ms,
+                &mut wifi_info,
+                wifi_ok,
+                &creds.wifi_ssid,
+            );
+        }
 
         // Dispatch commands and replies, update cursor in NVS
         if !tg_messages.is_empty() {
@@ -1126,6 +1169,94 @@ fn try_enable_cellular_fallback(
     *using_cellular = true;
     transport_cellular.store(true, std::sync::atomic::Ordering::SeqCst);
     true
+}
+
+#[cfg(feature = "esp32")]
+fn recover_wifi_after_telegram_failure(
+    reason: &str,
+    wifi: &mut esp_idf_svc::wifi::BlockingWifi<esp_idf_svc::wifi::EspWifi<'static>>,
+    modem: &std::sync::Arc<std::sync::Mutex<dyn smsgate::modem::ModemPort + Send>>,
+    creds: &RuntimeCreds,
+    using_cellular: &mut bool,
+    transport_cellular: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    log: &mut LogRing,
+    log_clock: &LogClock,
+    uptime_ms: u32,
+    wifi_info: &mut String,
+    wifi_ok: bool,
+    wifi_ssid: &str,
+) {
+    if *using_cellular || !wifi_ok {
+        return;
+    }
+
+    log::warn!(
+        "[wifi] reconnecting after Telegram poll failure: {}; network={}",
+        reason,
+        wifi_info
+    );
+    record_event(
+        log,
+        log_clock,
+        uptime_ms,
+        LogEvent::network(
+            "wifi",
+            &format!(
+                "reconnect after Telegram poll failure: {}; network={}",
+                reason, wifi_info
+            ),
+            false,
+        ),
+    );
+
+    if reconnect_wifi(wifi) {
+        log::info!("[wifi] reconnected after Telegram poll failure");
+        record_event(
+            log,
+            log_clock,
+            uptime_ms,
+            LogEvent::network("wifi", "reconnected after Telegram poll failure", true),
+        );
+        return;
+    }
+
+    log::error!(
+        "[wifi] reconnect after Telegram poll failure failed: {}; network={}",
+        reason,
+        wifi_info
+    );
+    record_event(
+        log,
+        log_clock,
+        uptime_ms,
+        LogEvent::network(
+            "wifi",
+            &format!(
+                "reconnect failed after Telegram poll failure: {}; network={}",
+                reason, wifi_info
+            ),
+            false,
+        ),
+    );
+    if try_enable_cellular_fallback(
+        "Telegram poll failure",
+        modem,
+        creds,
+        using_cellular,
+        transport_cellular,
+    ) {
+        *wifi_info = fmt_network(*using_cellular, wifi_ok, None, wifi_ssid);
+        record_event(
+            log,
+            log_clock,
+            uptime_ms,
+            LogEvent::network(
+                "cellular",
+                "fallback enabled after Telegram poll failure",
+                true,
+            ),
+        );
+    }
 }
 
 #[cfg(feature = "esp32")]
