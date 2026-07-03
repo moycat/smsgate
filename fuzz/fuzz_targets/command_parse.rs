@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use smsgate::commands::{builtin::*, Command, CommandContext, CommandRegistry};
+use smsgate::commands::{builtin::*, CommandContext, CommandRegistry};
 use smsgate::log_ring::LogRing;
 use smsgate::modem::ModemStatus;
 use smsgate::persist::mem::MemStore;

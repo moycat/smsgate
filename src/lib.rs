@@ -10,6 +10,7 @@ pub mod i18n;
 pub mod im;
 pub mod log_clock;
 pub mod log_ring;
+pub mod mms;
 pub mod modem;
 pub mod ota;
 pub mod persist;

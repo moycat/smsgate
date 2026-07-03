@@ -20,6 +20,16 @@ pub struct SmsPdu {
     /// "yy/MM/dd,HH:mm:ss+zz" — same shape accepted by timestamp helpers.
     pub timestamp: String,
     pub content: String,
+    /// TP-DCS from the SMS-DELIVER PDU.
+    pub dcs: u8,
+    /// Raw TP-UDH bytes including UDHL, when TP-UDHI is set.
+    pub user_data_header: Vec<u8>,
+    /// Raw TP-UD bytes after UDH. For GSM-7 this is still the packed byte stream.
+    pub user_data_payload: Vec<u8>,
+    /// Destination application port from UDH port addressing IE, if present.
+    pub destination_port: Option<u16>,
+    /// Source application port from UDH port addressing IE, if present.
+    pub source_port: Option<u16>,
     pub is_concatenated: bool,
     pub concat_ref: u16,
     pub concat_total: u8,
@@ -463,6 +473,7 @@ pub fn parse_sms_pdu(hex_pdu: &str) -> Result<SmsPdu, SmsError> {
     let mut pdu = SmsPdu {
         sender,
         timestamp,
+        dcs,
         ..Default::default()
     };
 
@@ -487,6 +498,14 @@ pub fn parse_sms_pdu(hex_pdu: &str) -> Result<SmsPdu, SmsError> {
                 break;
             }
             match (iei, iedl) {
+                (0x04, 2) => {
+                    pdu.destination_port = Some(buf[ie] as u16);
+                    pdu.source_port = Some(buf[ie + 1] as u16);
+                }
+                (0x05, 4) => {
+                    pdu.destination_port = Some(((buf[ie] as u16) << 8) | buf[ie + 1] as u16);
+                    pdu.source_port = Some(((buf[ie + 2] as u16) << 8) | buf[ie + 3] as u16);
+                }
                 (0x00, 3) => {
                     pdu.is_concatenated = true;
                     pdu.concat_ref = buf[ie] as u16;
@@ -504,6 +523,15 @@ pub fn parse_sms_pdu(hex_pdu: &str) -> Result<SmsPdu, SmsError> {
             ie += iedl;
         }
     }
+
+    let body_start = if udhi { udh_total } else { 0 };
+    if udhi {
+        pdu.user_data_header = buf[p..p + udh_total].to_vec();
+    }
+    if body_start > ud_bytes {
+        return Err(SmsError::MalformedPdu("UDH > body"));
+    }
+    pdu.user_data_payload = buf[p + body_start..p + ud_bytes].to_vec();
 
     // Decode content
     pdu.content = match alpha {

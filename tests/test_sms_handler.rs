@@ -24,6 +24,38 @@ const CONCAT_PART1_PDU: &str = "00440D91683108108300F0000062400110000000 09 0500
 // UDL=08 septets (7 header + 1 body), UD=UDH(05 00 03 01 02 02)+body(42)
 const CONCAT_PART2_PDU: &str = "00440D91683108108300F0000062400110000000 08 050003010202 42";
 const TEST_LOG_TS: &str = "2026-04-10T20:00:00Z";
+const MMS_URL: &str = "http://szdx.wo.cn/ni1P4hhlVMX0d.mms?1P4hhnk620L";
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02X}")).collect()
+}
+
+fn mms_notification_pdu() -> String {
+    let mut mms = Vec::new();
+    mms.extend_from_slice(&[0x8C, 0x82]); // X-Mms-Message-Type: m-notification-ind
+    mms.push(0x98); // X-Mms-Transaction-ID
+    mms.extend_from_slice(b"txn-1\0");
+    mms.extend_from_slice(&[0x8D, 0x92]); // X-Mms-MMS-Version: 1.2
+    mms.push(0x83); // X-Mms-Content-Location
+    mms.extend_from_slice(MMS_URL.as_bytes());
+    mms.push(0);
+    mms.extend_from_slice(&[0x8E, 0xAA]); // X-Mms-Message-Size: 42 bytes
+    mms.extend_from_slice(&[0x88, 0x04, 0x81, 0x02, 0x0E, 0x10]); // Expiry: relative 3600s
+
+    let mut wsp = Vec::new();
+    wsp.extend_from_slice(&[0x01, 0x06, 0x01, 0xBE]); // Push, Content-Type: application/vnd.wap.mms-message
+    wsp.extend_from_slice(&mms);
+
+    let mut user_data = Vec::new();
+    user_data.extend_from_slice(&[0x06, 0x05, 0x04, 0x0B, 0x84, 0x23, 0xF0]); // dst=2948, src=9200
+    user_data.extend_from_slice(&wsp);
+
+    format!(
+        "00400C81019608905533000462703090939123{:02X}{}",
+        user_data.len(),
+        hex_bytes(&user_data)
+    )
+}
 
 // ---------------------------------------------------------------------------
 // process_pdu_hex
@@ -78,6 +110,40 @@ fn process_pdu_hex_forwards_valid_sms() {
     assert!(result, "valid PDU should return true (delete slot)");
     assert_eq!(messenger.sent_count(), 1);
     assert!(messenger.contains_sent("Hello"));
+}
+
+#[test]
+fn process_pdu_hex_forwards_mms_notification_as_clean_notice() {
+    let mut router = ReplyRouter::new();
+    let mut log = LogRing::new();
+    let mut concat = ConcatReassembler::new();
+    let mut messenger = RecordingMessenger::new();
+    let mut store = MemStore::new();
+
+    let result = process_pdu_hex(
+        &mms_notification_pdu(),
+        9,
+        &mut router,
+        &mut log,
+        &mut concat,
+        &mut messenger,
+        &mut store,
+        TEST_LOG_TS,
+    );
+
+    assert!(
+        result,
+        "MMS notification should be consumed after forwarding"
+    );
+    let sent = messenger.last_sent().expect("notice should be forwarded");
+    assert!(sent.contains("106980095533"));
+    assert!(sent.contains("2026-07-03T09:39:19+08:00"));
+    assert!(sent.contains("MMS notification") || sent.contains("彩信通知"));
+    assert!(sent.contains("content not downloaded") || sent.contains("未下载内容"));
+    assert!(sent.contains(MMS_URL));
+    assert!(sent.contains("42 B"));
+    assert!(sent.contains("1 h after notification") || sent.contains("收到后 1 小时"));
+    assert!(!sent.contains("application/vnd.wap.mms-message"));
 }
 
 #[test]

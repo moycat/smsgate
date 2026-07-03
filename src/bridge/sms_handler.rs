@@ -177,7 +177,18 @@ pub fn process_pdu_hex(
         }
     };
 
-    let sms = if pdu.is_concatenated {
+    let sms = if let Some(notification) = crate::mms::parse_mms_notification_from_sms(&pdu) {
+        SmsMessage {
+            sender: pdu.sender,
+            body: crate::i18n::mms_notification(
+                &notification.content_location,
+                notification.message_size,
+                notification.expiry,
+            ),
+            timestamp: pdu.timestamp,
+            slot,
+        }
+    } else if pdu.is_concatenated {
         match concat.feed(&pdu) {
             Some(complete) => SmsMessage {
                 sender: complete.sender,

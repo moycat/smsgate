@@ -11,6 +11,7 @@ fn make_part(sender: &str, ref_num: u16, total: u8, part: u8, content: &str) -> 
         concat_ref: ref_num,
         concat_total: total,
         concat_part: part,
+        ..Default::default()
     }
 }
 

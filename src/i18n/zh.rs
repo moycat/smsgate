@@ -80,8 +80,44 @@ pub fn sms_received(sender: &str, ts: &str, body: &str) -> String {
         super::html_escape(body)
     )
 }
+pub fn mms_notification(
+    url: &str,
+    message_size: Option<u64>,
+    expiry: Option<crate::mms::MmsExpiry>,
+) -> String {
+    let mut lines = vec![
+        "📎 彩信通知（未下载内容）".to_string(),
+        format!("下载地址：{url}"),
+    ];
+    if let Some(bytes) = message_size {
+        lines.push(format!("大小：{}", format_bytes(bytes)));
+    }
+    if let Some(expiry) = expiry {
+        lines.push(format!("过期：{}", format_mms_expiry(expiry)));
+    }
+    lines.join("\n")
+}
 pub fn incoming_call(display: &str) -> String {
     format!("📞 来电：{}", display)
+}
+
+fn format_mms_expiry(expiry: crate::mms::MmsExpiry) -> String {
+    match expiry {
+        crate::mms::MmsExpiry::RelativeSeconds(seconds) => format_duration_after(seconds),
+        crate::mms::MmsExpiry::AbsoluteUnixSeconds(seconds) => format!("Unix 时间戳 {seconds}"),
+    }
+}
+
+fn format_duration_after(seconds: u64) -> String {
+    if seconds.is_multiple_of(86_400) {
+        format!("收到后 {} 天", seconds / 86_400)
+    } else if seconds.is_multiple_of(3_600) {
+        format!("收到后 {} 小时", seconds / 3_600)
+    } else if seconds.is_multiple_of(60) {
+        format!("收到后 {} 分钟", seconds / 60)
+    } else {
+        format!("收到后 {seconds} 秒")
+    }
 }
 
 // ── /status ──────────────────────────────────────────────────────────────────

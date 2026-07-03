@@ -80,8 +80,44 @@ pub fn sms_received(sender: &str, ts: &str, body: &str) -> String {
         super::html_escape(body)
     )
 }
+pub fn mms_notification(
+    url: &str,
+    message_size: Option<u64>,
+    expiry: Option<crate::mms::MmsExpiry>,
+) -> String {
+    let mut lines = vec![
+        "📎 MMS notification (content not downloaded)".to_string(),
+        format!("URL: {url}"),
+    ];
+    if let Some(bytes) = message_size {
+        lines.push(format!("Size: {}", format_bytes(bytes)));
+    }
+    if let Some(expiry) = expiry {
+        lines.push(format!("Expires: {}", format_mms_expiry(expiry)));
+    }
+    lines.join("\n")
+}
 pub fn incoming_call(display: &str) -> String {
     format!("📞 Incoming call from {}", display)
+}
+
+fn format_mms_expiry(expiry: crate::mms::MmsExpiry) -> String {
+    match expiry {
+        crate::mms::MmsExpiry::RelativeSeconds(seconds) => format_duration_after(seconds),
+        crate::mms::MmsExpiry::AbsoluteUnixSeconds(seconds) => format!("Unix timestamp {seconds}"),
+    }
+}
+
+fn format_duration_after(seconds: u64) -> String {
+    if seconds.is_multiple_of(86_400) {
+        format!("{} d after notification", seconds / 86_400)
+    } else if seconds.is_multiple_of(3_600) {
+        format!("{} h after notification", seconds / 3_600)
+    } else if seconds.is_multiple_of(60) {
+        format!("{} min after notification", seconds / 60)
+    } else {
+        format!("{seconds} s after notification")
+    }
 }
 
 // ── /status ───────────────────────────────────────────────────────────────────
