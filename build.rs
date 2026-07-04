@@ -9,11 +9,18 @@ fn main() {
     println!("cargo:rerun-if-changed=config.toml");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=partitions_ota.csv");
+    println!("cargo:rerun-if-env-changed=SMSGATE_APPLY_COMPILED_CONFIG");
     println!("cargo::rustc-check-cfg=cfg(locale_zh)");
 
     copy_partition_csv_for_esp_idf();
 
     let config_path = Path::new("config.toml");
+    let apply_compiled_config = apply_compiled_config_setting(config_path.exists());
+    println!(
+        "cargo:rustc-env=CFG_APPLY_COMPILED_CONFIG={}",
+        apply_compiled_config
+    );
+
     if !config_path.exists() {
         println!(
             "cargo:warning=config.toml not found. \
@@ -177,4 +184,21 @@ fn emit_empty_defaults() {
     println!("cargo:rustc-env=CFG_MODEM_SIM_PIN=");
     println!("cargo:rustc-env=CFG_BRIDGE_MAX_FAILURES=8");
     println!("cargo:rustc-env=CFG_BRIDGE_POLL_INTERVAL_MS=3000");
+}
+
+fn apply_compiled_config_setting(config_exists: bool) -> bool {
+    match std::env::var("SMSGATE_APPLY_COMPILED_CONFIG") {
+        Ok(value) => parse_bool_env(&value).unwrap_or_else(|| {
+            panic!("SMSGATE_APPLY_COMPILED_CONFIG must be one of 1/0, true/false, yes/no, on/off")
+        }),
+        Err(_) => config_exists,
+    }
+}
+
+fn parse_bool_env(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }

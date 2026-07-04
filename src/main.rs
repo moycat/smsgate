@@ -83,8 +83,16 @@ fn main() {
     // ---- NVS store (fall back to MemStore on NVS failure) ----
     let nvs_partition = esp_idf_svc::nvs::EspDefaultNvsPartition::take().unwrap();
 
-    // ---- Runtime credentials (NVS "smsgcfg" > compile-time defaults) ----
-    let creds = RuntimeCreds::load(&nvs_partition);
+    // ---- Runtime credentials (NVS, or compiled defaults when this image requests it) ----
+    let loaded_creds = RuntimeCreds::load(&nvs_partition);
+    let creds = RuntimeCreds::resolve_compiled_config(loaded_creds, Config::APPLY_COMPILED_CONFIG);
+    if Config::APPLY_COMPILED_CONFIG {
+        if creds.save(&nvs_partition) {
+            log::info!("[main] compile-time runtime config applied to NVS");
+        } else {
+            log::error!("[main] failed to persist compile-time runtime config to NVS");
+        }
+    }
     if !creds.is_provisioned() {
         log::warn!("[main] not provisioned — entering serial setup");
         serial_provision(&nvs_partition);

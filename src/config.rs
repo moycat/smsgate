@@ -27,6 +27,7 @@ impl Config {
     pub const MAX_FAILURES: u8 = parse_u8_const(env!("CFG_BRIDGE_MAX_FAILURES"));
     pub const POLL_INTERVAL_MS: u32 = parse_u32_const(env!("CFG_BRIDGE_POLL_INTERVAL_MS"));
     pub const GIT_COMMIT: &'static str = env!("CFG_GIT_COMMIT");
+    pub const APPLY_COMPILED_CONFIG: bool = parse_bool_env_true(env!("CFG_APPLY_COMPILED_CONFIG"));
 }
 
 const fn parse_bool_env_true(s: &str) -> bool {

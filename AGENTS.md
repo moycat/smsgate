@@ -23,6 +23,11 @@ cargo +esp build --release --target xtensa-esp32-espidf
 # Windows: ESP-IDF has path-length limits; use a short target dir:
 #   CARGO_TARGET_DIR=C:\t cargo +esp build --release --target xtensa-esp32-espidf
 
+# Generate both Telegram OTA images:
+#   smsgate-ota-software-only.bin keeps existing NVS runtime config
+#   smsgate-ota-with-config.bin applies compiled config.toml runtime config to NVS
+./tools/build_ota_images.sh
+
 # Flash + monitor
 # PORT: /dev/ttyUSB0 (Linux), /dev/cu.wchusbserial* (macOS), COM3 (Windows)
 espflash flash target/xtensa-esp32-espidf/release/smsgate --port <PORT> --partition-table partitions_ota.csv --target-app-partition ota_0 --erase-parts otadata
@@ -167,7 +172,10 @@ build outside the network sandbox instead of repeatedly retrying DNS failures.
 without it, but the resulting binary uses empty compile-time credentials and will
 enter serial provisioning unless credentials already exist in NVS. For normal
 firmware builds, copy `config.toml.example` to `config.toml` and fill in real
-values before building.
+values before building. When `config.toml` exists, a plain firmware build defaults
+to applying the compiled runtime config to NVS on boot. Set
+`SMSGATE_APPLY_COMPILED_CONFIG=0` for a software-only build that preserves the
+existing NVS runtime config.
 
 `[modem].sim_pin` is an optional compile-time SIM unlock PIN. Leave it empty for
 an unlocked SIM or a SIM with PIN disabled. If the SIM reports `SIM PIN` during
@@ -198,8 +206,10 @@ in the parent `mod.rs`.
 
 The `"smsgate"` NVS namespace stores exactly four keys: `im_cursor` (i64),
 `reply_map` (blob), `block_list` (blob), `fwd_enabled` (bool). Runtime credentials
-live in the separate `"smsgcfg"` namespace and override compile-time defaults from
-`config.toml`.
+live in the separate `"smsgcfg"` namespace and normally override compile-time
+defaults from `config.toml`. Firmware built with
+`SMSGATE_APPLY_COMPILED_CONFIG=1` writes the compiled WiFi, Telegram, and APN
+runtime config back into `"smsgcfg"` on boot.
 
 ### Partition Table
 
@@ -271,11 +281,16 @@ communication errors. The expected verification log is a partition table contain
 `flash-backed log ring mounted`.
 
 Telegram OTA uses the ESP app image, not the ELF passed to `espflash flash`.
-Generate the `.bin` to send to the bot with:
+Generate both `.bin` files to send to the bot with:
 
 ```bash
-espflash save-image --chip esp32 --flash-size 4mb --partition-table partitions_ota.csv --target-app-partition ota_0 target/xtensa-esp32-espidf/release/smsgate smsgate-ota.bin
+./tools/build_ota_images.sh
 ```
+
+Send `smsgate-ota-software-only.bin` with caption `/ota` to update firmware software
+while preserving existing NVS runtime config. Send `smsgate-ota-with-config.bin` with
+caption `/ota` to update firmware software and overwrite NVS runtime config with the
+compiled `config.toml` WiFi, Telegram, and APN values.
 
 ### CI / Release Notes
 

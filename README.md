@@ -50,20 +50,32 @@ espflash flash target/xtensa-esp32-espidf/release/smsgate --port <PORT> --partit
 
 ## Telegram OTA
 
-Generate the app image to send to the bot:
+Generate both OTA app images to send to the bot:
 
 ```bash
-cargo +esp build --release --target xtensa-esp32-espidf
-espflash save-image --chip esp32 --flash-size 4mb --partition-table partitions_ota.csv --target-app-partition ota_0 target/xtensa-esp32-espidf/release/smsgate smsgate-ota.bin
+./tools/build_ota_images.sh
 ```
 
-Send `smsgate-ota.bin` to the configured Telegram chat with caption `/ota`.
+The script writes:
+
+- `smsgate-ota-software-only.bin` — update firmware software only; keep the
+  existing NVS `smsgcfg` runtime configuration.
+- `smsgate-ota-with-config.bin` — update firmware software and, on first boot
+  of the new image, write the compiled `config.toml` WiFi, Telegram, and APN
+  runtime configuration into NVS.
+
+Send the chosen `.bin` to the configured Telegram chat with caption `/ota`.
 OTA downloads use WiFi HTTPS only; cellular fallback mode will reject OTA.
 
 When flashing over USB, keep the `--partition-table partitions_ota.csv` and
 `--target-app-partition ota_0` flags, and erase `otadata`. The firmware uses a
 custom OTA partition layout; omitting these flags can target the wrong app slot,
 and stale OTA data can keep booting `ota_1` after `ota_0` was flashed.
+
+Plain `cargo +esp build --release --target xtensa-esp32-espidf` keeps the USB
+flash workflow as a software-and-config update when `config.toml` exists. To
+build an image that preserves NVS runtime configuration, set
+`SMSGATE_APPLY_COMPILED_CONFIG=0` for that build.
 
 ### USB Partition Migration Recovery
 
@@ -110,7 +122,7 @@ device will be provisioned again. Verify the next boot lists `otadata`, `ota_0`,
 
 ## Configuration
 
-`config.toml` supplies compile-time defaults for WiFi, Telegram, modem pins, APN, SIM PIN, and UI locale. WiFi, Telegram, and APN credentials can also be provisioned over serial and are stored in NVS under the `smsgcfg` namespace. See [`config.toml.example`](config.toml.example) for all options.
+`config.toml` supplies compile-time defaults for WiFi, Telegram, modem pins, APN, SIM PIN, and UI locale. WiFi, Telegram, and APN credentials can also be provisioned over serial and are stored in NVS under the `smsgcfg` namespace. Images built with `SMSGATE_APPLY_COMPILED_CONFIG=1` overwrite those NVS runtime credentials with the compiled defaults on boot; images built with `SMSGATE_APPLY_COMPILED_CONFIG=0` preserve the existing NVS values. See [`config.toml.example`](config.toml.example) for all options.
 
 To build with Chinese UI strings, add to your `config.toml`:
 
@@ -123,7 +135,7 @@ locale = "zh"
 
 **`serde_json` for Telegram API parsing** — The Telegram HTTP layer uses `serde_json`, which requires heap allocation. This is a deliberate tradeoff: the ESP32 has ample SRAM (320 KB + optional PSRAM), a typical Telegram API response is a few kilobytes, and `serde-json-core` (the `no_std` alternative) would add significant implementation complexity for marginal gain. If you port this to a more constrained MCU, swapping out `im/telegram/` is the only change needed.
 
-**Configuration boundaries** — Hardware defaults and locale are compile-time settings. Operational credentials can be baked into `config.toml` for simple deployments or provisioned over serial into NVS without rebuilding the firmware.
+**Configuration boundaries** — Hardware defaults and locale are compile-time settings. Operational credentials can be baked into `config.toml` for simple deployments or provisioned over serial into NVS without rebuilding the firmware. OTA images choose whether to preserve or overwrite the NVS-backed runtime credentials through `SMSGATE_APPLY_COMPILED_CONFIG`.
 
 **Runtime task split** — Telegram polling and Telegram outbound delivery run in separate worker threads. SMS and modem AT operations keep a single ordered UART owner so URCs, SMS reads/deletes, and `AT+CMGS` prompt handling do not interleave.
 

@@ -1,8 +1,10 @@
 //! Runtime credentials — NVS-backed, with compile-time fallback.
 //!
 //! ## Priority
-//! 1. NVS namespace `"smsgcfg"` (written by the serial provisioning flow).
-//! 2. Compile-time defaults from `Config` (for the build-from-source workflow).
+//! 1. A firmware image built with `SMSGATE_APPLY_COMPILED_CONFIG=1` writes its
+//!    compile-time defaults into NVS and uses them immediately.
+//! 2. Otherwise, NVS namespace `"smsgcfg"` (written by the serial provisioning flow).
+//! 3. Compile-time defaults from `Config` (for the build-from-source workflow).
 //!
 //! Hardware pin numbers (`UART_TX`, `UART_RX`, `PWRKEY_PIN`, …) are not affected:
 //! they are wired to the board and remain compile-time constants.
@@ -42,6 +44,19 @@ impl Default for RuntimeCreds {
 }
 
 impl RuntimeCreds {
+    /// Choose the runtime credentials for this boot.
+    ///
+    /// When `apply_compiled_config` is true, the image's compile-time defaults
+    /// replace the values loaded from NVS. The ESP32 startup path persists the
+    /// returned defaults back into the `smsgcfg` namespace.
+    pub fn resolve_compiled_config(loaded: Self, apply_compiled_config: bool) -> Self {
+        if apply_compiled_config {
+            Self::default()
+        } else {
+            loaded
+        }
+    }
+
     /// Minimum to operate: non-empty bot token **and** non-zero chat_id.
     /// WiFi SSID absence is allowed (cellular-only setups).
     pub fn is_provisioned(&self) -> bool {

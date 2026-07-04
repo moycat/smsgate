@@ -5,9 +5,13 @@ fuzz/target/
 
 # User configuration — contains secrets, never commit
 /config.toml
+/config.toml.*
+!/config.toml.example
 
 # Generated OTA firmware image — regenerate from the release build, do not commit
 /smsgate-ota.bin
+/smsgate-ota-software-only.bin
+/smsgate-ota-with-config.bin
 
 # PlatformIO artifacts (C++ sibling branches leak into working tree)
 .pio/
