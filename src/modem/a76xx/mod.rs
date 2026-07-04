@@ -9,16 +9,23 @@ pub mod qhttp;
 pub mod sms;
 
 #[cfg(feature = "esp32")]
-use super::{creg_registered, AtResponse, AtTransport, ModemError, ModemPort};
+use super::creg_registered;
+#[cfg(any(feature = "esp32", feature = "testing"))]
+use super::{AtResponse, AtTransport, ModemError, ModemPort};
 #[cfg(feature = "esp32")]
 use at::HardwareAtPort as AtPort;
-#[cfg(feature = "esp32")]
+#[cfg(any(feature = "esp32", feature = "testing"))]
 use std::time::Duration;
 
 /// A76xx modem driver (A7670, A7608, A7672, etc.).
 #[cfg(feature = "esp32")]
 pub struct A76xxModem {
     port: AtPort,
+}
+
+#[cfg(all(feature = "testing", not(feature = "esp32")))]
+pub struct A76xxModem<U: at::UartPort> {
+    port: at::AtPort<U>,
 }
 
 #[cfg(feature = "esp32")]
@@ -143,8 +150,51 @@ impl A76xxModem {
     }
 }
 
+#[cfg(all(feature = "testing", not(feature = "esp32")))]
+impl<U: at::UartPort> A76xxModem<U> {
+    /// Create a test modem from a mock UART while preserving the A76xx behavior.
+    pub fn new_test(uart: U) -> Self {
+        A76xxModem {
+            port: at::AtPort::new(uart),
+        }
+    }
+
+    pub fn port(&self) -> &at::AtPort<U> {
+        &self.port
+    }
+}
+
+#[cfg(any(feature = "esp32", feature = "testing"))]
+fn hang_up_voice_call<T: AtTransport + ?Sized>(modem: &mut T) -> Result<(), ModemError> {
+    let r = modem.send_at("+CHUP")?;
+    if r.ok {
+        Ok(())
+    } else {
+        Err(ModemError::AtError("AT+CHUP failed".into()))
+    }
+}
+
 #[cfg(feature = "esp32")]
 impl AtTransport for A76xxModem {
+    fn send_at(&mut self, cmd: &str) -> Result<AtResponse, ModemError> {
+        self.port.send_at(cmd)
+    }
+
+    fn poll_urc(&mut self) -> Option<String> {
+        self.port.poll_urc()
+    }
+
+    fn write_raw(&mut self, data: &[u8]) -> Result<(), ModemError> {
+        self.port.write_raw(data)
+    }
+
+    fn wait_for_prompt(&mut self, prompt: u8, timeout: Duration) -> bool {
+        self.port.wait_for_prompt(prompt, timeout)
+    }
+}
+
+#[cfg(all(feature = "testing", not(feature = "esp32")))]
+impl<U: at::UartPort> AtTransport for A76xxModem<U> {
     fn send_at(&mut self, cmd: &str) -> Result<AtResponse, ModemError> {
         self.port.send_at(cmd)
     }
@@ -165,9 +215,22 @@ impl AtTransport for A76xxModem {
 #[cfg(feature = "esp32")]
 impl ModemPort for A76xxModem {
     // send_pdu_sms: default (standard AT+CMGS handshake via AtTransport)
-    // hang_up: default (ATH)
+    fn hang_up(&mut self) -> Result<(), ModemError> {
+        hang_up_voice_call(self)
+    }
 
     fn post_telegram_https(&mut self, path: &str, json: &str) -> Result<String, ModemError> {
         qhttp::post_json(self, path, json)
+    }
+}
+
+#[cfg(all(feature = "testing", not(feature = "esp32")))]
+impl<U: at::UartPort> ModemPort for A76xxModem<U> {
+    fn send_pdu_sms(&mut self, _hex: &str, _tpdu_len: u8) -> Result<u8, ModemError> {
+        Err(ModemError::NotSupported)
+    }
+
+    fn hang_up(&mut self) -> Result<(), ModemError> {
+        hang_up_voice_call(self)
     }
 }
