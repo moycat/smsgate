@@ -17,7 +17,7 @@ Reference hardware: **LilyGo T-A7670X** (A7670G LTE modem, CH9102 USB bridge).
 - PDU-mode SMS encoding/decoding (GSM-7 + UCS-2)
 - Bot commands: `/help`, `/status`, `/send`, `/block`, `/blocklist`, `/unblock`, `/pause`, `/resume`, `/log`, `/restart`
 - i18n: English and Chinese (compile-time locale selection, zero overhead)
-- NVS persistence for runtime credentials, cursor, reply mapping, and block list
+- NVS persistence for runtime config, cursor, reply mapping, and block list
 - Outbound SMS queue with exponential-backoff retry
 - Telegram-delivered OTA firmware updates over WiFi HTTPS
 - Flash-backed `/log [offset]` event ring for SMS, boot, network, OTA, and user operations; pages show 16 entries with Telegram inline buttons for paging, and SMS log previews keep up to 160 chars before the fixed-size flash record is trimmed to fit
@@ -61,8 +61,8 @@ The script writes:
 - `smsgate-ota-software-only.bin` — update firmware software only; keep the
   existing NVS `smsgcfg` runtime configuration.
 - `smsgate-ota-with-config.bin` — update firmware software and, on first boot
-  of the new image, write the compiled `config.toml` WiFi, Telegram, and APN
-  runtime configuration into NVS.
+  of the new image, write the compiled `config.toml` WiFi, Telegram, modem/APN/SIM,
+  and bridge runtime configuration into NVS.
 
 Send the chosen `.bin` to the configured Telegram chat with caption `/ota`.
 OTA downloads use WiFi HTTPS only; cellular fallback mode will reject OTA.
@@ -122,7 +122,7 @@ device will be provisioned again. Verify the next boot lists `otadata`, `ota_0`,
 
 ## Configuration
 
-`config.toml` supplies compile-time defaults for WiFi, Telegram, modem pins, APN, SIM PIN, and UI locale. WiFi, Telegram, and APN credentials can also be provisioned over serial and are stored in NVS under the `smsgcfg` namespace. Images built with `SMSGATE_APPLY_COMPILED_CONFIG=1` overwrite those NVS runtime credentials with the compiled defaults on boot; images built with `SMSGATE_APPLY_COMPILED_CONFIG=0` preserve the existing NVS values. See [`config.toml.example`](config.toml.example) for all options.
+`config.toml` supplies compile-time defaults for WiFi, Telegram, modem pins, modem/APN/SIM settings, bridge timing, and UI locale. Runtime network, modem/SIM, and bridge settings are stored in NVS under the `smsgcfg` namespace. Images built with `SMSGATE_APPLY_COMPILED_CONFIG=1` overwrite those NVS runtime values with the compiled defaults on boot; images built with `SMSGATE_APPLY_COMPILED_CONFIG=0` preserve the existing NVS values. UI locale is still selected at compile time. See [`config.toml.example`](config.toml.example) for all options.
 
 To build with Chinese UI strings, add to your `config.toml`:
 
@@ -135,7 +135,7 @@ locale = "zh"
 
 **`serde_json` for Telegram API parsing** — The Telegram HTTP layer uses `serde_json`, which requires heap allocation. This is a deliberate tradeoff: the ESP32 has ample SRAM (320 KB + optional PSRAM), a typical Telegram API response is a few kilobytes, and `serde-json-core` (the `no_std` alternative) would add significant implementation complexity for marginal gain. If you port this to a more constrained MCU, swapping out `im/telegram/` is the only change needed.
 
-**Configuration boundaries** — Hardware defaults and locale are compile-time settings. Operational credentials can be baked into `config.toml` for simple deployments or provisioned over serial into NVS without rebuilding the firmware. OTA images choose whether to preserve or overwrite the NVS-backed runtime credentials through `SMSGATE_APPLY_COMPILED_CONFIG`.
+**Configuration boundaries** — Hardware defaults and locale are compile-time settings. Runtime network, modem/SIM, and bridge settings can be baked into `config.toml` for simple deployments or provisioned over serial into NVS without rebuilding the firmware. OTA images choose whether to preserve or overwrite the NVS-backed runtime config through `SMSGATE_APPLY_COMPILED_CONFIG`.
 
 **Runtime task split** — Telegram polling and Telegram outbound delivery run in separate worker threads. SMS and modem AT operations keep a single ordered UART owner so URCs, SMS reads/deletes, and `AT+CMGS` prompt handling do not interleave.
 

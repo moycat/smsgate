@@ -29,8 +29,9 @@ cellular_fallback = false
 apn       = ""
 apn_user  = ""
 apn_pass  = ""
-# Leave empty for an unlocked SIM or when SIM PIN is disabled. If your SIM
-# requires a PIN at boot, set the 4-8 digit PIN here. DO NOT COMMIT.
+# Runtime SIM unlock PIN. A software-only OTA preserves the NVS value; a
+# with-config build seeds this value into NVS. Leave empty for an unlocked SIM
+# or when SIM PIN is disabled. DO NOT COMMIT.
 sim_pin   = ""
 
 [bridge]

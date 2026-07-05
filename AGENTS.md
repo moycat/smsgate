@@ -177,11 +177,12 @@ to applying the compiled runtime config to NVS on boot. Set
 `SMSGATE_APPLY_COMPILED_CONFIG=0` for a software-only build that preserves the
 existing NVS runtime config.
 
-`[modem].sim_pin` is an optional compile-time SIM unlock PIN. Leave it empty for
-an unlocked SIM or a SIM with PIN disabled. If the SIM reports `SIM PIN` during
-startup, the value must be a 4-8 digit string; the firmware sends it once with
-`AT+CPIN` before network registration and SMS setup. Never log or hardcode real
-SIM PIN values.
+`[modem].sim_pin` is an optional runtime SIM unlock PIN. Images built with
+`SMSGATE_APPLY_COMPILED_CONFIG=1` seed it into NVS from `config.toml`; software-only
+OTA images preserve the existing NVS value. Leave it empty for an unlocked SIM or
+a SIM with PIN disabled. If the SIM reports `SIM PIN` during startup, the value
+must be a 4-8 digit string; the firmware sends it once with `AT+CPIN` before
+network registration and SMS setup. Never log or hardcode real SIM PIN values.
 
 ## Architecture
 
@@ -205,11 +206,11 @@ Large implementations are split into subdirectories (`modem/a76xx/`, `im/telegra
 in the parent `mod.rs`.
 
 The `"smsgate"` NVS namespace stores exactly four keys: `im_cursor` (i64),
-`reply_map` (blob), `block_list` (blob), `fwd_enabled` (bool). Runtime credentials
-live in the separate `"smsgcfg"` namespace and normally override compile-time
+`reply_map` (blob), `block_list` (blob), `fwd_enabled` (bool). Runtime config
+lives in the separate `"smsgcfg"` namespace and normally overrides compile-time
 defaults from `config.toml`. Firmware built with
-`SMSGATE_APPLY_COMPILED_CONFIG=1` writes the compiled WiFi, Telegram, and APN
-runtime config back into `"smsgcfg"` on boot.
+`SMSGATE_APPLY_COMPILED_CONFIG=1` writes the compiled WiFi, Telegram, modem/APN/SIM,
+and bridge runtime config back into `"smsgcfg"` on boot.
 
 ### Partition Table
 
@@ -290,7 +291,7 @@ Generate both `.bin` files to send to the bot with:
 Send `smsgate-ota-software-only.bin` with caption `/ota` to update firmware software
 while preserving existing NVS runtime config. Send `smsgate-ota-with-config.bin` with
 caption `/ota` to update firmware software and overwrite NVS runtime config with the
-compiled `config.toml` WiFi, Telegram, and APN values.
+compiled `config.toml` WiFi, Telegram, modem/APN/SIM, and bridge runtime values.
 
 ### CI / Release Notes
 
@@ -307,7 +308,7 @@ firmware image that enters serial provisioning unless credentials already exist 
 | `WIFI_PASSWORD` | `hunter2` |
 | `TELEGRAM_BOT_TOKEN` | `123456:ABC-DEF...` |
 | `TELEGRAM_CHAT_ID` | `8024680950` |
-| `UI_LOCALE` *(optional)* | `zh` (default) or `en` |
+| `UI_LOCALE` *(optional)* | `en` (default) or `zh` |
 
 ## Agent Workflow and Context Management
 
@@ -424,7 +425,7 @@ Verify after every change:
 - `ScriptedModem` unconsumed steps → test failure (no silent pass)
 - Command count ≤ 10 (hard cap — adding one requires removing one)
 - `"smsgate"` NVS key set unchanged (4 keys only: im_cursor, reply_map, block_list, fwd_enabled)
-- `"smsgcfg"` NVS credential keys unchanged (7 keys: wifi_ssid/pass, bot_token, chat_id, apn/user/pass)
+- `"smsgcfg"` NVS runtime config keys unchanged (12 keys: wifi_ssid/pass, bot_token, chat_id, cellular_data/fallback, apn/user/pass, sim_pin, max_failures, poll_interval_ms)
 
 ## sdkconfig.defaults Known Quirk
 
@@ -482,8 +483,8 @@ fallback unless hardware logs prove both board and modem firmware accept only on
 SMS delivery still relies on stored-slot `+CMTI` plus `AT+CMGR=<index>`.
 
 **`AT+CPIN?` / SIM PIN**: startup checks SIM readiness before SMS and registration setup.
-When the modem reports `+CPIN: SIM PIN`, `[modem].sim_pin` must contain a 4-8 digit PIN;
-the firmware sends `AT+CPIN` once, waits for `+CPIN: READY`, and never logs the PIN. If
+When the modem reports `+CPIN: SIM PIN`, the runtime `sim_pin` value in NVS must contain
+a 4-8 digit PIN; the firmware sends `AT+CPIN` once, waits for `+CPIN: READY`, and never logs the PIN. If
 the modem reports `SIM PUK`, do not attempt PIN unlock in firmware; recover the SIM with
 carrier tooling first.
 

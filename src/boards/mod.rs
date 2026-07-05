@@ -4,6 +4,8 @@
 pub mod ta7670x;
 
 #[cfg(feature = "esp32")]
+use crate::creds::RuntimeConfig;
+#[cfg(feature = "esp32")]
 use crate::modem::ModemPort;
 #[cfg(feature = "esp32")]
 use std::sync::{Arc, Mutex};
@@ -36,5 +38,6 @@ pub trait Board {
     fn build_modem_port(
         &self,
         peripherals: &mut esp_idf_hal::peripherals::Peripherals,
+        config: &RuntimeConfig,
     ) -> Result<Arc<Mutex<dyn ModemPort + Send>>, BoardError>;
 }

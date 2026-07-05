@@ -15,7 +15,7 @@ use smsgate::{
     },
     commands::{builtin::*, CommandRegistry},
     config::Config,
-    creds::RuntimeCreds,
+    creds::RuntimeConfig,
     im::{
         telegram::{
             http::TelegramHttpClient,
@@ -74,20 +74,10 @@ fn main() {
     );
     let boot_ms = now_ms();
 
-    // ---- Board init ----
-    let mut peripherals = esp_idf_hal::peripherals::Peripherals::take().unwrap();
-    let board = TA7670X;
-    board.init(&mut peripherals).expect("board init failed");
-    let modem = board
-        .build_modem_port(&mut peripherals)
-        .expect("modem init failed");
-
-    // ---- NVS store (fall back to MemStore on NVS failure) ----
+    // ---- Runtime config (NVS, or compiled defaults when this image requests it) ----
     let nvs_partition = esp_idf_svc::nvs::EspDefaultNvsPartition::take().unwrap();
-
-    // ---- Runtime credentials (NVS, or compiled defaults when this image requests it) ----
-    let loaded_creds = RuntimeCreds::load(&nvs_partition);
-    let creds = RuntimeCreds::resolve_compiled_config(loaded_creds, Config::APPLY_COMPILED_CONFIG);
+    let loaded_creds = RuntimeConfig::load(&nvs_partition);
+    let creds = RuntimeConfig::resolve_compiled_config(loaded_creds, Config::APPLY_COMPILED_CONFIG);
     if Config::APPLY_COMPILED_CONFIG {
         if creds.save(&nvs_partition) {
             log::info!("[main] compile-time runtime config applied to NVS");
@@ -100,6 +90,15 @@ fn main() {
         serial_provision(&nvs_partition);
     }
 
+    // ---- Board init ----
+    let mut peripherals = esp_idf_hal::peripherals::Peripherals::take().unwrap();
+    let board = TA7670X;
+    board.init(&mut peripherals).expect("board init failed");
+    let modem = board
+        .build_modem_port(&mut peripherals, &creds)
+        .expect("modem init failed");
+
+    // ---- NVS store (fall back to MemStore on NVS failure) ----
     let nvs_failed: bool;
     let mut store: Box<dyn smsgate::persist::Store> = match NvsStore::new(nvs_partition) {
         Ok(nvs) => {
@@ -153,7 +152,7 @@ fn main() {
             elapsed_since(boot_ms, now_ms()),
             LogEvent::network("wifi", "failed after retries", false),
         );
-        if Config::CELLULAR_FALLBACK && !creds.apn.is_empty() {
+        if creds.cellular_fallback && !creds.apn.is_empty() {
             log::info!("[main] cellular fallback: attaching PDP context");
             match qhttp::attach_pdp(
                 &mut *lock!(modem),
@@ -331,6 +330,7 @@ fn main() {
     let modem_tg = modem.clone();
     let tg_token_poll = creds.bot_token.clone();
     let tg_chat_id_poll = creds.chat_id;
+    let tg_poll_interval_ms = creds.poll_interval_ms;
     let tg_transport_cellular = transport_cellular.clone();
     std::thread::Builder::new()
         .name("tg-poll".into())
@@ -437,7 +437,7 @@ fn main() {
                         }
                     }
                 }
-                let poll_secs = telegram_poll_timeout_secs(poll_cellular);
+                let poll_secs = telegram_poll_timeout_secs(poll_cellular, tg_poll_interval_ms);
                 match poll_messenger.poll(cursor, poll_secs) {
                     Ok(msgs) if !msgs.is_empty() => {
                         consecutive_poll_errors = 0;
@@ -987,7 +987,7 @@ fn main() {
                                 false,
                             ),
                         );
-                        if consecutive_failures >= Config::MAX_FAILURES {
+                        if consecutive_failures >= creds.max_failures_before_reboot {
                             log::error!("[main] max failures reached — rebooting");
                             esp_idf_hal::reset::restart();
                         }
@@ -1070,11 +1070,11 @@ fn build_telegram_messenger(
 }
 
 #[cfg(feature = "esp32")]
-fn telegram_poll_timeout_secs(use_cellular: bool) -> u32 {
+fn telegram_poll_timeout_secs(use_cellular: bool, poll_interval_ms: u32) -> u32 {
     if use_cellular {
         5
     } else {
-        (Config::POLL_INTERVAL_MS / 1000).clamp(1, 30)
+        (poll_interval_ms / 1000).clamp(1, 30)
     }
 }
 
@@ -1205,14 +1205,14 @@ fn sync_log_clock_from_modem(
 fn try_enable_cellular_fallback(
     reason: &str,
     modem: &std::sync::Arc<std::sync::Mutex<dyn smsgate::modem::ModemPort + Send>>,
-    creds: &RuntimeCreds,
+    creds: &RuntimeConfig,
     using_cellular: &mut bool,
     transport_cellular: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> bool {
     if *using_cellular {
         return true;
     }
-    if !Config::CELLULAR_FALLBACK || creds.apn.is_empty() {
+    if !creds.cellular_fallback || creds.apn.is_empty() {
         log::warn!(
             "[main] cellular fallback disabled or APN empty; staying on WiFi after {}",
             reason
@@ -1240,7 +1240,7 @@ fn recover_wifi_after_telegram_failure(
     reason: &str,
     wifi: &mut esp_idf_svc::wifi::BlockingWifi<esp_idf_svc::wifi::EspWifi<'static>>,
     modem: &std::sync::Arc<std::sync::Mutex<dyn smsgate::modem::ModemPort + Send>>,
-    creds: &RuntimeCreds,
+    creds: &RuntimeConfig,
     using_cellular: &mut bool,
     transport_cellular: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     log: &mut LogRing,
@@ -1632,38 +1632,83 @@ fn serial_provision(nvs_partition: &esp_idf_svc::nvs::EspDefaultNvsPartition) ->
         s.trim().to_string()
     };
 
+    let mut creds = RuntimeConfig::default();
+
     println!("WiFi SSID:");
-    let wifi_ssid = read();
+    let value = read();
+    if !value.is_empty() {
+        creds.wifi_ssid = value;
+    }
     println!("WiFi Password:");
-    let wifi_pass = read();
+    let value = read();
+    if !value.is_empty() {
+        creds.wifi_pass = value;
+    }
     println!("Telegram Bot Token:");
-    let bot_token = read();
+    let value = read();
+    if !value.is_empty() {
+        creds.bot_token = value;
+    }
     println!("Telegram Chat ID (integer):");
-    let chat_id_str = read();
-    let chat_id: i64 = chat_id_str.parse().unwrap_or(0);
+    let value = read();
+    if !value.is_empty() {
+        creds.chat_id = value.parse().unwrap_or(0);
+    }
+    println!("Attach cellular data during modem init? (true/false):");
+    let value = read();
+    if let Some(v) = parse_provision_bool(&value) {
+        creds.cellular_data = v;
+    }
+    println!("Use cellular fallback when WiFi fails? (true/false):");
+    let value = read();
+    if let Some(v) = parse_provision_bool(&value) {
+        creds.cellular_fallback = v;
+    }
     println!("APN (leave blank if not using cellular fallback):");
-    let apn = read();
+    let value = read();
+    if !value.is_empty() {
+        creds.apn = value;
+    }
     println!("APN Username (leave blank if none):");
-    let apn_user = read();
+    let value = read();
+    if !value.is_empty() {
+        creds.apn_user = value;
+    }
     println!("APN Password (leave blank if none):");
-    let apn_pass = read();
-
-    let creds = smsgate::creds::RuntimeCreds {
-        wifi_ssid,
-        wifi_pass,
-        bot_token,
-        chat_id,
-        apn,
-        apn_user,
-        apn_pass,
-    };
-
+    let value = read();
+    if !value.is_empty() {
+        creds.apn_pass = value;
+    }
+    println!("SIM PIN (4-8 digits, leave blank if disabled):");
+    let value = read();
+    if !value.is_empty() {
+        creds.sim_pin = value;
+    }
+    println!("Max Telegram send failures before reboot:");
+    let value = read();
+    if let Ok(v) = value.parse() {
+        creds.max_failures_before_reboot = v;
+    }
+    println!("Telegram poll interval in milliseconds:");
+    let value = read();
+    if let Ok(v) = value.parse() {
+        creds.poll_interval_ms = v;
+    }
     if creds.save(nvs_partition) {
-        println!("\nCredentials saved. Rebooting…");
+        println!("\nRuntime config saved. Rebooting…");
     } else {
         println!("\nERROR: NVS write failed. Rebooting — please try again.");
     }
 
     std::thread::sleep(std::time::Duration::from_millis(300));
     esp_idf_hal::reset::restart();
+}
+
+#[cfg(feature = "esp32")]
+fn parse_provision_bool(value: &str) -> Option<bool> {
+    match value.trim() {
+        "1" | "true" | "TRUE" | "True" | "yes" | "YES" | "on" | "ON" => Some(true),
+        "0" | "false" | "FALSE" | "False" | "no" | "NO" | "off" | "OFF" => Some(false),
+        _ => None,
+    }
 }
