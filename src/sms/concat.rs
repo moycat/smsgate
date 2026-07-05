@@ -49,7 +49,17 @@ impl Group {
     }
 
     fn assemble(&self) -> String {
-        self.parts.iter().filter_map(|p| p.as_deref()).collect()
+        let len = self
+            .parts
+            .iter()
+            .filter_map(|p| p.as_ref())
+            .map(String::len)
+            .sum();
+        let mut content = String::with_capacity(len);
+        for part in self.parts.iter().filter_map(|p| p.as_deref()) {
+            content.push_str(part);
+        }
+        content
     }
 
     fn is_expired(&self) -> bool {

@@ -1,5 +1,7 @@
 //! 中文 UI 字符串。
 
+use core::fmt::Write as _;
+
 // ── 系统 / 生命周期 ─────────────────────────────────────────────────────────
 
 pub fn started() -> &'static str {
@@ -61,12 +63,18 @@ pub fn ota_ignored_stale(name: &str) -> String {
 }
 
 fn format_bytes(bytes: u64) -> String {
+    let mut out = String::with_capacity(16);
+    push_format_bytes(&mut out, bytes);
+    out
+}
+
+fn push_format_bytes(out: &mut String, bytes: u64) {
     if bytes >= 1024 * 1024 {
-        format!("{:.2} MiB", bytes as f64 / (1024.0 * 1024.0))
+        let _ = write!(out, "{:.2} MiB", bytes as f64 / (1024.0 * 1024.0));
     } else if bytes >= 1024 {
-        format!("{:.1} KiB", bytes as f64 / 1024.0)
+        let _ = write!(out, "{:.1} KiB", bytes as f64 / 1024.0);
     } else {
-        format!("{} B", bytes)
+        let _ = write!(out, "{} B", bytes);
     }
 }
 
@@ -85,38 +93,41 @@ pub fn mms_notification(
     message_size: Option<u64>,
     expiry: Option<crate::mms::MmsExpiry>,
 ) -> String {
-    let mut lines = vec![
-        "📎 彩信通知（未下载内容）".to_string(),
-        format!("下载地址：{url}"),
-    ];
+    let mut out = String::with_capacity(url.len() + 96);
+    out.push_str("📎 彩信通知（未下载内容）\n下载地址：");
+    out.push_str(url);
     if let Some(bytes) = message_size {
-        lines.push(format!("大小：{}", format_bytes(bytes)));
+        out.push_str("\n大小：");
+        push_format_bytes(&mut out, bytes);
     }
     if let Some(expiry) = expiry {
-        lines.push(format!("过期：{}", format_mms_expiry(expiry)));
+        out.push_str("\n过期：");
+        push_mms_expiry(&mut out, expiry);
     }
-    lines.join("\n")
+    out
 }
 pub fn incoming_call(display: &str) -> String {
     format!("📞 来电：{}", display)
 }
 
-fn format_mms_expiry(expiry: crate::mms::MmsExpiry) -> String {
+fn push_mms_expiry(out: &mut String, expiry: crate::mms::MmsExpiry) {
     match expiry {
-        crate::mms::MmsExpiry::RelativeSeconds(seconds) => format_duration_after(seconds),
-        crate::mms::MmsExpiry::AbsoluteUnixSeconds(seconds) => format!("Unix 时间戳 {seconds}"),
+        crate::mms::MmsExpiry::RelativeSeconds(seconds) => push_duration_after(out, seconds),
+        crate::mms::MmsExpiry::AbsoluteUnixSeconds(seconds) => {
+            let _ = write!(out, "Unix 时间戳 {seconds}");
+        }
     }
 }
 
-fn format_duration_after(seconds: u64) -> String {
+fn push_duration_after(out: &mut String, seconds: u64) {
     if seconds.is_multiple_of(86_400) {
-        format!("收到后 {} 天", seconds / 86_400)
+        let _ = write!(out, "收到后 {} 天", seconds / 86_400);
     } else if seconds.is_multiple_of(3_600) {
-        format!("收到后 {} 小时", seconds / 3_600)
+        let _ = write!(out, "收到后 {} 小时", seconds / 3_600);
     } else if seconds.is_multiple_of(60) {
-        format!("收到后 {} 分钟", seconds / 60)
+        let _ = write!(out, "收到后 {} 分钟", seconds / 60);
     } else {
-        format!("收到后 {seconds} 秒")
+        let _ = write!(out, "收到后 {seconds} 秒");
     }
 }
 

@@ -1,5 +1,7 @@
 //! English UI strings.
 
+use core::fmt::Write as _;
+
 // ── System / lifecycle ────────────────────────────────────────────────────────
 
 pub fn started() -> &'static str {
@@ -61,12 +63,18 @@ pub fn ota_ignored_stale(name: &str) -> String {
 }
 
 fn format_bytes(bytes: u64) -> String {
+    let mut out = String::with_capacity(16);
+    push_format_bytes(&mut out, bytes);
+    out
+}
+
+fn push_format_bytes(out: &mut String, bytes: u64) {
     if bytes >= 1024 * 1024 {
-        format!("{:.2} MiB", bytes as f64 / (1024.0 * 1024.0))
+        let _ = write!(out, "{:.2} MiB", bytes as f64 / (1024.0 * 1024.0));
     } else if bytes >= 1024 {
-        format!("{:.1} KiB", bytes as f64 / 1024.0)
+        let _ = write!(out, "{:.1} KiB", bytes as f64 / 1024.0);
     } else {
-        format!("{} B", bytes)
+        let _ = write!(out, "{} B", bytes);
     }
 }
 
@@ -85,38 +93,41 @@ pub fn mms_notification(
     message_size: Option<u64>,
     expiry: Option<crate::mms::MmsExpiry>,
 ) -> String {
-    let mut lines = vec![
-        "📎 MMS notification (content not downloaded)".to_string(),
-        format!("URL: {url}"),
-    ];
+    let mut out = String::with_capacity(url.len() + 96);
+    out.push_str("📎 MMS notification (content not downloaded)\nURL: ");
+    out.push_str(url);
     if let Some(bytes) = message_size {
-        lines.push(format!("Size: {}", format_bytes(bytes)));
+        out.push_str("\nSize: ");
+        push_format_bytes(&mut out, bytes);
     }
     if let Some(expiry) = expiry {
-        lines.push(format!("Expires: {}", format_mms_expiry(expiry)));
+        out.push_str("\nExpires: ");
+        push_mms_expiry(&mut out, expiry);
     }
-    lines.join("\n")
+    out
 }
 pub fn incoming_call(display: &str) -> String {
     format!("📞 Incoming call from {}", display)
 }
 
-fn format_mms_expiry(expiry: crate::mms::MmsExpiry) -> String {
+fn push_mms_expiry(out: &mut String, expiry: crate::mms::MmsExpiry) {
     match expiry {
-        crate::mms::MmsExpiry::RelativeSeconds(seconds) => format_duration_after(seconds),
-        crate::mms::MmsExpiry::AbsoluteUnixSeconds(seconds) => format!("Unix timestamp {seconds}"),
+        crate::mms::MmsExpiry::RelativeSeconds(seconds) => push_duration_after(out, seconds),
+        crate::mms::MmsExpiry::AbsoluteUnixSeconds(seconds) => {
+            let _ = write!(out, "Unix timestamp {seconds}");
+        }
     }
 }
 
-fn format_duration_after(seconds: u64) -> String {
+fn push_duration_after(out: &mut String, seconds: u64) {
     if seconds.is_multiple_of(86_400) {
-        format!("{} d after notification", seconds / 86_400)
+        let _ = write!(out, "{} d after notification", seconds / 86_400);
     } else if seconds.is_multiple_of(3_600) {
-        format!("{} h after notification", seconds / 3_600)
+        let _ = write!(out, "{} h after notification", seconds / 3_600);
     } else if seconds.is_multiple_of(60) {
-        format!("{} min after notification", seconds / 60)
+        let _ = write!(out, "{} min after notification", seconds / 60);
     } else {
-        format!("{seconds} s after notification")
+        let _ = write!(out, "{seconds} s after notification");
     }
 }
 
