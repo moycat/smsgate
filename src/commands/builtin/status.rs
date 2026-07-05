@@ -36,6 +36,7 @@ impl Command for StatusCommand {
         let fwd_on =
             crate::persist::load_bool(ctx.store, crate::persist::keys::FWD_ENABLED).unwrap_or(true);
         let free_heap_kb = ctx.free_heap_bytes / 1024;
+        let min_free_heap_kb = ctx.min_free_heap_bytes / 1024;
 
         let last_sms_entry = ctx.log_ring.latest_of_kind(LogKind::Sms);
         let last_sms = last_sms_entry
@@ -50,6 +51,7 @@ impl Command for StatusCommand {
             &operator,
             ctx.modem_status.registered,
             free_heap_kb,
+            min_free_heap_kb,
             queue_n,
             blocked_n,
             log_n,

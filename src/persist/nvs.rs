@@ -3,6 +3,8 @@
 use super::{Store, StoreError};
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs, NvsDefault};
 
+const MAX_NVS_BLOB_BYTES: usize = 8192;
+
 /// ESP32 NVS-backed persistent store.
 pub struct NvsStore {
     nvs: EspNvs<NvsDefault>,
@@ -17,9 +19,26 @@ impl NvsStore {
 
 impl Store for NvsStore {
     fn load(&self, key: &str) -> Option<Vec<u8>> {
-        let mut buf = vec![0u8; 8192];
+        let len = match self.nvs.blob_len(key) {
+            Ok(Some(len)) if len <= MAX_NVS_BLOB_BYTES => len,
+            Ok(Some(len)) => {
+                log::warn!(
+                    "[persist] NVS blob {} length {} exceeds {} bytes",
+                    key,
+                    len,
+                    MAX_NVS_BLOB_BYTES
+                );
+                return None;
+            }
+            _ => return None,
+        };
+        let mut buf = vec![0u8; len];
         match self.nvs.get_blob(key, &mut buf) {
-            Ok(Some(slice)) => Some(slice.to_vec()),
+            Ok(Some(slice)) => {
+                let len = slice.len();
+                buf.truncate(len);
+                Some(buf)
+            }
             _ => None,
         }
     }

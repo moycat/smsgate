@@ -1,7 +1,9 @@
 //! Tests for Telegram health logging helpers.
 
 use smsgate::im::{
-    telegram::{poll_error_log_detail, poll_retry_after, should_log_poll_error},
+    telegram::{
+        poll_error_log_detail, poll_retry_after, should_log_poll_error, should_retry_send_error,
+    },
     MessengerError,
 };
 use std::time::Duration;
@@ -67,6 +69,30 @@ fn send_retry_delay_limits_attempts_to_one_per_30_seconds() {
         smsgate::im::telegram::send_retry_delay_after(Duration::from_secs(45)),
         Duration::ZERO
     );
+}
+
+#[test]
+fn send_retry_skips_nonrecoverable_api_errors() {
+    let error = MessengerError::Api(
+        "Bad Request: query is too old and response timeout expired".to_string(),
+    );
+
+    assert!(!should_retry_send_error(&error));
+    assert!(!should_retry_send_error(&MessengerError::RateLimited {
+        retry_after_secs: 5,
+        description: "Too Many Requests".to_string(),
+    }));
+    assert!(!should_retry_send_error(&MessengerError::Json(
+        "invalid response".to_string()
+    )));
+}
+
+#[test]
+fn send_retry_keeps_recovering_transport_errors() {
+    assert!(should_retry_send_error(&MessengerError::Http(
+        "tls reconnect failed".to_string()
+    )));
+    assert!(should_retry_send_error(&MessengerError::Disconnected));
 }
 
 #[test]

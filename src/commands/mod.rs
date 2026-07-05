@@ -27,6 +27,8 @@ pub struct CommandContext<'a> {
     pub uptime_ms: u32,
     /// Free heap in bytes (0 on host/tests; real value on device).
     pub free_heap_bytes: u32,
+    /// Minimum free heap in bytes since boot (0 on host/tests; real value on device).
+    pub min_free_heap_bytes: u32,
     /// WiFi status string ("" on host/tests).
     pub wifi_info: &'a str,
 }

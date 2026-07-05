@@ -37,6 +37,7 @@ pub fn poll_and_dispatch(
     modem_status: &ModemStatus,
     uptime_ms: u32,
     free_heap_bytes: u32,
+    min_free_heap_bytes: u32,
     wifi_info: &str,
 ) -> Result<DispatchOutcome, MessengerError> {
     let mut restart_requested = false;
@@ -59,6 +60,7 @@ pub fn poll_and_dispatch(
                     send_queue: sender,
                     uptime_ms,
                     free_heap_bytes,
+                    min_free_heap_bytes,
                     wifi_info,
                 };
                 let page = log_cmd::render_log_page(&ctx, offset);
@@ -94,6 +96,7 @@ pub fn poll_and_dispatch(
                     send_queue: sender,
                     uptime_ms,
                     free_heap_bytes,
+                    min_free_heap_bytes,
                     wifi_info,
                 };
                 let page = log_cmd::render_log_page(&ctx, log_cmd::parse_log_offset(args));
@@ -119,6 +122,7 @@ pub fn poll_and_dispatch(
                 send_queue: sender,
                 uptime_ms,
                 free_heap_bytes,
+                min_free_heap_bytes,
                 wifi_info,
             };
             if let Some(reply) = registry.dispatch(text, &ctx) {

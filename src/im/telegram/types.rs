@@ -8,9 +8,24 @@ use serde::Deserialize;
 /// Handles the characters that would produce invalid JSON: backslash,
 /// double-quote, and ASCII control characters.
 pub fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(json_escaped_len(s));
+    push_json_escaped(&mut out, s);
+    out
+}
+
+pub fn json_escaped_len(s: &str) -> usize {
+    s.chars()
+        .map(|ch| match ch {
+            '\\' | '"' | '\n' | '\r' | '\t' | '\u{08}' | '\u{0c}' => 2,
+            ch if ch <= '\u{1f}' => 6,
+            ch => ch.len_utf8(),
+        })
+        .sum()
+}
+
+pub fn push_json_escaped(out: &mut String, s: &str) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
 
-    let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {
             '\\' => out.push_str("\\\\"),
@@ -29,7 +44,6 @@ pub fn json_escape(s: &str) -> String {
             ch => out.push(ch),
         }
     }
-    out
 }
 
 #[derive(Debug, Deserialize)]

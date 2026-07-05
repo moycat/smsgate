@@ -134,6 +134,7 @@ fn log_command_sends_inline_keyboard_for_older_page() {
         &status,
         0,
         0,
+        0,
         "",
     )
     .unwrap();
@@ -166,6 +167,7 @@ fn log_callback_edits_existing_message() {
         &mut store,
         &log,
         &status,
+        0,
         0,
         0,
         "",
@@ -203,6 +205,7 @@ fn send_sentinel_enqueues_sms() {
         &mut store,
         &log,
         &status,
+        0,
         0,
         0,
         "",
@@ -253,6 +256,7 @@ fn send_short_body_reply_does_not_append_ellipsis() {
         &status,
         0,
         0,
+        0,
         "",
     )
     .unwrap();
@@ -294,6 +298,7 @@ fn send_sentinel_rate_limited_after_5() {
             &status,
             0,
             0,
+            0,
             "",
         )
         .unwrap();
@@ -317,6 +322,7 @@ fn send_sentinel_rate_limited_after_5() {
         &mut store,
         &log,
         &status,
+        0,
         0,
         0,
         "",
@@ -352,6 +358,7 @@ fn block_sentinel_adds_to_blocklist() {
         &status,
         0,
         0,
+        0,
         "",
     )
     .unwrap();
@@ -384,6 +391,7 @@ fn unblock_sentinel_removes_from_blocklist() {
         &status,
         0,
         0,
+        0,
         "",
     )
     .unwrap();
@@ -414,6 +422,7 @@ fn pause_sentinel_disables_forwarding() {
         &status,
         0,
         0,
+        0,
         "",
     )
     .unwrap();
@@ -442,6 +451,7 @@ fn pause_sentinel_returns_duration() {
         &mut store,
         &log,
         &status,
+        0,
         0,
         0,
         "",
@@ -479,6 +489,7 @@ fn resume_sentinel_enables_forwarding() {
         &status,
         0,
         0,
+        0,
         "",
     )
     .unwrap();
@@ -507,6 +518,7 @@ fn restart_sentinel_returns_true() {
         &mut store,
         &log,
         &status,
+        0,
         0,
         0,
         "",
@@ -540,6 +552,7 @@ fn block_sentinel_emits_user_log_event() {
         &mut store,
         &log,
         &status,
+        0,
         0,
         0,
         "",
@@ -576,6 +589,7 @@ fn reply_to_sms_enqueues_outbound() {
         &status,
         0,
         0,
+        0,
         "",
     )
     .unwrap();
@@ -605,6 +619,7 @@ fn non_command_non_reply_is_ignored() {
         &mut store,
         &log,
         &status,
+        0,
         0,
         0,
         "",
@@ -637,6 +652,7 @@ fn document_messages_are_not_dispatched_as_commands() {
         &status,
         0,
         64 * 1024,
+        0,
         "wifi",
     )
     .unwrap();
@@ -665,6 +681,7 @@ fn send_sentinel_body_with_pipe_char() {
         &mut store,
         &log,
         &status,
+        0,
         0,
         0,
         "",
@@ -699,6 +716,7 @@ fn send_sentinel_body_with_newline() {
         &status,
         0,
         0,
+        0,
         "",
     )
     .unwrap();
@@ -730,6 +748,7 @@ fn send_body_preview_truncated_at_50_chars() {
         &mut store,
         &log,
         &status,
+        0,
         0,
         0,
         "",
@@ -772,6 +791,7 @@ fn reply_to_unknown_id_does_not_enqueue() {
         &status,
         0,
         0,
+        0,
         "",
     )
     .unwrap();
@@ -798,6 +818,7 @@ fn unknown_command_sends_no_reply() {
         &mut store,
         &log,
         &status,
+        0,
         0,
         0,
         "",

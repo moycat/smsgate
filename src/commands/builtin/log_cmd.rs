@@ -49,13 +49,7 @@ pub fn render_log_page(ctx: &CommandContext, offset: usize) -> LogPage {
         out.push_str(crate::i18n::log_empty());
     } else {
         for e in &entries {
-            out.push_str(&format!(
-                "<blockquote><b>{}</b> {} - {}: {}</blockquote>\n",
-                html_escape(&e.timestamp),
-                e.kind.label(),
-                html_escape(&e.sender),
-                html_escape(&e.body_preview)
-            ));
+            push_log_entry_html(&mut out, e);
         }
     }
     LogPage {
@@ -69,10 +63,27 @@ pub fn render_log_page(ctx: &CommandContext, offset: usize) -> LogPage {
     }
 }
 
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+fn push_log_entry_html(out: &mut String, entry: &crate::log_ring::LogEntry) {
+    out.push_str("<blockquote><b>");
+    push_html_escaped(out, &entry.timestamp);
+    out.push_str("</b> ");
+    out.push_str(entry.kind.label());
+    out.push_str(" - ");
+    push_html_escaped(out, &entry.sender);
+    out.push_str(": ");
+    push_html_escaped(out, &entry.body_preview);
+    out.push_str("</blockquote>\n");
+}
+
+fn push_html_escaped(out: &mut String, s: &str) {
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
 }
 
 fn log_keyboard(total: usize, offset: usize, page_len: usize) -> Option<InlineKeyboard> {

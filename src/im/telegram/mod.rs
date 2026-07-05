@@ -84,6 +84,13 @@ pub fn should_restart_after_send_retry(elapsed: Duration) -> bool {
     elapsed >= telegram_restart_after()
 }
 
+pub fn should_retry_send_error(error: &MessengerError) -> bool {
+    matches!(
+        error,
+        MessengerError::Http(_) | MessengerError::Disconnected
+    )
+}
+
 pub fn build_send_message_body(
     chat_id: i64,
     text: &str,
@@ -197,6 +204,29 @@ pub fn build_get_file_body(file_id: &str) -> String {
     body
 }
 
+/// Build a `setMyCommands` request body.
+pub fn build_set_my_commands_body(commands: &[(&str, &str)]) -> String {
+    let capacity = commands
+        .iter()
+        .fold(r#"{"commands":[]}"#.len(), |acc, (name, desc)| {
+            acc + 32 + types::json_escaped_len(name) + types::json_escaped_len(desc)
+        });
+    let mut body = String::with_capacity(capacity);
+    body.push_str(r#"{"commands":["#);
+    for (idx, (name, desc)) in commands.iter().enumerate() {
+        if idx > 0 {
+            body.push(',');
+        }
+        body.push_str(r#"{"command":"#);
+        push_json_string(&mut body, name);
+        body.push_str(r#","description":"#);
+        push_json_string(&mut body, desc);
+        body.push('}');
+    }
+    body.push_str("]}");
+    body
+}
+
 fn push_json_string_field(body: &mut String, name: &str, value: &str) {
     body.push_str(r#",""#);
     body.push_str(name);
@@ -206,7 +236,7 @@ fn push_json_string_field(body: &mut String, name: &str, value: &str) {
 
 fn push_json_string(body: &mut String, value: &str) {
     body.push('"');
-    body.push_str(&types::json_escape(value));
+    types::push_json_escaped(body, value);
     body.push('"');
 }
 
@@ -388,11 +418,11 @@ impl TelegramMessenger {
 
     /// Register bot commands with Telegram (called once at startup).
     pub fn register_commands(&mut self, commands: &[(&str, &str)]) -> Result<(), MessengerError> {
-        let cmds_json: Vec<String> = commands
-            .iter()
-            .map(|(name, desc)| format!(r#"{{"command":"{}","description":"{}"}}"#, name, desc))
-            .collect();
-        let body = format!(r#"{{"commands":[{}]}}"#, cmds_json.join(","));
+        let body = build_set_my_commands_body(commands);
+        self.register_commands_body(&body)
+    }
+
+    fn register_commands_body(&mut self, body: &str) -> Result<(), MessengerError> {
         let result: ApiResult<bool> = self.post_and_parse("setMyCommands", &body)?;
         Self::check_ok(result)?;
         Ok(())

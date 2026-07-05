@@ -4,8 +4,9 @@
 //! owns the outbound client for notifications and command replies.
 
 use super::{
-    http::TelegramHttpClient, send_retry_delay_after, should_restart_after_send_retry,
-    telegram_restart_after, telegram_send_retry_interval, TelegramMessenger,
+    build_set_my_commands_body, http::TelegramHttpClient, send_retry_delay_after,
+    should_restart_after_send_retry, should_retry_send_error, telegram_restart_after,
+    telegram_send_retry_interval, TelegramMessenger,
 };
 use crate::im::{InlineKeyboard, MessageFormat, MessageId, MessageSink, MessengerError};
 use crate::log_ring::LogEvent;
@@ -81,6 +82,10 @@ where
                     ),
                 );
 
+                if !should_retry_send_error(&e) {
+                    return Err(e);
+                }
+
                 if should_restart_after_send_retry(total_elapsed) {
                     let detail = format!(
                         "{} retrying for {}s; rebooting: {}",
@@ -135,7 +140,7 @@ enum Request {
         reply: SyncSender<Result<(), MessengerError>>,
     },
     RegisterCommands {
-        commands: Vec<(String, String)>,
+        body: String,
         reply: SyncSender<Result<(), MessengerError>>,
     },
 }
@@ -202,7 +207,7 @@ impl TelegramSendWorker {
                                     },
                                     None => Err(MessengerError::Disconnected),
                                 };
-                                if result.is_err() {
+                                if result.as_ref().err().is_some_and(should_retry_send_error) {
                                     messenger = None;
                                 }
                                 result
@@ -237,7 +242,7 @@ impl TelegramSendWorker {
                                         },
                                         None => Err(MessengerError::Disconnected),
                                     };
-                                    if result.is_err() {
+                                    if result.as_ref().err().is_some_and(should_retry_send_error) {
                                         messenger = None;
                                     }
                                     result
@@ -265,14 +270,14 @@ impl TelegramSendWorker {
                                         ),
                                         None => Err(MessengerError::Disconnected),
                                     };
-                                    if result.is_err() {
+                                    if result.as_ref().err().is_some_and(should_retry_send_error) {
                                         messenger = None;
                                     }
                                     result
                                 });
                             let _ = reply.send(result);
                         }
-                        Request::RegisterCommands { commands, reply } => {
+                        Request::RegisterCommands { body, reply } => {
                             let result =
                                 run_with_retries("setMyCommands", &worker_event_tx, || {
                                     ensure_worker_messenger(
@@ -283,16 +288,10 @@ impl TelegramSendWorker {
                                         chat_id,
                                     );
                                     let result = match messenger.as_mut() {
-                                        Some(m) => {
-                                            let refs: Vec<(&str, &str)> = commands
-                                                .iter()
-                                                .map(|(name, desc)| (name.as_str(), desc.as_str()))
-                                                .collect();
-                                            m.register_commands(&refs)
-                                        }
+                                        Some(m) => m.register_commands_body(&body),
                                         None => Err(MessengerError::Disconnected),
                                     };
-                                    if result.is_err() {
+                                    if result.as_ref().err().is_some_and(should_retry_send_error) {
                                         messenger = None;
                                     }
                                     result
@@ -309,12 +308,9 @@ impl TelegramSendWorker {
 
     pub fn register_commands(&mut self, commands: &[(&str, &str)]) -> Result<(), MessengerError> {
         let (reply, rx) = sync_channel(1);
-        let commands = commands
-            .iter()
-            .map(|(name, desc)| ((*name).to_string(), (*desc).to_string()))
-            .collect();
+        let body = build_set_my_commands_body(commands);
         self.tx
-            .send(Request::RegisterCommands { commands, reply })
+            .send(Request::RegisterCommands { body, reply })
             .map_err(|_| MessengerError::Disconnected)?;
         self.wait_for_reply("setMyCommands", rx)
     }

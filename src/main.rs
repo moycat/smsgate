@@ -936,6 +936,7 @@ fn main() {
             }
             if tg_messages.iter().any(|m| m.document.is_none()) {
                 let free_heap = unsafe { esp_idf_sys::esp_get_free_heap_size() };
+                let min_free_heap = unsafe { esp_idf_sys::esp_get_minimum_free_heap_size() };
                 match poll_and_dispatch(
                     &tg_messages,
                     &mut messenger,
@@ -947,6 +948,7 @@ fn main() {
                     &modem_status,
                     uptime_ms,
                     free_heap,
+                    min_free_heap,
                     &wifi_info,
                 ) {
                     Ok(outcome) => {

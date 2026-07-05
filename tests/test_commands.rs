@@ -37,6 +37,7 @@ fn ctx<'a>(
         send_queue: queue,
         uptime_ms: 12345,
         free_heap_bytes: 0,
+        min_free_heap_bytes: 0,
         wifi_info: "",
     }
 }
@@ -103,6 +104,7 @@ fn status_command_shows_uptime() {
         send_queue: &queue,
         uptime_ms: 3_661_000,
         free_heap_bytes: 0,
+        min_free_heap_bytes: 0,
         wifi_info: "",
     };
     let cmd = StatusCommand;
@@ -126,6 +128,29 @@ fn status_command_paused_shown() {
     let ctx = ctx(&store, &status, &log, &queue);
     let result = StatusCommand.handle("", &ctx);
     assert!(result.contains(i18n::status_fwd_off()));
+}
+
+#[test]
+fn status_command_shows_current_and_minimum_heap() {
+    let store = MemStore::new();
+    let status = ModemStatus::default();
+    let log = LogRing::new();
+    let queue = SmsSender::new();
+    let ctx = CommandContext {
+        store: &store,
+        modem_status: &status,
+        log_ring: &log,
+        send_queue: &queue,
+        uptime_ms: 0,
+        free_heap_bytes: 48 * 1024,
+        min_free_heap_bytes: 20 * 1024,
+        wifi_info: "",
+    };
+
+    let result = StatusCommand.handle("", &ctx);
+
+    assert!(result.contains("48 KB"), "current heap missing: {result}");
+    assert!(result.contains("20 KB"), "minimum heap missing: {result}");
 }
 
 #[test]
@@ -451,6 +476,7 @@ fn status_command_unknown_signal_and_operator() {
         send_queue: &queue,
         uptime_ms: 0,
         free_heap_bytes: 0,
+        min_free_heap_bytes: 0,
         wifi_info: "",
     };
     let result = StatusCommand.handle("", &ctx);

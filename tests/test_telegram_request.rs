@@ -5,6 +5,7 @@
 use smsgate::im::telegram::{
     build_edit_message_text_body, build_edit_message_text_body_with_format, build_get_file_body,
     build_get_updates_body, build_send_message_body, build_send_message_body_with_format,
+    build_set_my_commands_body,
 };
 use smsgate::im::{InlineKeyboard, InlineKeyboardButton, MessageFormat};
 
@@ -30,6 +31,17 @@ fn get_file_body_uses_file_id() {
     let body = build_get_file_body("BQACAgUAAxkBAAIB");
 
     assert_eq!(body, r#"{"file_id":"BQACAgUAAxkBAAIB"}"#);
+}
+
+#[test]
+fn set_my_commands_body_escapes_command_descriptions() {
+    let body =
+        build_set_my_commands_body(&[("status", "device \"status\""), ("log", "tail \\ log")]);
+
+    assert_eq!(
+        body,
+        r#"{"commands":[{"command":"status","description":"device \"status\""},{"command":"log","description":"tail \\ log"}]}"#
+    );
 }
 
 #[test]

@@ -150,6 +150,7 @@ pub fn format_status(
     operator: &str,
     registered: bool,
     free_heap_kb: u32,
+    min_free_heap_kb: u32,
     queue_n: usize,
     blocked_n: usize,
     log_n: usize,
@@ -173,7 +174,14 @@ pub fn format_status(
         format!("📶 WiFi: {}\n", wifi_info)
     };
     let heap_line = if free_heap_kb > 0 {
-        format!("💾 Heap: {} KB free\n", free_heap_kb)
+        if min_free_heap_kb > 0 {
+            format!(
+                "💾 Heap: {} KB free, {} KB minimum\n",
+                free_heap_kb, min_free_heap_kb
+            )
+        } else {
+            format!("💾 Heap: {} KB free\n", free_heap_kb)
+        }
     } else {
         String::new()
     };

@@ -86,49 +86,62 @@ impl LogEntry {
     }
 
     fn encode_payload(&self) -> Result<Vec<u8>, FlashLogError> {
-        let mut sender = self.sender.clone();
-        let mut body_preview = self.body_preview.clone();
-        loop {
-            let payload = self.encode_payload_fields(&sender, &body_preview);
-            if payload.len() <= FLASH_LOG_PAYLOAD_SIZE {
-                return Ok(payload.into_bytes());
-            }
-            if !body_preview.is_empty() {
-                body_preview.pop();
-            } else if !sender.is_empty() {
-                sender.pop();
-            } else {
-                return Err(FlashLogError::EntryTooLarge {
-                    len: payload.len(),
-                    max: FLASH_LOG_PAYLOAD_SIZE,
-                });
-            }
+        let kind = self.kind.as_str();
+        let forwarded = if self.forwarded { "1" } else { "0" };
+        let timestamp_len = escaped_field_len(&self.timestamp);
+        let base_len = 1 + 1 + kind.len() + 1 + forwarded.len() + 1 + timestamp_len + 1 + 1;
+        if base_len > FLASH_LOG_PAYLOAD_SIZE {
+            return Err(FlashLogError::EntryTooLarge {
+                len: base_len,
+                max: FLASH_LOG_PAYLOAD_SIZE,
+            });
         }
-    }
 
-    fn encode_payload_fields(&self, sender: &str, body_preview: &str) -> String {
-        format!(
-            "1\t{}\t{}\t{}\t{}\t{}",
-            self.kind.as_str(),
-            if self.forwarded { "1" } else { "0" },
-            escape_field(&self.timestamp),
-            escape_field(sender),
-            escape_field(body_preview)
-        )
+        let available = FLASH_LOG_PAYLOAD_SIZE - base_len;
+        let sender_len = escaped_field_len(&self.sender);
+        let (sender_budget, body_budget) = if sender_len <= available {
+            (sender_len, available - sender_len)
+        } else {
+            (available, 0)
+        };
+
+        let mut payload = String::with_capacity(FLASH_LOG_PAYLOAD_SIZE.min(
+            base_len + sender_budget + escaped_field_len(&self.body_preview).min(body_budget),
+        ));
+        payload.push('1');
+        payload.push('\t');
+        payload.push_str(kind);
+        payload.push('\t');
+        payload.push_str(forwarded);
+        payload.push('\t');
+        push_escaped_field(&mut payload, &self.timestamp);
+        payload.push('\t');
+        push_escaped_field_truncated(&mut payload, &self.sender, sender_budget);
+        payload.push('\t');
+        push_escaped_field_truncated(&mut payload, &self.body_preview, body_budget);
+        Ok(payload.into_bytes())
     }
 
     fn decode_payload(bytes: &[u8]) -> Option<Self> {
         let payload = core::str::from_utf8(bytes).ok()?;
-        let parts: Vec<&str> = payload.split('\t').collect();
-        if parts.len() != 6 || parts[0] != "1" {
+        let mut parts = payload.split('\t');
+        if parts.next()? != "1" {
+            return None;
+        }
+        let kind = parts.next()?;
+        let forwarded = parts.next()?;
+        let timestamp = parts.next()?;
+        let sender = parts.next()?;
+        let body_preview = parts.next()?;
+        if parts.next().is_some() {
             return None;
         }
         Some(Self {
-            kind: LogKind::parse(parts[1])?,
-            forwarded: parts[2] == "1",
-            timestamp: unescape_field(parts[3]),
-            sender: unescape_field(parts[4]),
-            body_preview: unescape_field(parts[5]),
+            kind: LogKind::parse(kind)?,
+            forwarded: forwarded == "1",
+            timestamp: unescape_field(timestamp),
+            sender: unescape_field(sender),
+            body_preview: unescape_field(body_preview),
         })
     }
 }
@@ -298,8 +311,20 @@ impl<T: LogFlashStorage + ?Sized> LogFlashStorage for Box<T> {
 #[derive(Debug)]
 struct DecodedRecord {
     seq: u32,
-    slot: usize,
     entry: LogEntry,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RecordHeader {
+    seq: u32,
+    slot: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RecordSummary {
+    seq: u32,
+    slot: usize,
+    kind: LogKind,
 }
 
 pub struct FlashLogRing<S: LogFlashStorage> {
@@ -325,17 +350,17 @@ impl<S: LogFlashStorage> FlashLogRing<S> {
 
         let slots = size / FLASH_LOG_RECORD_SIZE;
         let slots_per_erase = erase_size / FLASH_LOG_RECORD_SIZE;
-        let records = scan_records(&mut storage, slots)?;
-        let (next_seq, next_slot) = records
+        let headers = scan_record_headers(&mut storage, slots)?;
+        let (next_seq, next_slot) = headers
             .iter()
-            .max_by_key(|record| record.seq)
-            .map(|record| {
-                let next_seq = if record.seq == u32::MAX {
+            .max_by_key(|header| header.seq)
+            .map(|header| {
+                let next_seq = if header.seq == u32::MAX {
                     1
                 } else {
-                    record.seq + 1
+                    header.seq + 1
                 };
-                (next_seq, (record.slot + 1) % slots)
+                (next_seq, (header.slot + 1) % slots)
             })
             .unwrap_or((1, 0));
 
@@ -384,44 +409,61 @@ impl<S: LogFlashStorage> FlashLogRing<S> {
     }
 
     pub fn last_n(&mut self, n: usize) -> Result<Vec<LogEntry>, FlashLogError> {
-        let entries = self.entries()?;
-        let start = entries.len().saturating_sub(n);
-        Ok(entries.into_iter().skip(start).collect())
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+        let headers = newest_record_headers(&mut self.storage, self.slots, n)?;
+        let mut entries = Vec::with_capacity(headers.len());
+        for header in &headers {
+            if let Some(record) = read_record(&mut self.storage, header.slot)? {
+                entries.push(record.entry);
+            }
+        }
+        Ok(entries)
     }
 
     pub fn latest_of_kind(&mut self, kind: LogKind) -> Result<Option<LogEntry>, FlashLogError> {
-        let mut latest: Option<DecodedRecord> = None;
+        let mut latest: Option<RecordSummary> = None;
         for slot in 0..self.slots {
-            let Some(record) = read_record(&mut self.storage, slot)? else {
+            let Some(summary) = read_record_summary(&mut self.storage, slot)? else {
                 continue;
             };
-            if record.entry.kind != kind {
+            if summary.kind != kind {
                 continue;
             }
             let replace = match latest.as_ref() {
-                Some(current) => record.seq > current.seq,
+                Some(current) => summary.seq > current.seq,
                 None => true,
             };
             if replace {
-                latest = Some(record);
+                latest = Some(summary);
             }
         }
-        Ok(latest.map(|record| record.entry))
+        let Some(summary) = latest else {
+            return Ok(None);
+        };
+        Ok(read_record(&mut self.storage, summary.slot)?.map(|record| record.entry))
     }
 
     pub fn page(&mut self, offset: usize, limit: usize) -> Result<Vec<LogEntry>, FlashLogError> {
-        let entries = self.entries()?;
-        let end = entries.len().saturating_sub(offset);
-        let start = end.saturating_sub(limit);
-        let mut page: Vec<_> = entries.into_iter().skip(start).take(end - start).collect();
-        page.reverse();
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let keep = offset.saturating_add(limit);
+        let headers = newest_record_headers(&mut self.storage, self.slots, keep)?;
+        let mut page = Vec::with_capacity(limit.min(headers.len().saturating_sub(offset)));
+        for header in headers.iter().rev().skip(offset).take(limit) {
+            if let Some(record) = read_record(&mut self.storage, header.slot)? {
+                page.push(record.entry);
+            }
+        }
         Ok(page)
     }
 
     pub fn entry_count(&mut self) -> Result<usize, FlashLogError> {
         let mut count = 0;
         for slot in 0..self.slots {
-            if read_record(&mut self.storage, slot)?.is_some() {
+            if read_record_header(&mut self.storage, slot)?.is_some() {
                 count += 1;
             }
         }
@@ -446,12 +488,87 @@ fn scan_records<S: LogFlashStorage>(
     Ok(records)
 }
 
+fn scan_record_headers<S: LogFlashStorage>(
+    storage: &mut S,
+    slots: usize,
+) -> Result<Vec<RecordHeader>, FlashLogError> {
+    let mut headers = Vec::new();
+    for slot in 0..slots {
+        if let Some(header) = read_record_header(storage, slot)? {
+            headers.push(header);
+        }
+    }
+    Ok(headers)
+}
+
+fn newest_record_headers<S: LogFlashStorage>(
+    storage: &mut S,
+    slots: usize,
+    limit: usize,
+) -> Result<Vec<RecordHeader>, FlashLogError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut headers = Vec::with_capacity(limit.min(slots));
+    for slot in 0..slots {
+        let Some(header) = read_record_header(storage, slot)? else {
+            continue;
+        };
+        insert_newest_header(&mut headers, header, limit);
+    }
+    Ok(headers)
+}
+
+fn insert_newest_header(headers: &mut Vec<RecordHeader>, header: RecordHeader, limit: usize) {
+    let insert_at = headers
+        .binary_search_by_key(&header.seq, |existing| existing.seq)
+        .unwrap_or_else(|index| index);
+    if headers.len() < limit {
+        headers.insert(insert_at, header);
+    } else if insert_at > 0 {
+        headers.remove(0);
+        headers.insert(insert_at - 1, header);
+    }
+}
+
+fn read_record_header<S: LogFlashStorage>(
+    storage: &mut S,
+    slot: usize,
+) -> Result<Option<RecordHeader>, FlashLogError> {
+    let mut record = [0u8; FLASH_LOG_RECORD_SIZE];
+    Ok(read_record_meta(storage, slot, &mut record)?.map(|(seq, _len)| RecordHeader { seq, slot }))
+}
+
+fn read_record_summary<S: LogFlashStorage>(
+    storage: &mut S,
+    slot: usize,
+) -> Result<Option<RecordSummary>, FlashLogError> {
+    let mut record = [0u8; FLASH_LOG_RECORD_SIZE];
+    let Some((seq, len)) = read_record_meta(storage, slot, &mut record)? else {
+        return Ok(None);
+    };
+    let payload = &record[FLASH_LOG_HEADER_SIZE..FLASH_LOG_HEADER_SIZE + len];
+    Ok(record_payload_kind(payload).map(|kind| RecordSummary { seq, slot, kind }))
+}
+
 fn read_record<S: LogFlashStorage>(
     storage: &mut S,
     slot: usize,
 ) -> Result<Option<DecodedRecord>, FlashLogError> {
     let mut record = [0u8; FLASH_LOG_RECORD_SIZE];
-    storage.read(slot * FLASH_LOG_RECORD_SIZE, &mut record)?;
+    let Some((seq, len)) = read_record_meta(storage, slot, &mut record)? else {
+        return Ok(None);
+    };
+    let payload = &record[FLASH_LOG_HEADER_SIZE..FLASH_LOG_HEADER_SIZE + len];
+    Ok(LogEntry::decode_payload(payload).map(|entry| DecodedRecord { seq, entry }))
+}
+
+fn read_record_meta<S: LogFlashStorage>(
+    storage: &mut S,
+    slot: usize,
+    record: &mut [u8; FLASH_LOG_RECORD_SIZE],
+) -> Result<Option<(u32, usize)>, FlashLogError> {
+    storage.read(slot * FLASH_LOG_RECORD_SIZE, record)?;
     if record.iter().all(|b| *b == 0xFF) {
         return Ok(None);
     }
@@ -472,7 +589,16 @@ fn read_record<S: LogFlashStorage>(
         return Ok(None);
     }
 
-    Ok(LogEntry::decode_payload(payload).map(|entry| DecodedRecord { seq, slot, entry }))
+    Ok(Some((seq, len)))
+}
+
+fn record_payload_kind(payload: &[u8]) -> Option<LogKind> {
+    let payload = core::str::from_utf8(payload).ok()?;
+    let mut parts = payload.split('\t');
+    if parts.next()? != "1" {
+        return None;
+    }
+    LogKind::parse(parts.next()?)
 }
 
 fn checksum(bytes: &[u8]) -> u32 {
@@ -484,8 +610,17 @@ fn checksum(bytes: &[u8]) -> u32 {
     hash
 }
 
-fn escape_field(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
+fn escaped_field_len(input: &str) -> usize {
+    input
+        .chars()
+        .map(|ch| match ch {
+            '\\' | '\t' | '\n' | '\r' => 2,
+            _ => ch.len_utf8(),
+        })
+        .sum()
+}
+
+fn push_escaped_field(out: &mut String, input: &str) {
     for ch in input.chars() {
         match ch {
             '\\' => out.push_str("\\\\"),
@@ -495,7 +630,27 @@ fn escape_field(input: &str) -> String {
             _ => out.push(ch),
         }
     }
-    out
+}
+
+fn push_escaped_field_truncated(out: &mut String, input: &str, max_escaped_bytes: usize) {
+    let mut used = 0;
+    for ch in input.chars() {
+        let encoded_len = match ch {
+            '\\' | '\t' | '\n' | '\r' => 2,
+            _ => ch.len_utf8(),
+        };
+        if used + encoded_len > max_escaped_bytes {
+            break;
+        }
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(ch),
+        }
+        used += encoded_len;
+    }
 }
 
 fn unescape_field(input: &str) -> String {
