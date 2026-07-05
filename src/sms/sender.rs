@@ -166,19 +166,17 @@ impl SmsSender {
         let entry = &mut self.entries[idx];
         entry.attempts += 1;
         let attempt = entry.attempts;
-        let phone = entry.phone.clone();
-        let body = entry.body.clone();
 
         log::info!(
             "[sender] attempt {} for {} ({}..)",
             attempt,
-            phone,
-            &body[..body.len().min(20)]
+            entry.phone,
+            crate::text::char_prefix(&entry.body, 20).0
         );
 
-        let pdus = build_sms_submit_pdus(&phone, &body, super::MAX_SMS_PARTS, false);
+        let pdus = build_sms_submit_pdus(&entry.phone, &entry.body, super::MAX_SMS_PARTS, false);
         if pdus.is_empty() {
-            log::error!("[sender] PDU build failed for {} — dropping", phone);
+            log::error!("[sender] PDU build failed for {} — dropping", entry.phone);
             self.entries.remove(idx);
             return DrainOutcome::BadPdu;
         }
@@ -198,12 +196,15 @@ impl SmsSender {
         }
 
         if success {
-            self.entries.remove(idx);
-            DrainOutcome::Sent { phone }
+            let entry = self.entries.remove(idx);
+            DrainOutcome::Sent { phone: entry.phone }
         } else if attempt >= MAX_ATTEMPTS {
-            log::error!("[sender] max attempts reached for {}, dropping", phone);
-            self.entries.remove(idx);
-            DrainOutcome::Dropped { phone }
+            log::error!(
+                "[sender] max attempts reached for {}, dropping",
+                self.entries[idx].phone
+            );
+            let entry = self.entries.remove(idx);
+            DrainOutcome::Dropped { phone: entry.phone }
         } else {
             let delay = RETRY_DELAYS
                 .get(attempt - 1)
