@@ -100,13 +100,13 @@ pub fn read_stored_sms(mem: &str, modem: &mut dyn ModemPort) -> Vec<StoredSms> {
     );
 
     let mut stored = Vec::new();
-    let mut current: Option<(ListHeader, Vec<String>)> = None;
+    let mut current: Option<PendingListEntry> = None;
     for line in resp.body.lines().map(str::trim).filter(|l| !l.is_empty()) {
         if let Some(header) = parse_cmgl_header(line) {
             flush_list_entry(mem, &mut stored, current.take());
-            current = Some((header, Vec::new()));
-        } else if let Some((_, body_lines)) = current.as_mut() {
-            body_lines.push(line.to_string());
+            current = Some(PendingListEntry::new(header));
+        } else if let Some(entry) = current.as_mut() {
+            entry.push_body_line(line);
         }
     }
     flush_list_entry(mem, &mut stored, current);
@@ -252,13 +252,12 @@ fn parse_cmgr_response(mem: &str, index: u16, body: &str) -> Option<StoredSms> {
     while let Some(line) = lines.next() {
         let rest = line.strip_prefix("+CMGR:")?.trim();
         if rest.starts_with('"') {
-            let fields = parse_at_csv(rest);
-            if fields.len() < 4 {
-                return None;
-            }
-            let sender = decode_modem_text(&fields[1]);
-            let timestamp = fields[3].trim().to_string();
-            let text = lines.collect::<Vec<_>>().join("\n");
+            let mut fields = AtCsvFields::new(rest);
+            let _status = fields.next()?;
+            let sender = decode_modem_text(fields.next()?);
+            let _alpha = fields.next()?;
+            let timestamp = fields.next()?.to_string();
+            let text = collect_remaining_sms_body(&mut lines);
             return Some(StoredSms::decoded(
                 mem,
                 index,
@@ -277,33 +276,54 @@ fn parse_cmgr_response(mem: &str, index: u16, body: &str) -> Option<StoredSms> {
 
 fn parse_cmgl_header(line: &str) -> Option<ListHeader> {
     let rest = line.strip_prefix("+CMGL:")?.trim();
-    let fields = parse_at_csv(rest);
-    let index = fields.first()?.trim().parse().ok()?;
+    let mut fields = AtCsvFields::new(rest);
+    let index = fields.next()?.parse().ok()?;
+    let status = fields.next()?;
 
-    if fields.len() >= 5 && !fields[1].chars().all(|c| c.is_ascii_digit()) {
+    if !status.chars().all(|c| c.is_ascii_digit()) {
+        let sender = fields.next()?;
+        let _alpha = fields.next()?;
+        let timestamp = fields.next()?;
         return Some(ListHeader::Text {
             index,
-            sender: decode_modem_text(&fields[2]),
-            timestamp: fields[4].trim().to_string(),
+            sender: decode_modem_text(sender),
+            timestamp: timestamp.to_string(),
         });
     }
 
     Some(ListHeader::Pdu { index })
 }
 
-fn flush_list_entry(
-    mem: &str,
-    stored: &mut Vec<StoredSms>,
-    entry: Option<(ListHeader, Vec<String>)>,
-) {
-    let Some((header, body_lines)) = entry else {
+struct PendingListEntry {
+    header: ListHeader,
+    body: String,
+}
+
+impl PendingListEntry {
+    fn new(header: ListHeader) -> Self {
+        Self {
+            header,
+            body: String::new(),
+        }
+    }
+
+    fn push_body_line(&mut self, line: &str) {
+        if !self.body.is_empty() {
+            self.body.push('\n');
+        }
+        self.body.push_str(line);
+    }
+}
+
+fn flush_list_entry(mem: &str, stored: &mut Vec<StoredSms>, entry: Option<PendingListEntry>) {
+    let Some(PendingListEntry { header, body }) = entry else {
         return;
     };
     match header {
         ListHeader::Pdu { index } => {
-            if let Some(hex) = body_lines.first() {
+            if !body.is_empty() {
                 log::info!("[sms_handler] sweep found SMS in {} slot {}", mem, index);
-                stored.push(StoredSms::pdu(mem, index, hex.trim().to_string()));
+                stored.push(StoredSms::pdu(mem, index, body));
             }
         }
         ListHeader::Text {
@@ -317,29 +337,69 @@ fn flush_list_entry(
                 index,
                 sender,
                 timestamp,
-                decode_modem_text(&body_lines.join("\n")),
+                decode_modem_text(&body),
             ));
         }
     }
 }
 
-fn parse_at_csv(input: &str) -> Vec<String> {
-    let mut fields = Vec::new();
-    let mut current = String::new();
-    let mut in_quotes = false;
+fn collect_remaining_sms_body<'a>(lines: &mut impl Iterator<Item = &'a str>) -> String {
+    let mut body = String::new();
+    for line in lines {
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        body.push_str(line);
+    }
+    body
+}
 
-    for ch in input.chars() {
-        match ch {
-            '"' => in_quotes = !in_quotes,
-            ',' if !in_quotes => {
-                fields.push(current.trim().to_string());
-                current.clear();
-            }
-            _ => current.push(ch),
+struct AtCsvFields<'a> {
+    input: &'a str,
+    finished: bool,
+}
+
+impl<'a> AtCsvFields<'a> {
+    fn new(input: &'a str) -> Self {
+        Self {
+            input,
+            finished: false,
         }
     }
-    fields.push(current.trim().to_string());
-    fields
+}
+
+impl<'a> Iterator for AtCsvFields<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+
+        let mut in_quotes = false;
+        for (idx, ch) in self.input.char_indices() {
+            match ch {
+                '"' => in_quotes = !in_quotes,
+                ',' if !in_quotes => {
+                    let field = trim_at_csv_field(&self.input[..idx]);
+                    self.input = &self.input[idx + 1..];
+                    return Some(field);
+                }
+                _ => {}
+            }
+        }
+
+        self.finished = true;
+        Some(trim_at_csv_field(self.input))
+    }
+}
+
+fn trim_at_csv_field(field: &str) -> &str {
+    let field = field.trim();
+    field
+        .strip_prefix('"')
+        .and_then(|field| field.strip_suffix('"'))
+        .unwrap_or(field)
 }
 
 fn decode_modem_text(text: &str) -> String {

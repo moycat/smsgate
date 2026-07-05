@@ -15,6 +15,7 @@ const MAX_URC_BUF: usize = 32;
 /// Maximum response body lines collected per AT command.
 /// A well-formed modem never sends more; caps UART garbage.
 const MAX_BODY_LINES: usize = 64;
+const INITIAL_LINE_CAPACITY: usize = 64;
 
 /// Byte-level UART abstraction — `UartDriver` on hardware, `MockUart` in tests.
 pub trait UartPort {
@@ -61,12 +62,12 @@ impl<U: UartPort> AtPort<U> {
         self.uart.write_all(command.as_bytes())?;
 
         let deadline = Instant::now() + timeout;
-        let mut body_lines: Vec<String> = Vec::new();
-        if let Some(err) = self.collect_until_ok(deadline, &mut body_lines)? {
+        let mut body = ResponseBody::new();
+        if let Some(err) = self.collect_until_ok(deadline, &mut body)? {
             return Ok(err);
         }
         Ok(AtResponse {
-            body: body_lines.join("\n"),
+            body: body.into_string(),
             ok: true,
         })
     }
@@ -105,7 +106,7 @@ impl<U: UartPort> AtPort<U> {
     fn collect_until_ok(
         &mut self,
         deadline: Instant,
-        body_lines: &mut Vec<String>,
+        body: &mut ResponseBody,
     ) -> Result<Option<AtResponse>, ModemError> {
         loop {
             let Some(read_timeout) = deadline
@@ -115,7 +116,9 @@ impl<U: UartPort> AtPort<U> {
                 return Err(ModemError::Timeout);
             };
             if let Some(line) = self.read_line(read_timeout) {
-                let line = line.trim().to_string();
+                let Some(line) = normalize_line(line) else {
+                    continue;
+                };
                 if line.is_empty() {
                     continue;
                 }
@@ -131,14 +134,14 @@ impl<U: UartPort> AtPort<U> {
                         ok: false,
                     }));
                 }
-                self.buffer_line(line, body_lines);
+                self.buffer_line(line, body);
             }
         }
     }
 
     fn read_line(&mut self, timeout: Duration) -> Option<String> {
         let deadline = Instant::now() + timeout;
-        let mut line = String::new();
+        let mut line = String::with_capacity(INITIAL_LINE_CAPACITY);
         loop {
             if Instant::now() > deadline {
                 if !line.is_empty() {
@@ -160,12 +163,12 @@ impl<U: UartPort> AtPort<U> {
 
     /// Route a non-terminal response line into either the URC buffer or the
     /// command body accumulator, respecting both caps.
-    fn buffer_line(&mut self, line: String, body: &mut Vec<String>) {
+    fn buffer_line(&mut self, line: String, body: &mut ResponseBody) {
         if urc::is_urc(&line) {
             if self.urc_buf.len() < MAX_URC_BUF {
                 self.urc_buf.push_back(line);
             }
-        } else if body.len() < MAX_BODY_LINES {
+        } else if body.line_count() < MAX_BODY_LINES {
             body.push(line);
         } else {
             log::warn!("[at] body cap exceeded — discarding: {}", line);
@@ -189,7 +192,7 @@ impl<U: UartPort> AtPort<U> {
         self.uart.write_all(command.as_bytes())?;
 
         let deadline = Instant::now() + timeout;
-        let mut body_lines: Vec<String> = Vec::new();
+        let mut body = ResponseBody::new();
 
         loop {
             let Some(read_timeout) = deadline
@@ -199,7 +202,9 @@ impl<U: UartPort> AtPort<U> {
                 return Err(ModemError::Timeout);
             };
             if let Some(line) = self.read_line(read_timeout) {
-                let line = line.trim().to_string();
+                let Some(line) = normalize_line(line) else {
+                    continue;
+                };
                 if line.is_empty() {
                     continue;
                 }
@@ -212,7 +217,7 @@ impl<U: UartPort> AtPort<U> {
                         ok: line == "OK",
                     });
                 }
-                self.buffer_line(line, &mut body_lines);
+                self.buffer_line(line, &mut body);
             }
         }
 
@@ -222,12 +227,12 @@ impl<U: UartPort> AtPort<U> {
         );
         self.uart.write_all(pl.as_bytes())?;
 
-        body_lines.clear();
-        if let Some(err) = self.collect_until_ok(deadline, &mut body_lines)? {
+        body.clear();
+        if let Some(err) = self.collect_until_ok(deadline, &mut body)? {
             return Ok(err);
         }
         Ok(AtResponse {
-            body: body_lines.join("\n"),
+            body: body.into_string(),
             ok: true,
         })
     }
@@ -245,6 +250,66 @@ impl<U: UartPort> AtPort<U> {
                 }
             }
         }
+    }
+}
+
+struct ResponseBody {
+    text: String,
+    lines: usize,
+}
+
+impl ResponseBody {
+    fn new() -> Self {
+        Self {
+            text: String::new(),
+            lines: 0,
+        }
+    }
+
+    fn push(&mut self, line: String) {
+        if !self.text.is_empty() {
+            self.text.push('\n');
+        }
+        self.text.push_str(&line);
+        self.lines += 1;
+    }
+
+    fn clear(&mut self) {
+        self.text.clear();
+        self.lines = 0;
+    }
+
+    fn line_count(&self) -> usize {
+        self.lines
+    }
+
+    fn into_string(self) -> String {
+        self.text
+    }
+}
+
+fn normalize_line(mut line: String) -> Option<String> {
+    trim_ascii_in_place(&mut line);
+    (!line.is_empty()).then_some(line)
+}
+
+fn trim_ascii_in_place(value: &mut String) {
+    let bytes = value.as_bytes();
+    let start = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map(|idx| idx + 1)
+        .unwrap_or(start);
+
+    if end < value.len() {
+        value.truncate(end);
+    }
+    if start > 0 {
+        value.drain(..start);
     }
 }
 
