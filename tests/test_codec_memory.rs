@@ -3,7 +3,7 @@
 #[path = "support/alloc_counter.rs"]
 mod alloc_counter;
 
-use smsgate::sms::codec::count_sms_parts;
+use smsgate::sms::codec::{build_sms_submit_pdus, count_sms_parts};
 
 #[test]
 fn count_sms_parts_allocations_are_bounded() {
@@ -24,5 +24,18 @@ fn count_sms_parts_allocations_are_bounded() {
     assert_eq!(
         ucs2_allocations, 0,
         "UCS-2 part counting allocated {ucs2_allocations} times; expected allocation-free counting"
+    );
+}
+
+#[test]
+fn single_part_pdu_encoding_allocations_are_bounded() {
+    let (pdus, allocations) = alloc_counter::count_allocations(|| {
+        build_sms_submit_pdus("+15551234567", "Hello", 10, false)
+    });
+
+    assert_eq!(pdus.len(), 1);
+    assert!(
+        allocations <= 7,
+        "single-part PDU encoding allocated {allocations} times; expected BCD phone encoding without a digit-byte Vec"
     );
 }

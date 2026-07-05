@@ -590,11 +590,6 @@ pub fn parse_sms_pdu(hex_pdu: &str) -> Result<SmsPdu, SmsError> {
 // SMS-SUBMIT encoder
 // ---------------------------------------------------------------------------
 
-/// Encode unicode code points from UTF-8.
-fn utf8_to_codepoints(s: &str) -> Vec<u32> {
-    s.chars().map(|c| c as u32).collect()
-}
-
 /// Try to encode a Unicode code point as GSM-7 septets.
 /// Returns 0, 1 or 2 septets.
 fn encode_gsm7_char(cp: u32, out: &mut [u8]) -> usize {
@@ -864,57 +859,70 @@ pub fn pack_septets(septets: &[u8], bit_offset: usize) -> Vec<u8> {
 /// Returns true iff every code point in `s` can be represented in GSM-7.
 pub fn is_gsm7_compatible(s: &str) -> bool {
     let mut buf = [0u8; 2];
-    for cp in utf8_to_codepoints(s) {
-        if encode_gsm7_char(cp, &mut buf) == 0 {
+    for ch in s.chars() {
+        if encode_gsm7_char(ch as u32, &mut buf) == 0 {
             return false;
         }
     }
     true
 }
 
-fn code_points_to_utf16be(cps: &[u32]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(cps.len() * 2);
-    for &cp in cps {
-        if cp <= 0xFFFF {
-            out.push((cp >> 8) as u8);
-            out.push((cp & 0xFF) as u8);
-        } else if cp <= 0x10FFFF {
-            let adj = cp - 0x10000;
-            let hi = (0xD800 + (adj >> 10)) as u16;
-            let lo = (0xDC00 + (adj & 0x3FF)) as u16;
-            out.push((hi >> 8) as u8);
-            out.push((hi & 0xFF) as u8);
-            out.push((lo >> 8) as u8);
-            out.push((lo & 0xFF) as u8);
+fn encode_gsm7_body(body: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(body.chars().count().saturating_mul(2));
+    let mut buf = [0u8; 2];
+    for ch in body.chars() {
+        let septets = encode_gsm7_char(ch as u32, &mut buf);
+        if septets == 0 {
+            return None;
+        }
+        out.extend_from_slice(&buf[..septets]);
+    }
+    Some(out)
+}
+
+fn encode_ucs2_body(body: &str) -> Vec<u8> {
+    let units = body.chars().map(char::len_utf16).sum::<usize>();
+    let mut out = Vec::with_capacity(units * 2);
+    let mut buf = [0u16; 2];
+    for ch in body.chars() {
+        for unit in ch.encode_utf16(&mut buf) {
+            out.push((*unit >> 8) as u8);
+            out.push((*unit & 0xFF) as u8);
         }
     }
     out
 }
 
 fn encode_bcd_phone(phone: &str, out: &mut Vec<u8>) {
-    let mut digits = String::new();
     let mut international = false;
-    for c in phone.chars() {
-        if c == '+' {
+    let mut digit_count = 0usize;
+    for byte in phone.bytes() {
+        if byte == b'+' {
             international = true;
-        } else if c.is_ascii_digit() {
-            digits.push(c);
+        } else if byte.is_ascii_digit() {
+            digit_count += 1;
         }
     }
-    out.push(digits.len() as u8);
+    out.push(digit_count as u8);
     out.push(if international { 0x91 } else { 0x81 });
-    let dbytes: Vec<u8> = digits.bytes().collect();
-    let mut i = 0;
-    while i < dbytes.len() {
-        let lo = dbytes[i] - b'0';
-        let hi = if i + 1 < dbytes.len() {
-            dbytes[i + 1] - b'0'
+
+    let mut pending_low: Option<u8> = None;
+    for byte in phone.bytes().filter(u8::is_ascii_digit) {
+        let digit = byte - b'0';
+        if let Some(lo) = pending_low.take() {
+            out.push((digit << 4) | lo);
         } else {
-            0x0F
-        };
-        out.push((hi << 4) | lo);
-        i += 2;
+            pending_low = Some(digit);
+        }
     }
+    if let Some(lo) = pending_low {
+        out.push(0xF0 | lo);
+    }
+}
+
+fn bcd_phone_field_len(phone: &str) -> usize {
+    let digits = phone.bytes().filter(u8::is_ascii_digit).count();
+    2 + digits.div_ceil(2)
 }
 
 /// Build SMS-SUBMIT PDU(s) for the given phone and UTF-8 body.
@@ -929,27 +937,12 @@ pub fn build_sms_submit_pdus(
         return vec![];
     }
 
-    let cps = utf8_to_codepoints(body);
-
-    // Try GSM-7
-    let mut gsm7: Vec<u8> = Vec::new();
-    let mut buf = [0u8; 2];
-    let mut can_gsm7 = true;
-    for &cp in &cps {
-        let n = encode_gsm7_char(cp, &mut buf);
-        if n == 0 {
-            can_gsm7 = false;
-            break;
-        }
-        gsm7.extend_from_slice(&buf[..n]);
-    }
-
-    if can_gsm7 {
+    if let Some(gsm7) = encode_gsm7_body(body) {
         return build_gsm7_pdus(phone, &gsm7, max_parts, request_status_report);
     }
 
     // UCS-2
-    let ucs2 = code_points_to_utf16be(&cps);
+    let ucs2 = encode_ucs2_body(body);
     build_ucs2_pdus(phone, &ucs2, max_parts, request_status_report)
 }
 
@@ -957,7 +950,8 @@ fn build_gsm7_pdus(phone: &str, septets: &[u8], max_parts: usize, srr: bool) -> 
     if septets.len() <= 160 {
         // Single-part
         let packed = pack_septets(septets, 0);
-        let mut pdu = vec![0x00u8]; // SCA
+        let mut pdu = Vec::with_capacity(1 + 1 + 1 + bcd_phone_field_len(phone) + 3 + packed.len());
+        pdu.push(0x00); // SCA
         pdu.push(if srr { 0x21 } else { 0x01 }); // first octet
         pdu.push(0x00); // TP-MR
         encode_bcd_phone(phone, &mut pdu);
@@ -1010,7 +1004,8 @@ fn build_gsm7_pdus(phone: &str, septets: &[u8], max_parts: usize, srr: bool) -> 
 
         let udl = (7 + chunk.len()) as u8; // 7 header septets + body
 
-        let mut pdu = vec![0x00u8]; // SCA
+        let mut pdu = Vec::with_capacity(1 + 1 + 1 + bcd_phone_field_len(phone) + 3 + packed.len());
+        pdu.push(0x00); // SCA
         pdu.push(if srr { 0x61 } else { 0x41 }); // UDHI set
         pdu.push(0x00);
         encode_bcd_phone(phone, &mut pdu);
@@ -1028,7 +1023,8 @@ fn build_gsm7_pdus(phone: &str, septets: &[u8], max_parts: usize, srr: bool) -> 
 
 fn build_ucs2_pdus(phone: &str, ucs2: &[u8], max_parts: usize, srr: bool) -> Vec<SmsSubmitPdu> {
     if ucs2.len() <= 140 {
-        let mut pdu = vec![0x00u8];
+        let mut pdu = Vec::with_capacity(1 + 1 + 1 + bcd_phone_field_len(phone) + 3 + ucs2.len());
+        pdu.push(0x00);
         pdu.push(if srr { 0x21 } else { 0x01 });
         pdu.push(0x00);
         encode_bcd_phone(phone, &mut pdu);
@@ -1080,7 +1076,8 @@ fn build_ucs2_pdus(phone: &str, ucs2: &[u8], max_parts: usize, srr: bool) -> Vec
         ];
         ud.extend_from_slice(chunk);
 
-        let mut pdu = vec![0x00u8];
+        let mut pdu = Vec::with_capacity(1 + 1 + 1 + bcd_phone_field_len(phone) + 3 + ud.len());
+        pdu.push(0x00);
         pdu.push(if srr { 0x61 } else { 0x41 });
         pdu.push(0x00);
         encode_bcd_phone(phone, &mut pdu);
