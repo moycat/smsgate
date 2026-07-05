@@ -4,7 +4,7 @@ use smsgate::bridge::forwarder::is_blocked;
 use smsgate::bridge::poller::poll_and_dispatch;
 use smsgate::bridge::reply_router::ReplyRouter;
 use smsgate::commands::{builtin::*, CommandRegistry};
-use smsgate::im::{InboundCallback, InboundMessage, MessageFormat};
+use smsgate::im::{InboundCallback, InboundDocument, InboundMessage, MessageFormat};
 use smsgate::log_ring::{LogKind, LogRing};
 use smsgate::modem::ModemStatus;
 use smsgate::persist::{keys, load_bool, mem::MemStore};
@@ -59,6 +59,23 @@ fn callback_msg(data: &str, message_id: i64) -> InboundMessage {
             data: data.to_string(),
             message_id,
         }),
+    }
+}
+
+fn document_msg(caption: &str) -> InboundMessage {
+    InboundMessage {
+        cursor: 1,
+        text: caption.to_string(),
+        reply_to: None,
+        document: Some(InboundDocument {
+            file_id: "file-id".to_string(),
+            file_unique_id: "unique-id".to_string(),
+            file_name: Some("firmware.bin".to_string()),
+            mime_type: Some("application/octet-stream".to_string()),
+            file_size: Some(1024),
+            caption: Some(caption.to_string()),
+        }),
+        callback: None,
     }
 }
 
@@ -595,6 +612,35 @@ fn non_command_non_reply_is_ignored() {
     .unwrap();
 
     // Nothing enqueued, no IM reply
+    assert_eq!(sender.len(), 0);
+    assert_eq!(messenger.sent_count(), 0);
+}
+
+#[test]
+fn document_messages_are_not_dispatched_as_commands() {
+    let mut store = MemStore::new();
+    let mut messenger = RecordingMessenger::new();
+    let router = ReplyRouter::new();
+    let reg = make_registry();
+    let log = LogRing::new();
+    let status = ModemStatus::default();
+    let mut sender = SmsSender::new();
+
+    poll_and_dispatch(
+        &[document_msg("/status")],
+        &mut messenger,
+        &mut sender,
+        &router,
+        &reg,
+        &mut store,
+        &log,
+        &status,
+        0,
+        64 * 1024,
+        "wifi",
+    )
+    .unwrap();
+
     assert_eq!(sender.len(), 0);
     assert_eq!(messenger.sent_count(), 0);
 }

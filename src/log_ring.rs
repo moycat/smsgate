@@ -213,6 +213,17 @@ impl LogRing {
         })
     }
 
+    /// Return the newest entry of one kind without materializing the full log.
+    pub fn latest_of_kind(&self, kind: LogKind) -> Option<LogEntry> {
+        self.flash
+            .borrow_mut()
+            .latest_of_kind(kind)
+            .unwrap_or_else(|e| {
+                log::warn!("[log] flash read failed: {}", e);
+                None
+            })
+    }
+
     /// Return a page of entries, where `offset` skips newest entries first.
     /// Page entries are ordered newest-to-oldest for display.
     pub fn page(&self, offset: usize, limit: usize) -> Result<Vec<LogEntry>, FlashLogError> {
@@ -368,7 +379,7 @@ impl<S: LogFlashStorage> FlashLogRing<S> {
 
     pub fn entries(&mut self) -> Result<Vec<LogEntry>, FlashLogError> {
         let mut records = scan_records(&mut self.storage, self.slots)?;
-        records.sort_by_key(|record| record.seq);
+        records.sort_unstable_by_key(|record| record.seq);
         Ok(records.into_iter().map(|record| record.entry).collect())
     }
 
@@ -376,6 +387,26 @@ impl<S: LogFlashStorage> FlashLogRing<S> {
         let entries = self.entries()?;
         let start = entries.len().saturating_sub(n);
         Ok(entries.into_iter().skip(start).collect())
+    }
+
+    pub fn latest_of_kind(&mut self, kind: LogKind) -> Result<Option<LogEntry>, FlashLogError> {
+        let mut latest: Option<DecodedRecord> = None;
+        for slot in 0..self.slots {
+            let Some(record) = read_record(&mut self.storage, slot)? else {
+                continue;
+            };
+            if record.entry.kind != kind {
+                continue;
+            }
+            let replace = match latest.as_ref() {
+                Some(current) => record.seq > current.seq,
+                None => true,
+            };
+            if replace {
+                latest = Some(record);
+            }
+        }
+        Ok(latest.map(|record| record.entry))
     }
 
     pub fn page(&mut self, offset: usize, limit: usize) -> Result<Vec<LogEntry>, FlashLogError> {
@@ -388,7 +419,13 @@ impl<S: LogFlashStorage> FlashLogRing<S> {
     }
 
     pub fn entry_count(&mut self) -> Result<usize, FlashLogError> {
-        Ok(scan_records(&mut self.storage, self.slots)?.len())
+        let mut count = 0;
+        for slot in 0..self.slots {
+            if read_record(&mut self.storage, slot)?.is_some() {
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 
     pub fn into_storage(self) -> S {

@@ -6,13 +6,30 @@ use serde::Deserialize;
 /// Escape a string for embedding inside a JSON string literal.
 ///
 /// Handles the characters that would produce invalid JSON: backslash,
-/// double-quote, and ASCII control characters (LF, CR, TAB).
+/// double-quote, and ASCII control characters.
 pub fn json_escape(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            ch if ch <= '\u{1f}' => {
+                let code = ch as u8;
+                out.push_str("\\u00");
+                out.push(HEX[(code >> 4) as usize] as char);
+                out.push(HEX[(code & 0x0f) as usize] as char);
+            }
+            ch => out.push(ch),
+        }
+    }
+    out
 }
 
 #[derive(Debug, Deserialize)]

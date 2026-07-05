@@ -37,11 +37,9 @@ impl Command for StatusCommand {
             crate::persist::load_bool(ctx.store, crate::persist::keys::FWD_ENABLED).unwrap_or(true);
         let free_heap_kb = ctx.free_heap_bytes / 1024;
 
-        let recent = ctx.log_ring.last_n(50);
-        let last_sms = recent
-            .iter()
-            .rev()
-            .find(|entry| entry.kind == LogKind::Sms)
+        let last_sms_entry = ctx.log_ring.latest_of_kind(LogKind::Sms);
+        let last_sms = last_sms_entry
+            .as_ref()
             .map(|e| (e.sender.as_str(), e.timestamp.as_str()));
 
         let mut out = crate::i18n::format_status(

@@ -62,6 +62,8 @@ enum TgPollEvent {
 #[cfg(feature = "esp32")]
 fn main() {
     esp_idf_sys::link_patches();
+    let (backtrace_key, backtrace_value) = smsgate::diagnostics::rust_backtrace_env();
+    std::env::set_var(backtrace_key, backtrace_value);
     esp_idf_svc::log::EspLogger::initialize_default();
 
     let starting_message = smsgate::ota::format_starting_message(Config::GIT_COMMIT);
@@ -903,15 +905,10 @@ fn main() {
                     drain_tg_send!();
                 }
             }
-            let dispatch_messages: Vec<smsgate::im::InboundMessage> = tg_messages
-                .iter()
-                .filter(|m| m.document.is_none())
-                .cloned()
-                .collect();
-            if !dispatch_messages.is_empty() {
+            if tg_messages.iter().any(|m| m.document.is_none()) {
                 let free_heap = unsafe { esp_idf_sys::esp_get_free_heap_size() };
                 match poll_and_dispatch(
-                    &dispatch_messages,
+                    &tg_messages,
                     &mut messenger,
                     &mut sender,
                     &router,

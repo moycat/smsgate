@@ -18,7 +18,7 @@ const STREAM_BUF_BYTES: usize = 4096;
 
 /// TLS-backed HTTPS client for api.telegram.org.
 pub struct TelegramHttpClient {
-    tls: EspTls<InternalSocket>,
+    tls: Option<EspTls<InternalSocket>>,
     ca_bundle: Option<&'static [u8]>,
 }
 
@@ -31,7 +31,10 @@ impl TelegramHttpClient {
         tls.connect(HOST, PORT, &conf)
             .with_context(|| format!("tls connect {}:{} failed", HOST, PORT))?;
         log::debug!("[http] TLS connected to {}:{}", HOST, PORT);
-        Ok(TelegramHttpClient { tls, ca_bundle })
+        Ok(TelegramHttpClient {
+            tls: Some(tls),
+            ca_bundle,
+        })
     }
 
     fn tls_config(ca_bundle: Option<&'static [u8]>) -> TlsConfig<'static> {
@@ -130,7 +133,7 @@ impl TelegramHttpClient {
              \r\n",
             path, HOST
         );
-        self.tls
+        self.tls_mut()?
             .write_all(request.as_bytes())
             .context("file download request write failed")?;
 
@@ -167,7 +170,7 @@ impl TelegramHttpClient {
                 anyhow::bail!("file download idle timeout");
             }
             let n = self
-                .tls
+                .tls_mut()?
                 .read(&mut buf)
                 .context("file download body read failed")?;
             if n == 0 {
@@ -201,23 +204,23 @@ impl TelegramHttpClient {
             path.len(),
             body_bytes.len()
         );
-        let request = format!(
+        let request_head = format!(
             "POST {} HTTP/1.1\r\n\
              Host: {}\r\n\
              Content-Type: application/json\r\n\
              Content-Length: {}\r\n\
              Connection: keep-alive\r\n\
-             \r\n\
-             {}",
+             \r\n",
             path,
             HOST,
-            body_bytes.len(),
-            json_body
+            body_bytes.len()
         );
 
-        self.tls
-            .write_all(request.as_bytes())
+        let tls = self.tls_mut()?;
+        tls.write_all(request_head.as_bytes())
             .with_context(|| format!("{} {} write failed", method, attempt))?;
+        tls.write_all(body_bytes)
+            .with_context(|| format!("{} {} body write failed", method, attempt))?;
 
         let mut response = String::with_capacity(4096);
         let mut buf = [0u8; 1024];
@@ -229,7 +232,7 @@ impl TelegramHttpClient {
                 anyhow::bail!("read timeout");
             }
             let n = self
-                .tls
+                .tls_mut()?
                 .read(&mut buf)
                 .with_context(|| format!("{} {} header read failed", method, attempt))?;
             if n == 0 {
@@ -275,7 +278,7 @@ impl TelegramHttpClient {
                 anyhow::bail!("body read timeout");
             }
             let n = self
-                .tls
+                .tls_mut()?
                 .read(&mut buf)
                 .with_context(|| format!("{} {} body read failed", method, attempt))?;
             if n == 0 {
@@ -300,7 +303,7 @@ impl TelegramHttpClient {
                 anyhow::bail!("header read timeout");
             }
             let n = self
-                .tls
+                .tls_mut()?
                 .read(&mut buf)
                 .context("file download header read failed")?;
             if n == 0 {
@@ -319,14 +322,21 @@ impl TelegramHttpClient {
     }
 
     fn reconnect(&mut self) -> anyhow::Result<()> {
+        drop(self.tls.take());
         let conf = Self::tls_config(self.ca_bundle);
         let mut tls = EspTls::new().context("tls client allocation failed")?;
         log::debug!("[http] reconnecting TLS to {}:{}", HOST, PORT);
         tls.connect(HOST, PORT, &conf)
             .with_context(|| format!("tls reconnect {}:{} failed", HOST, PORT))?;
-        self.tls = tls;
+        self.tls = Some(tls);
         log::debug!("[http] TLS reconnect complete");
         Ok(())
+    }
+
+    fn tls_mut(&mut self) -> anyhow::Result<&mut EspTls<InternalSocket>> {
+        self.tls
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("TLS client not connected"))
     }
 }
 

@@ -44,6 +44,10 @@ pub fn poll_and_dispatch(
     let mut events = Vec::new();
 
     for msg in messages {
+        if msg.document.is_some() {
+            continue;
+        }
+
         let text = msg.text.trim();
 
         if let Some(callback) = msg.callback.as_ref() {

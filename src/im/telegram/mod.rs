@@ -123,12 +123,10 @@ pub fn build_edit_message_text_body_with_format(
 }
 
 pub fn build_answer_callback_query_body(callback_query_id: &str, text: Option<&str>) -> String {
-    let mut body = format!(
-        r#"{{"callback_query_id":"{}""#,
-        types::json_escape(callback_query_id)
-    );
+    let mut body = String::from(r#"{"callback_query_id":"#);
+    push_json_string(&mut body, callback_query_id);
     if let Some(text) = text {
-        body.push_str(&format!(r#","text":"{}""#, types::json_escape(text)));
+        push_json_string_field(&mut body, "text", text);
     }
     body.push('}');
     body
@@ -146,44 +144,58 @@ fn append_reply_markup(body: &mut String, keyboard: Option<&InlineKeyboard>) {
 }
 
 fn append_message_content(body: &mut String, text: &str, format: MessageFormat) {
-    match format {
-        MessageFormat::Plain => {
-            body.push_str(&format!(r#","text":"{}""#, types::json_escape(text)))
-        }
-        MessageFormat::Html => body.push_str(&format!(
-            r#","text":"{}","parse_mode":"HTML""#,
-            types::json_escape(text)
-        )),
+    push_json_string_field(body, "text", text);
+    if format == MessageFormat::Html {
+        body.push_str(r#","parse_mode":"HTML""#);
     }
 }
 
 fn inline_keyboard_json(keyboard: &InlineKeyboard) -> String {
-    let rows = keyboard
-        .rows
-        .iter()
-        .filter(|row| !row.is_empty())
-        .map(|row| {
-            let buttons = row
-                .iter()
-                .map(|button| {
-                    format!(
-                        r#"{{"text":"{}","callback_data":"{}"}}"#,
-                        types::json_escape(&button.text),
-                        types::json_escape(&button.callback_data)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("[{}]", buttons)
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    format!(r#"{{"inline_keyboard":[{}]}}"#, rows)
+    let mut out = String::from(r#"{"inline_keyboard":["#);
+    let mut first_row = true;
+    for row in keyboard.rows.iter().filter(|row| !row.is_empty()) {
+        if !first_row {
+            out.push(',');
+        }
+        first_row = false;
+        out.push('[');
+        let mut first_button = true;
+        for button in row {
+            if !first_button {
+                out.push(',');
+            }
+            first_button = false;
+            out.push_str(r#"{"text":"#);
+            push_json_string(&mut out, &button.text);
+            out.push_str(r#","callback_data":"#);
+            push_json_string(&mut out, &button.callback_data);
+            out.push('}');
+        }
+        out.push(']');
+    }
+    out.push_str("]}");
+    out
 }
 
 /// Build a `getFile` request body.
 pub fn build_get_file_body(file_id: &str) -> String {
-    format!(r#"{{"file_id":"{}"}}"#, types::json_escape(file_id))
+    let mut body = String::from(r#"{"file_id":"#);
+    push_json_string(&mut body, file_id);
+    body.push('}');
+    body
+}
+
+fn push_json_string_field(body: &mut String, name: &str, value: &str) {
+    body.push_str(r#",""#);
+    body.push_str(name);
+    body.push_str(r#"":"#);
+    push_json_string(body, value);
+}
+
+fn push_json_string(body: &mut String, value: &str) {
+    body.push('"');
+    body.push_str(&types::json_escape(value));
+    body.push('"');
 }
 
 /// Convert a Telegram update into the backend-neutral inbound representation.

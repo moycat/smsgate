@@ -129,6 +129,27 @@ fn status_command_paused_shown() {
 }
 
 #[test]
+fn status_command_finds_latest_sms_beyond_recent_page() {
+    let store = MemStore::new();
+    let status = ModemStatus::default();
+    let mut log = LogRing::new();
+    log.push(LogEntry::sms(
+        "+15551234567".to_string(),
+        "body".to_string(),
+        "sms-ts".to_string(),
+        true,
+    ));
+    for i in 0..60 {
+        log.push(smsgate::log_ring::LogEvent::system("system", &format!("event-{i}")).at("ts"));
+    }
+    let queue = SmsSender::new();
+    let result = StatusCommand.handle("", &ctx(&store, &status, &log, &queue));
+
+    assert!(result.contains("+15551234567"), "status was: {result}");
+    assert!(result.contains("sms-ts"), "status was: {result}");
+}
+
+#[test]
 fn log_command_empty() {
     let store = MemStore::new();
     let status = ModemStatus::default();

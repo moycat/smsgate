@@ -31,6 +31,11 @@ fn json_escape_tab() {
 }
 
 #[test]
+fn json_escape_other_ascii_control_chars() {
+    assert_eq!(json_escape("a\0\u{08}\u{0c}b"), "a\\u0000\\b\\fb");
+}
+
+#[test]
 fn json_escape_backslash() {
     assert_eq!(json_escape("a\\b"), "a\\\\b");
 }
