@@ -3,7 +3,7 @@
 pub mod at;
 pub mod sim;
 
-#[cfg(feature = "esp32")]
+#[cfg(any(feature = "esp32", feature = "testing"))]
 pub mod qhttp;
 #[cfg(feature = "esp32")]
 pub mod sms;

@@ -2,8 +2,8 @@
 
 use crate::bridge::reply_router::ReplyRouter;
 use crate::commands::{
-    builtin::log_cmd, CommandContext, CommandRegistry, BLOCK_SENTINEL, PAUSE_SENTINEL,
-    RESTART_SENTINEL, RESUME_SENTINEL, SEND_SENTINEL, UNBLOCK_SENTINEL,
+    builtin::log_cmd, decode_sentinel_body, CommandContext, CommandRegistry, BLOCK_SENTINEL,
+    PAUSE_SENTINEL, RESTART_SENTINEL, RESUME_SENTINEL, SEND_SENTINEL, UNBLOCK_SENTINEL,
 };
 use crate::im::{InboundMessage, MessageSink, MessengerError};
 use crate::log_ring::{LogEvent, LogRing};
@@ -186,7 +186,7 @@ fn apply_sentinels(
     sender: &mut SmsSender,
     store: &mut dyn Store,
 ) -> (String, bool, Option<u32>, Vec<LogEvent>) {
-    let mut display_lines = Vec::new();
+    let mut display = String::new();
     let mut restart = false;
     let mut pause_mins: Option<u32> = None;
     let mut events = Vec::new();
@@ -195,10 +195,7 @@ fn apply_sentinels(
         if let Some(rest) = line.strip_prefix(SEND_SENTINEL) {
             // Format: "+phone|body" — body may have \n/\r encoded as escape sequences.
             if let Some((phone, body_encoded)) = rest.split_once('|') {
-                let body = body_encoded
-                    .replace("\\n", "\n")
-                    .replace("\\r", "\r")
-                    .replace("\\\\", "\\");
+                let body = decode_sentinel_body(body_encoded);
                 let body_preview = preview(&body);
                 log::info!("[poller] sentinel: enqueue SMS to {}", phone);
                 match sender.enqueue_command_send(phone.to_string(), body) {
@@ -214,7 +211,7 @@ fn apply_sentinels(
                         events.push(LogEvent::user("/send", "SMS queue full", false));
                     }
                     CmdSendResult::RateLimited => {
-                        display_lines.push(crate::i18n::send_rate_limited());
+                        push_display_line(&mut display, crate::i18n::send_rate_limited());
                         events.push(LogEvent::user("/send", "rate limited", false));
                     }
                 }
@@ -250,11 +247,18 @@ fn apply_sentinels(
             restart = true;
             events.push(LogEvent::user("/restart", "restart requested", true));
         } else {
-            display_lines.push(line);
+            push_display_line(&mut display, line);
         }
     }
 
-    (display_lines.join("\n"), restart, pause_mins, events)
+    (display, restart, pause_mins, events)
+}
+
+fn push_display_line(display: &mut String, line: &str) {
+    if !display.is_empty() {
+        display.push('\n');
+    }
+    display.push_str(line);
 }
 
 fn preview(body: &str) -> String {

@@ -2,13 +2,21 @@
 //!
 //! Requires an active PDP context (`AT+QIACT`) on context id 1.
 
+#[cfg(feature = "esp32")]
 use super::A76xxModem;
-use crate::modem::{AtTransport, ModemError, ModemPort};
+#[cfg(feature = "esp32")]
+use crate::modem::AtTransport;
+use crate::modem::{ModemError, ModemPort};
+#[cfg(feature = "esp32")]
 use std::time::Duration;
 
+#[cfg(feature = "esp32")]
 const TELEGRAM_HOST_PATH: &str = "https://api.telegram.org";
+#[cfg(feature = "esp32")]
 const QHTTP_TIMEOUT_SECS: u16 = 30;
+#[cfg(feature = "esp32")]
 const QHTTP_LOCAL_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(feature = "esp32")]
 const QHTTP_SETTLE_DELAY: Duration = Duration::from_millis(300);
 
 /// Attach PDP context 1 (IPv4) using Quectel `AT+QICSGP` / `AT+QIACT`.
@@ -47,10 +55,38 @@ pub fn attach_pdp(
 }
 
 fn escape_at_quotes(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+    let mut out = String::with_capacity(at_quote_escaped_len(s));
+    push_at_quote_escaped(&mut out, s);
+    out
+}
+
+#[cfg(feature = "testing")]
+pub fn escape_at_quotes_for_test(s: &str) -> String {
+    escape_at_quotes(s)
+}
+
+fn at_quote_escaped_len(s: &str) -> usize {
+    let mut len = s.len();
+    for byte in s.bytes() {
+        if byte == b'\\' || byte == b'"' {
+            len += 1;
+        }
+    }
+    len
+}
+
+fn push_at_quote_escaped(out: &mut String, s: &str) {
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            ch => out.push(ch),
+        }
+    }
 }
 
 /// POST JSON to `https://api.telegram.org` + `path` (path includes `/bot…/method`).
+#[cfg(feature = "esp32")]
 pub fn post_json(modem: &mut A76xxModem, path: &str, json: &str) -> Result<String, ModemError> {
     match post_json_once(modem, path, json) {
         Ok(body) => Ok(body),
@@ -64,6 +100,7 @@ pub fn post_json(modem: &mut A76xxModem, path: &str, json: &str) -> Result<Strin
     }
 }
 
+#[cfg(feature = "esp32")]
 fn post_json_once(modem: &mut A76xxModem, path: &str, json: &str) -> Result<String, ModemError> {
     let url = format!("{}{}", TELEGRAM_HOST_PATH, path);
 
@@ -104,10 +141,12 @@ fn post_json_once(modem: &mut A76xxModem, path: &str, json: &str) -> Result<Stri
     extract_json_object(&r2.body)
 }
 
+#[cfg(feature = "esp32")]
 fn qhttp_url_command(url_len: usize) -> String {
     format!("+QHTTPURL={},{}", url_len, QHTTP_TIMEOUT_SECS)
 }
 
+#[cfg(feature = "esp32")]
 fn qhttp_post_command(body_len: usize) -> String {
     format!(
         "+QHTTPPOST={},{},{}",
@@ -115,10 +154,12 @@ fn qhttp_post_command(body_len: usize) -> String {
     )
 }
 
+#[cfg(feature = "esp32")]
 fn qhttp_read_command() -> String {
     format!("+QHTTPREAD={}", QHTTP_TIMEOUT_SECS)
 }
 
+#[cfg(feature = "esp32")]
 fn repair_pdp(modem: &mut A76xxModem) -> Result<(), ModemError> {
     let _ = modem.send_at("+CGATT=1");
     let _ = modem.send_at("+QIDEACT=1");
@@ -134,6 +175,7 @@ fn repair_pdp(modem: &mut A76xxModem) -> Result<(), ModemError> {
     }
 }
 
+#[cfg(feature = "esp32")]
 fn extract_json_object(s: &str) -> Result<String, ModemError> {
     let t = s.trim();
     if let (Some(i), Some(j)) = (t.find('{'), t.rfind('}')) {

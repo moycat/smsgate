@@ -18,6 +18,39 @@ pub const RESUME_SENTINEL: &str = "__RESUME__";
 pub const RESTART_SENTINEL: &str = "__RESTART__";
 // Keep `pub` (not `pub(crate)`) — integration tests import them.
 
+pub(crate) fn push_encoded_sentinel_body(out: &mut String, body: &str) {
+    for ch in body.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            ch => out.push(ch),
+        }
+    }
+}
+
+pub(crate) fn decode_sentinel_body(encoded: &str) -> String {
+    let mut out = String::with_capacity(encoded.len());
+    let mut chars = encoded.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('\\') => out.push('\\'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
 /// Read-only context available to a command handler.
 pub struct CommandContext<'a> {
     pub store: &'a dyn Store,

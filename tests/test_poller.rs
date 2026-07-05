@@ -728,6 +728,38 @@ fn send_sentinel_body_with_newline() {
 }
 
 #[test]
+fn send_sentinel_body_preserves_literal_backslash_n() {
+    let mut store = MemStore::new();
+    let mut messenger = RecordingMessenger::new();
+    let router = ReplyRouter::new();
+    let reg = make_registry();
+    let log = LogRing::new();
+    let status = ModemStatus::default();
+    let mut sender = SmsSender::new();
+
+    poll_and_dispatch(
+        &[msg("/send +1 literal \\n text")],
+        &mut messenger,
+        &mut sender,
+        &router,
+        &reg,
+        &mut store,
+        &log,
+        &status,
+        0,
+        0,
+        0,
+        "",
+    )
+    .unwrap();
+
+    assert_eq!(sender.len(), 1);
+    let snap = sender.snapshot();
+    assert_eq!(snap[0].phone, "+1");
+    assert_eq!(snap[0].body_preview, "literal \\n text");
+}
+
+#[test]
 fn send_body_preview_truncated_at_50_chars() {
     // The Queued: display line shows at most 50 chars of the body.
     let mut store = MemStore::new();

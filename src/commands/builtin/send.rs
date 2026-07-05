@@ -2,7 +2,7 @@
 //!
 //! Returns a sentinel line for poller.rs to parse + a user-visible confirmation.
 
-use crate::commands::{Command, CommandContext, SEND_SENTINEL};
+use crate::commands::{push_encoded_sentinel_body, Command, CommandContext, SEND_SENTINEL};
 use crate::sms::{codec::count_sms_parts, MAX_SMS_PARTS};
 
 pub struct SendCommand;
@@ -35,16 +35,16 @@ impl Command for SendCommand {
         let mut chars = body.chars();
         let preview: String = chars.by_ref().take(50).collect();
         let truncated = chars.next().is_some();
-        let body_encoded = body
-            .replace('\\', "\\\\")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r");
-        format!(
-            "{}{}|{}\n{}",
-            SEND_SENTINEL,
-            phone,
-            body_encoded,
-            crate::i18n::send_queued(&phone, &preview, truncated, parts)
-        )
+        let queued = crate::i18n::send_queued(&phone, &preview, truncated, parts);
+        let mut out = String::with_capacity(
+            SEND_SENTINEL.len() + phone.len() + 1 + body.len() + 1 + queued.len(),
+        );
+        out.push_str(SEND_SENTINEL);
+        out.push_str(&phone);
+        out.push('|');
+        push_encoded_sentinel_body(&mut out, body);
+        out.push('\n');
+        out.push_str(&queued);
+        out
     }
 }
