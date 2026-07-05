@@ -72,18 +72,36 @@ pub fn forward_sms(
 }
 
 fn sms_log_preview(sms: &SmsMessage) -> String {
-    let body: String = sms.body.chars().take(SMS_LOG_PREVIEW_CHARS).collect();
-    let formatted_sms_time = crate::sms::codec::timestamp_to_rfc3339(&sms.timestamp, 480);
-    let sms_time = if formatted_sms_time.is_empty() {
-        sms.timestamp.as_str()
+    let body_end = char_prefix_end(&sms.body, SMS_LOG_PREVIEW_CHARS);
+    let body = &sms.body[..body_end];
+    if sms.timestamp.is_empty() {
+        body.to_string()
     } else {
-        formatted_sms_time.as_str()
-    };
-    if sms_time.is_empty() {
-        body
-    } else {
-        format!("sms_time={} {}", sms_time, body)
+        let sms_time_len = if sms.timestamp.len() < 17 {
+            sms.timestamp.len()
+        } else {
+            "2026-04-10T12:00:00+08:00".len()
+        };
+        let mut preview = String::with_capacity("sms_time=".len() + sms_time_len + 1 + body.len());
+        preview.push_str("sms_time=");
+        if !crate::sms::codec::push_timestamp_rfc3339(&mut preview, &sms.timestamp, 480) {
+            preview.push_str(&sms.timestamp);
+        }
+        preview.push(' ');
+        preview.push_str(body);
+        preview
     }
+}
+
+fn char_prefix_end(s: &str, max_chars: usize) -> usize {
+    s.char_indices()
+        .nth(max_chars)
+        .map_or(s.len(), |(idx, _)| idx)
+}
+
+#[cfg(feature = "testing")]
+pub fn sms_log_preview_for_test(sms: &SmsMessage) -> String {
+    sms_log_preview(sms)
 }
 
 /// Check if `phone` is in the block list.

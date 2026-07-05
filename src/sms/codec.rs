@@ -90,25 +90,37 @@ pub fn normalize_phone(raw: &str) -> String {
 /// Convert a CMGR/PDU timestamp to RFC 3339.
 /// `gmt_offset_minutes` is e.g. 480 for UTC+8, -300 for UTC-5.
 pub fn timestamp_to_rfc3339(ts: &str, gmt_offset_minutes: i32) -> String {
-    if ts.len() < 17 {
+    let mut out = String::with_capacity("2026-04-10T12:00:00+08:00".len());
+    if !push_timestamp_rfc3339(&mut out, ts, gmt_offset_minutes) {
         return String::new();
+    }
+    out
+}
+
+pub fn push_timestamp_rfc3339(out: &mut String, ts: &str, gmt_offset_minutes: i32) -> bool {
+    if ts.len() < 17 {
+        return false;
     }
     let abs_mins = gmt_offset_minutes.unsigned_abs();
     let abs_h = abs_mins / 60;
     let abs_m = abs_mins % 60;
     let sign = if gmt_offset_minutes < 0 { '-' } else { '+' };
-    format!(
-        "20{year}-{mo}-{dd}T{hh}:{mm}:{ss}{sign}{ah:02}:{am:02}",
-        year = &ts[0..2],
-        mo = &ts[3..5],
-        dd = &ts[6..8],
-        hh = &ts[9..11],
-        mm = &ts[12..14],
-        ss = &ts[15..17],
-        sign = sign,
-        ah = abs_h,
-        am = abs_m,
-    )
+    out.push_str("20");
+    out.push_str(&ts[0..2]);
+    out.push('-');
+    out.push_str(&ts[3..5]);
+    out.push('-');
+    out.push_str(&ts[6..8]);
+    out.push('T');
+    out.push_str(&ts[9..11]);
+    out.push(':');
+    out.push_str(&ts[12..14]);
+    out.push(':');
+    out.push_str(&ts[15..17]);
+    out.push(sign);
+    use core::fmt::Write as _;
+    let _ = write!(out, "{abs_h:02}:{abs_m:02}");
+    true
 }
 
 /// Convert a PDU timestamp to a UTC Unix timestamp (seconds since epoch).

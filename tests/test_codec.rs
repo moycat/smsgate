@@ -66,6 +66,17 @@ fn timestamp_to_rfc3339_too_short() {
 }
 
 #[test]
+fn push_timestamp_rfc3339_appends_formatted_time() {
+    let mut out = String::from("sms_time=");
+    assert!(smsgate::sms::codec::push_timestamp_rfc3339(
+        &mut out,
+        "26/04/10,12:00:00+32",
+        480
+    ));
+    assert_eq!(out, "sms_time=2026-04-10T12:00:00+08:00");
+}
+
+#[test]
 fn pdu_timestamp_utc() {
     // "00/01/01,00:00:00+00" = 2000-01-01 00:00:00 UTC = 946684800
     let ts = "00/01/01,00:00:00+00";
