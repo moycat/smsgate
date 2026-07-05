@@ -72,8 +72,7 @@ pub fn forward_sms(
 }
 
 fn sms_log_preview(sms: &SmsMessage) -> String {
-    let body_end = char_prefix_end(&sms.body, SMS_LOG_PREVIEW_CHARS);
-    let body = &sms.body[..body_end];
+    let (body, _) = crate::text::char_prefix(&sms.body, SMS_LOG_PREVIEW_CHARS);
     if sms.timestamp.is_empty() {
         body.to_string()
     } else {
@@ -91,12 +90,6 @@ fn sms_log_preview(sms: &SmsMessage) -> String {
         preview.push_str(body);
         preview
     }
-}
-
-fn char_prefix_end(s: &str, max_chars: usize) -> usize {
-    s.char_indices()
-        .nth(max_chars)
-        .map_or(s.len(), |(idx, _)| idx)
 }
 
 #[cfg(feature = "testing")]

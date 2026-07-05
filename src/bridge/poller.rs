@@ -262,5 +262,5 @@ fn push_display_line(display: &mut String, line: &str) {
 }
 
 fn preview(body: &str) -> String {
-    body.chars().take(50).collect()
+    crate::text::char_prefix(body, 50).0.to_string()
 }

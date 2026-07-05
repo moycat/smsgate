@@ -1098,7 +1098,67 @@ fn build_ucs2_pdus(phone: &str, ucs2: &[u8], max_parts: usize, srr: bool) -> Vec
 
 /// Return the number of SMS parts needed for `body` (0 on error).
 pub fn count_sms_parts(body: &str, max_parts: usize) -> usize {
-    build_sms_submit_pdus("+1", body, max_parts, false).len()
+    if body.is_empty() {
+        return 0;
+    }
+
+    if let Some(parts) = count_gsm7_parts(body) {
+        return if parts <= max_parts { parts } else { 0 };
+    }
+
+    let parts = count_ucs2_parts(body);
+    if parts <= max_parts {
+        parts
+    } else {
+        0
+    }
+}
+
+fn count_gsm7_parts(body: &str) -> Option<usize> {
+    let mut buf = [0u8; 2];
+    let mut total_septets = 0usize;
+    for ch in body.chars() {
+        let septets = encode_gsm7_char(ch as u32, &mut buf);
+        if septets == 0 {
+            return None;
+        }
+        total_septets += septets;
+    }
+
+    if total_septets <= 160 {
+        return Some(1);
+    }
+
+    let mut parts = 1usize;
+    let mut used = 0usize;
+    for ch in body.chars() {
+        let septets = encode_gsm7_char(ch as u32, &mut buf);
+        if used + septets > 153 {
+            parts += 1;
+            used = 0;
+        }
+        used += septets;
+    }
+    Some(parts)
+}
+
+fn count_ucs2_parts(body: &str) -> usize {
+    let total_units: usize = body.chars().map(char::len_utf16).sum();
+    if total_units <= 70 {
+        return 1;
+    }
+
+    let mut parts = 1usize;
+    let mut used = 0usize;
+    for ch in body.chars() {
+        let units = ch.len_utf16();
+        if used + units > 67 {
+            parts += 1;
+            used = 0;
+        }
+        used += units;
+    }
+    parts
 }
 
 // ---------------------------------------------------------------------------

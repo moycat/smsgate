@@ -4,7 +4,7 @@
 mod alloc_counter;
 
 use smsgate::bridge::{poller::poll_and_dispatch, reply_router::ReplyRouter};
-use smsgate::commands::{builtin::*, CommandRegistry};
+use smsgate::commands::{builtin::*, Command, CommandContext, CommandRegistry, SEND_SENTINEL};
 use smsgate::im::InboundMessage;
 use smsgate::log_ring::LogRing;
 use smsgate::modem::ModemStatus;
@@ -27,6 +27,24 @@ fn registry() -> CommandRegistry {
     registry.register(Box::new(ResumeCommand));
     registry.register(Box::new(RestartCommand));
     registry
+}
+
+fn ctx<'a>(
+    store: &'a MemStore,
+    status: &'a ModemStatus,
+    log: &'a LogRing,
+    queue: &'a SmsSender,
+) -> CommandContext<'a> {
+    CommandContext {
+        store,
+        modem_status: status,
+        log_ring: log,
+        send_queue: queue,
+        uptime_ms: 0,
+        free_heap_bytes: 0,
+        min_free_heap_bytes: 0,
+        wifi_info: "",
+    }
 }
 
 fn msg(text: &str) -> InboundMessage {
@@ -72,5 +90,27 @@ fn send_command_dispatch_allocations_are_bounded() {
     assert!(
         allocations <= 40,
         "send command dispatch allocated {allocations} times; expected sentinel cleanup without temporary line collection"
+    );
+}
+
+#[test]
+fn send_command_handle_allocations_are_bounded() {
+    let store = MemStore::new();
+    let status = ModemStatus::default();
+    let log = LogRing::new();
+    let queue = SmsSender::new();
+    let ctx = ctx(&store, &status, &log, &queue);
+    let command = SendCommand;
+
+    let (reply, allocations) = alloc_counter::count_allocations(|| {
+        command.handle("+15551234567 hello from direct allocation guard", &ctx)
+    });
+
+    assert!(reply.contains(&format!(
+        "{SEND_SENTINEL}+15551234567|hello from direct allocation guard"
+    )));
+    assert!(
+        allocations <= 3,
+        "send command allocated {allocations} times; expected phone normalization, user text, and sentinel output only"
     );
 }

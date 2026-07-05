@@ -231,11 +231,39 @@ pub fn send_too_long() -> &'static str {
 }
 
 pub fn send_queued(phone: &str, preview: &str, truncated: bool, parts: usize) -> String {
+    let mut out = String::with_capacity(send_queued_len(phone, preview, truncated, parts));
+    push_send_queued(&mut out, phone, preview, truncated, parts);
+    out
+}
+
+pub fn send_queued_len(phone: &str, preview: &str, truncated: bool, parts: usize) -> usize {
     let ellipsis = if truncated { "…" } else { "" };
-    format!(
-        "已入队：{} → \"{}{}\"（{} 条）",
-        phone, preview, ellipsis, parts
-    )
+    "已入队：".len()
+        + phone.len()
+        + " → \"".len()
+        + preview.len()
+        + ellipsis.len()
+        + "\"（".len()
+        + super::decimal_len(parts)
+        + " 条）".len()
+}
+
+pub fn push_send_queued(
+    out: &mut String,
+    phone: &str,
+    preview: &str,
+    truncated: bool,
+    parts: usize,
+) {
+    out.push_str("已入队：");
+    out.push_str(phone);
+    out.push_str(" → \"");
+    out.push_str(preview);
+    if truncated {
+        out.push('…');
+    }
+    use core::fmt::Write as _;
+    let _ = write!(out, "\"（{parts} 条）");
 }
 pub fn send_rate_limited() -> &'static str {
     "频率限制：每分钟最多发送 5 条 /send 命令。"

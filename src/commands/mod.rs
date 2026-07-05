@@ -29,6 +29,17 @@ pub(crate) fn push_encoded_sentinel_body(out: &mut String, body: &str) {
     }
 }
 
+pub(crate) fn encoded_sentinel_body_len(body: &str) -> usize {
+    let mut len = body.len();
+    for ch in body.chars() {
+        match ch {
+            '\\' | '\n' | '\r' => len += 1,
+            _ => {}
+        }
+    }
+    len
+}
+
 pub(crate) fn decode_sentinel_body(encoded: &str) -> String {
     let mut out = String::with_capacity(encoded.len());
     let mut chars = encoded.chars();

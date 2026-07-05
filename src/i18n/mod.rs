@@ -41,3 +41,12 @@ fn push_html_escaped(out: &mut String, s: &str) {
         }
     }
 }
+
+fn decimal_len(mut n: usize) -> usize {
+    let mut len = 1;
+    while n >= 10 {
+        n /= 10;
+        len += 1;
+    }
+    len
+}

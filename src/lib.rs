@@ -16,6 +16,7 @@ pub mod modem;
 pub mod ota;
 pub mod persist;
 pub mod sms;
+pub mod text;
 pub mod timer;
 
 #[cfg(feature = "testing")]

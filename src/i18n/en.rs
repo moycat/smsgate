@@ -231,11 +231,39 @@ pub fn send_too_long() -> &'static str {
 }
 
 pub fn send_queued(phone: &str, preview: &str, truncated: bool, parts: usize) -> String {
+    let mut out = String::with_capacity(send_queued_len(phone, preview, truncated, parts));
+    push_send_queued(&mut out, phone, preview, truncated, parts);
+    out
+}
+
+pub fn send_queued_len(phone: &str, preview: &str, truncated: bool, parts: usize) -> usize {
     let ellipsis = if truncated { "…" } else { "" };
-    format!(
-        "Queued: {} → \"{}{}\" ({} part(s))",
-        phone, preview, ellipsis, parts
-    )
+    "Queued: ".len()
+        + phone.len()
+        + " → \"".len()
+        + preview.len()
+        + ellipsis.len()
+        + "\" (".len()
+        + super::decimal_len(parts)
+        + " part(s))".len()
+}
+
+pub fn push_send_queued(
+    out: &mut String,
+    phone: &str,
+    preview: &str,
+    truncated: bool,
+    parts: usize,
+) {
+    out.push_str("Queued: ");
+    out.push_str(phone);
+    out.push_str(" → \"");
+    out.push_str(preview);
+    if truncated {
+        out.push('…');
+    }
+    use core::fmt::Write as _;
+    let _ = write!(out, "\" ({parts} part(s))");
 }
 pub fn send_rate_limited() -> &'static str {
     "Rate limit: at most 5 /send commands per minute."
