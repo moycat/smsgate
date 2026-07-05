@@ -100,6 +100,11 @@ pub enum MessengerError {
     Http(String),
     #[error("JSON parse error: {0}")]
     Json(String),
+    #[error("API rate limited: retry after {retry_after_secs}s: {description}")]
+    RateLimited {
+        retry_after_secs: u32,
+        description: String,
+    },
     #[error("API error: {0}")]
     Api(String),
     #[error("timeout: {0}")]

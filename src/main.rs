@@ -453,6 +453,35 @@ fn main() {
                         }
                     }
                     Err(e) => {
+                        if let Some(retry_after) = smsgate::im::telegram::poll_retry_after(&e) {
+                            let retry_after_secs = retry_after.as_secs();
+                            log::warn!(
+                                "[tg-poll] rate limited: {}; retrying after {}s",
+                                e,
+                                retry_after_secs
+                            );
+                            consecutive_poll_errors = 0;
+                            if tg_tx
+                                .send(TgPollEvent::Log(LogEvent::network(
+                                    "telegram",
+                                    &format!(
+                                        "poll rate limited; retrying after {}s",
+                                        retry_after_secs
+                                    ),
+                                    false,
+                                )))
+                                .is_err()
+                            {
+                                break;
+                            }
+                            if tg_tx.send(TgPollEvent::Batch(Vec::new())).is_err() {
+                                break;
+                            }
+                            if !sleep_with_poll_activity(retry_after, &tg_tx) {
+                                break;
+                            }
+                            continue;
+                        }
                         log::error!("[tg-poll] error: {}", e);
                         consecutive_poll_errors = consecutive_poll_errors.saturating_add(1);
                         let error = e.to_string();
@@ -1044,6 +1073,34 @@ fn telegram_poll_timeout_secs(use_cellular: bool) -> u32 {
         5
     } else {
         (Config::POLL_INTERVAL_MS / 1000).clamp(1, 30)
+    }
+}
+
+#[cfg(feature = "esp32")]
+fn sleep_with_poll_activity(
+    duration: std::time::Duration,
+    tx: &std::sync::mpsc::Sender<TgPollEvent>,
+) -> bool {
+    const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(30);
+    const WATCHDOG_TICK: std::time::Duration = std::time::Duration::from_secs(5);
+
+    let started = std::time::Instant::now();
+    let mut last_heartbeat = started;
+    loop {
+        unsafe {
+            let _ = esp_idf_sys::esp_task_wdt_reset();
+        }
+        let remaining = duration.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return true;
+        }
+        std::thread::sleep(remaining.min(WATCHDOG_TICK));
+        if last_heartbeat.elapsed() >= HEARTBEAT {
+            last_heartbeat = std::time::Instant::now();
+            if tx.send(TgPollEvent::Batch(Vec::new())).is_err() {
+                return false;
+            }
+        }
     }
 }
 

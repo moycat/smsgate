@@ -37,6 +37,12 @@ pub struct ApiResult<T> {
     pub ok: bool,
     pub result: Option<T>,
     pub description: Option<String>,
+    pub parameters: Option<ResponseParameters>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResponseParameters {
+    pub retry_after: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]

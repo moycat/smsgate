@@ -1,6 +1,9 @@
 //! Tests for Telegram health logging helpers.
 
-use smsgate::im::telegram::{poll_error_log_detail, should_log_poll_error};
+use smsgate::im::{
+    telegram::{poll_error_log_detail, poll_retry_after, should_log_poll_error},
+    MessengerError,
+};
 use std::time::Duration;
 
 #[test]
@@ -24,6 +27,30 @@ fn poll_errors_request_recovery_after_first_summary() {
         .collect();
 
     assert_eq!(recovered, vec![12, 24]);
+}
+
+#[test]
+fn poll_retry_after_uses_structured_rate_limit_error() {
+    let error = MessengerError::RateLimited {
+        retry_after_secs: 7,
+        description: "Too Many Requests".to_string(),
+    };
+
+    assert_eq!(poll_retry_after(&error), Some(Duration::from_secs(7)));
+}
+
+#[test]
+fn poll_retry_after_parses_telegram_description_fallback() {
+    let error = MessengerError::Api("Too Many Requests: retry after 5".to_string());
+
+    assert_eq!(poll_retry_after(&error), Some(Duration::from_secs(5)));
+}
+
+#[test]
+fn poll_retry_after_ignores_non_rate_limit_errors() {
+    let error = MessengerError::Http("tls reconnect failed".to_string());
+
+    assert_eq!(poll_retry_after(&error), None);
 }
 
 #[test]

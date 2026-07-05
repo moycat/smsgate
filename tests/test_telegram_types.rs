@@ -308,6 +308,14 @@ fn get_updates_api_error() {
 }
 
 #[test]
+fn api_result_deserializes_retry_after_parameter() {
+    let json = r#"{"ok":false,"description":"Too Many Requests: retry after 5","parameters":{"retry_after":5}}"#;
+    let r: ApiResult<Vec<Update>> = serde_json::from_str(json).unwrap();
+
+    assert_eq!(r.parameters.unwrap().retry_after, Some(5));
+}
+
+#[test]
 fn get_file_result_extracts_download_path() {
     let json = r#"{
         "ok": true,

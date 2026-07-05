@@ -8,9 +8,10 @@ pub mod worker;
 
 use super::{
     InboundCallback, InboundDocument, InboundMessage, InlineKeyboard, MessageFormat, MessageId,
+    MessengerError,
 };
 #[cfg(feature = "esp32")]
-use super::{MessageSink, MessageSource, MessengerError};
+use super::{MessageSink, MessageSource};
 #[cfg(feature = "esp32")]
 use crate::modem::ModemPort;
 #[cfg(feature = "esp32")]
@@ -50,6 +51,17 @@ pub fn should_recover_after_poll_errors(consecutive_errors: u16) -> bool {
 
 pub fn poll_error_log_detail(consecutive_errors: u16, error: &str) -> String {
     format!("poll error x{}: {}", consecutive_errors, error)
+}
+
+pub fn poll_retry_after(error: &MessengerError) -> Option<Duration> {
+    let retry_after_secs = match error {
+        MessengerError::RateLimited {
+            retry_after_secs, ..
+        } => Some(*retry_after_secs),
+        MessengerError::Api(description) => parse_retry_after_description(description),
+        _ => None,
+    }?;
+    Some(Duration::from_secs(u64::from(retry_after_secs.max(1))))
 }
 
 pub fn telegram_send_retry_interval() -> Duration {
@@ -198,6 +210,19 @@ fn push_json_string(body: &mut String, value: &str) {
     body.push('"');
 }
 
+fn parse_retry_after_description(description: &str) -> Option<u32> {
+    let retry_after = description.split_once("retry after ")?.1;
+    let digits_len = retry_after
+        .as_bytes()
+        .iter()
+        .take_while(|b| b.is_ascii_digit())
+        .count();
+    if digits_len == 0 {
+        return None;
+    }
+    retry_after[..digits_len].parse().ok()
+}
+
 /// Convert a Telegram update into the backend-neutral inbound representation.
 pub fn update_to_inbound_message(update: Update, chat_id: i64) -> Option<InboundMessage> {
     if let Some(callback) = update.callback_query {
@@ -344,7 +369,20 @@ impl TelegramMessenger {
         if result.ok {
             Ok(result.result)
         } else {
-            Err(MessengerError::Api(result.description.unwrap_or_default()))
+            let description = result.description.unwrap_or_default();
+            let retry_after_secs = result
+                .parameters
+                .as_ref()
+                .and_then(|parameters| parameters.retry_after)
+                .or_else(|| parse_retry_after_description(&description));
+            if let Some(retry_after_secs) = retry_after_secs {
+                Err(MessengerError::RateLimited {
+                    retry_after_secs,
+                    description,
+                })
+            } else {
+                Err(MessengerError::Api(description))
+            }
         }
     }
 
