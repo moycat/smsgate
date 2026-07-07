@@ -79,10 +79,11 @@ fn main() {
     let loaded_creds = RuntimeConfig::load(&nvs_partition);
     let creds = RuntimeConfig::resolve_compiled_config(loaded_creds, Config::APPLY_COMPILED_CONFIG);
     if Config::APPLY_COMPILED_CONFIG {
-        if creds.save(&nvs_partition) {
-            log::info!("[main] compile-time runtime config applied to NVS");
-        } else {
-            log::error!("[main] failed to persist compile-time runtime config to NVS");
+        match creds.save(&nvs_partition) {
+            Ok(()) => log::info!("[main] compile-time runtime config applied to NVS"),
+            Err(e) => {
+                log::error!("[main] failed to persist compile-time runtime config to NVS: {e}")
+            }
         }
     }
     if !creds.is_provisioned() {
@@ -94,9 +95,14 @@ fn main() {
     let mut peripherals = esp_idf_hal::peripherals::Peripherals::take().unwrap();
     let board = TA7670X;
     board.init(&mut peripherals).expect("board init failed");
-    let modem = board
-        .build_modem_port(&mut peripherals, &creds)
-        .expect("modem init failed");
+    let modem = match board.build_modem_port(&mut peripherals, &creds) {
+        Ok(modem) => modem,
+        Err(e) => {
+            log::error!("[main] modem init failed after retry: {e}; rebooting");
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            esp_idf_hal::reset::restart();
+        }
+    };
 
     // ---- NVS store (fall back to MemStore on NVS failure) ----
     let nvs_failed: bool;
@@ -1694,7 +1700,7 @@ fn serial_provision(nvs_partition: &esp_idf_svc::nvs::EspDefaultNvsPartition) ->
     if let Ok(v) = value.parse() {
         creds.poll_interval_ms = v;
     }
-    if creds.save(nvs_partition) {
+    if creds.save(nvs_partition).is_ok() {
         println!("\nRuntime config saved. Rebooting…");
     } else {
         println!("\nERROR: NVS write failed. Rebooting — please try again.");

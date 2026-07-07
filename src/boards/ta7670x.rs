@@ -52,44 +52,7 @@ impl Board for TA7670X {
         );
 
         if cold_boot {
-            // MODEM_RESET_PIN — hard-reset the modem.
-            // Sequence from LilyGo C++ reference (MODEM_RESET_LEVEL=HIGH for T-A7670X):
-            //   LOW for 100 ms → HIGH for 2600 ms → LOW.
-            let mut reset_pin = unsafe {
-                esp_idf_hal::gpio::PinDriver::output(AnyOutputPin::steal(MODEM_RESET_PIN))
-                    .map_err(|e| BoardError::Gpio(e.to_string()))?
-            };
-            reset_pin
-                .set_low()
-                .map_err(|e| BoardError::Gpio(e.to_string()))?;
-            std::thread::sleep(Duration::from_millis(100));
-            reset_pin
-                .set_high()
-                .map_err(|e| BoardError::Gpio(e.to_string()))?;
-            std::thread::sleep(Duration::from_millis(2600));
-            reset_pin
-                .set_low()
-                .map_err(|e| BoardError::Gpio(e.to_string()))?;
-            drop(reset_pin);
-
-            // PWRKEY pulse — LOW for 100 ms, HIGH for 1000 ms, back to LOW.
-            // A7670G datasheet: minimum PWRKEY HIGH time for power-on is 1000 ms.
-            // (100 ms is only enough to power OFF an already-running modem.)
-            let mut pwrkey = unsafe {
-                esp_idf_hal::gpio::PinDriver::output(AnyOutputPin::steal(Config::PWRKEY_PIN))
-                    .map_err(|e| BoardError::Gpio(e.to_string()))?
-            };
-            pwrkey
-                .set_low()
-                .map_err(|e| BoardError::Gpio(e.to_string()))?;
-            std::thread::sleep(Duration::from_millis(100));
-            pwrkey
-                .set_high()
-                .map_err(|e| BoardError::Gpio(e.to_string()))?;
-            std::thread::sleep(Duration::from_millis(1000));
-            pwrkey
-                .set_low()
-                .map_err(|e| BoardError::Gpio(e.to_string()))?;
+            modem_power_on_sequence()?;
             // No post-PWRKEY sleep: the AT probe loop in A76xxModem::init()
             // retries for up to 30 s, so it acts as the wait.
             log::info!("[board] cold boot — modem power-on sequence complete");
@@ -138,10 +101,64 @@ impl Board for TA7670X {
 
         let port = HardwareAtPort::new(uart);
         let mut modem = A76xxModem::new(port);
-        modem
-            .init(config.cellular_data, &config.sim_pin)
-            .map_err(|e| BoardError::Uart(e.to_string()))?;
+        const INIT_ATTEMPTS: usize = 2;
+        for attempt in 1..=INIT_ATTEMPTS {
+            match modem.init(config.cellular_data, &config.sim_pin) {
+                Ok(()) => return Ok(Arc::new(Mutex::new(modem))),
+                Err(e) if attempt < INIT_ATTEMPTS => {
+                    log::error!(
+                        "[board] modem init attempt {attempt}/{INIT_ATTEMPTS} failed: {e}; retrying power sequence"
+                    );
+                    modem_power_on_sequence()?;
+                }
+                Err(e) => return Err(BoardError::Uart(e.to_string())),
+            }
+        }
 
-        Ok(Arc::new(Mutex::new(modem)))
+        Err(BoardError::Uart("modem init retry exhausted".to_string()))
     }
+}
+
+fn modem_power_on_sequence() -> Result<(), BoardError> {
+    use esp_idf_hal::gpio::AnyOutputPin;
+
+    // MODEM_RESET_PIN — hard-reset the modem.
+    // Sequence from LilyGo C++ reference (MODEM_RESET_LEVEL=HIGH for T-A7670X):
+    //   LOW for 100 ms -> HIGH for 2600 ms -> LOW.
+    let mut reset_pin = unsafe {
+        esp_idf_hal::gpio::PinDriver::output(AnyOutputPin::steal(MODEM_RESET_PIN))
+            .map_err(|e| BoardError::Gpio(e.to_string()))?
+    };
+    reset_pin
+        .set_low()
+        .map_err(|e| BoardError::Gpio(e.to_string()))?;
+    std::thread::sleep(Duration::from_millis(100));
+    reset_pin
+        .set_high()
+        .map_err(|e| BoardError::Gpio(e.to_string()))?;
+    std::thread::sleep(Duration::from_millis(2600));
+    reset_pin
+        .set_low()
+        .map_err(|e| BoardError::Gpio(e.to_string()))?;
+    drop(reset_pin);
+
+    // PWRKEY pulse — LOW for 100 ms, HIGH for 1000 ms, back to LOW.
+    // A7670G datasheet: minimum PWRKEY HIGH time for power-on is 1000 ms.
+    // (100 ms is only enough to power OFF an already-running modem.)
+    let mut pwrkey = unsafe {
+        esp_idf_hal::gpio::PinDriver::output(AnyOutputPin::steal(Config::PWRKEY_PIN))
+            .map_err(|e| BoardError::Gpio(e.to_string()))?
+    };
+    pwrkey
+        .set_low()
+        .map_err(|e| BoardError::Gpio(e.to_string()))?;
+    std::thread::sleep(Duration::from_millis(100));
+    pwrkey
+        .set_high()
+        .map_err(|e| BoardError::Gpio(e.to_string()))?;
+    std::thread::sleep(Duration::from_millis(1000));
+    pwrkey
+        .set_low()
+        .map_err(|e| BoardError::Gpio(e.to_string()))?;
+    Ok(())
 }

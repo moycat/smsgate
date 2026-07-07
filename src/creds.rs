@@ -81,20 +81,54 @@ impl RuntimeConfig {
 #[cfg(feature = "esp32")]
 const CREDS_NS: &str = "smsgcfg";
 
-#[cfg(feature = "esp32")]
+#[cfg(any(feature = "esp32", feature = "testing"))]
 mod keys {
     pub const WIFI_SSID: &str = "wifi_ssid";
     pub const WIFI_PASS: &str = "wifi_pass";
     pub const BOT_TOKEN: &str = "bot_token";
     pub const CHAT_ID: &str = "chat_id";
-    pub const CELLULAR_DATA: &str = "cellular_data";
-    pub const CELLULAR_FALLBACK: &str = "cellular_fallback";
+    pub const CELLULAR_DATA: &str = "cell_data";
+    pub const CELLULAR_FALLBACK: &str = "cell_fallback";
     pub const APN: &str = "apn";
     pub const APN_USER: &str = "apn_user";
     pub const APN_PASS: &str = "apn_pass";
     pub const SIM_PIN: &str = "sim_pin";
     pub const MAX_FAILURES: &str = "max_failures";
-    pub const POLL_INTERVAL_MS: &str = "poll_interval_ms";
+    pub const POLL_INTERVAL_MS: &str = "poll_ms";
+}
+
+#[cfg(feature = "testing")]
+impl RuntimeConfig {
+    pub fn nvs_keys_for_test() -> &'static [&'static str] {
+        &[
+            keys::WIFI_SSID,
+            keys::WIFI_PASS,
+            keys::BOT_TOKEN,
+            keys::CHAT_ID,
+            keys::CELLULAR_DATA,
+            keys::CELLULAR_FALLBACK,
+            keys::APN,
+            keys::APN_USER,
+            keys::APN_PASS,
+            keys::SIM_PIN,
+            keys::MAX_FAILURES,
+            keys::POLL_INTERVAL_MS,
+        ]
+    }
+}
+
+#[cfg(feature = "esp32")]
+#[derive(Debug)]
+pub struct RuntimeConfigSaveError {
+    pub key: &'static str,
+    pub error: String,
+}
+
+#[cfg(feature = "esp32")]
+impl core::fmt::Display for RuntimeConfigSaveError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "failed to write NVS key {}: {}", self.key, self.error)
+    }
 }
 
 #[cfg(feature = "esp32")]
@@ -172,55 +206,42 @@ impl RuntimeConfig {
         c
     }
 
-    /// Persist all fields to NVS. Returns `true` on full success.
-    pub fn save(&self, partition: &esp_idf_svc::nvs::EspDefaultNvsPartition) -> bool {
+    /// Persist all fields to NVS.
+    pub fn save(
+        &self,
+        partition: &esp_idf_svc::nvs::EspDefaultNvsPartition,
+    ) -> Result<(), RuntimeConfigSaveError> {
         use esp_idf_svc::nvs::EspNvs;
 
-        let Ok(nvs) = EspNvs::new(partition.clone(), CREDS_NS, true) else {
-            return false;
+        let nvs =
+            EspNvs::new(partition.clone(), CREDS_NS, true).map_err(|e| RuntimeConfigSaveError {
+                key: CREDS_NS,
+                error: e.to_string(),
+            })?;
+        let set_blob = |key: &'static str, value: &[u8]| -> Result<(), RuntimeConfigSaveError> {
+            nvs.set_blob(key, value)
+                .map_err(|e| RuntimeConfigSaveError {
+                    key,
+                    error: e.to_string(),
+                })
         };
-        nvs.set_blob(keys::WIFI_SSID, self.wifi_ssid.as_bytes())
-            .is_ok()
-            && nvs
-                .set_blob(keys::WIFI_PASS, self.wifi_pass.as_bytes())
-                .is_ok()
-            && nvs
-                .set_blob(keys::BOT_TOKEN, self.bot_token.as_bytes())
-                .is_ok()
-            && nvs
-                .set_blob(keys::CHAT_ID, self.chat_id.to_string().as_bytes())
-                .is_ok()
-            && nvs
-                .set_blob(
-                    keys::CELLULAR_DATA,
-                    self.cellular_data.to_string().as_bytes(),
-                )
-                .is_ok()
-            && nvs
-                .set_blob(
-                    keys::CELLULAR_FALLBACK,
-                    self.cellular_fallback.to_string().as_bytes(),
-                )
-                .is_ok()
-            && nvs.set_blob(keys::APN, self.apn.as_bytes()).is_ok()
-            && nvs
-                .set_blob(keys::APN_USER, self.apn_user.as_bytes())
-                .is_ok()
-            && nvs
-                .set_blob(keys::APN_PASS, self.apn_pass.as_bytes())
-                .is_ok()
-            && nvs.set_blob(keys::SIM_PIN, self.sim_pin.as_bytes()).is_ok()
-            && nvs
-                .set_blob(
-                    keys::MAX_FAILURES,
-                    self.max_failures_before_reboot.to_string().as_bytes(),
-                )
-                .is_ok()
-            && nvs
-                .set_blob(
-                    keys::POLL_INTERVAL_MS,
-                    self.poll_interval_ms.to_string().as_bytes(),
-                )
-                .is_ok()
+        set_blob(keys::WIFI_SSID, self.wifi_ssid.as_bytes())?;
+        set_blob(keys::WIFI_PASS, self.wifi_pass.as_bytes())?;
+        set_blob(keys::BOT_TOKEN, self.bot_token.as_bytes())?;
+        let chat_id = self.chat_id.to_string();
+        set_blob(keys::CHAT_ID, chat_id.as_bytes())?;
+        let cellular_data = self.cellular_data.to_string();
+        set_blob(keys::CELLULAR_DATA, cellular_data.as_bytes())?;
+        let cellular_fallback = self.cellular_fallback.to_string();
+        set_blob(keys::CELLULAR_FALLBACK, cellular_fallback.as_bytes())?;
+        set_blob(keys::APN, self.apn.as_bytes())?;
+        set_blob(keys::APN_USER, self.apn_user.as_bytes())?;
+        set_blob(keys::APN_PASS, self.apn_pass.as_bytes())?;
+        set_blob(keys::SIM_PIN, self.sim_pin.as_bytes())?;
+        let max_failures = self.max_failures_before_reboot.to_string();
+        set_blob(keys::MAX_FAILURES, max_failures.as_bytes())?;
+        let poll_interval_ms = self.poll_interval_ms.to_string();
+        set_blob(keys::POLL_INTERVAL_MS, poll_interval_ms.as_bytes())?;
+        Ok(())
     }
 }

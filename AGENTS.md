@@ -425,7 +425,7 @@ Verify after every change:
 - `ScriptedModem` unconsumed steps → test failure (no silent pass)
 - Command count ≤ 10 (hard cap — adding one requires removing one)
 - `"smsgate"` NVS key set unchanged (4 keys only: im_cursor, reply_map, block_list, fwd_enabled)
-- `"smsgcfg"` NVS runtime config keys unchanged (12 keys: wifi_ssid/pass, bot_token, chat_id, cellular_data/fallback, apn/user/pass, sim_pin, max_failures, poll_interval_ms)
+- `"smsgcfg"` NVS runtime config keys unchanged (12 keys: wifi_ssid, wifi_pass, bot_token, chat_id, cell_data, cell_fallback, apn, apn_user, apn_pass, sim_pin, max_failures, poll_ms)
 
 ## sdkconfig.defaults Known Quirk
 

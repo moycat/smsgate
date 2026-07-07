@@ -117,3 +117,14 @@ fn runtime_config_uses_compiled_defaults_when_compiled_config_is_applied() {
     );
     assert_eq!(resolved.poll_interval_ms, compiled.poll_interval_ms);
 }
+
+#[test]
+fn runtime_config_nvs_keys_fit_esp_idf_limit() {
+    for key in RuntimeConfig::nvs_keys_for_test() {
+        assert!(
+            key.len() <= 15,
+            "NVS key {key:?} is {} bytes; ESP-IDF NVS keys must be at most 15 bytes",
+            key.len()
+        );
+    }
+}
