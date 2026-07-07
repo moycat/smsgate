@@ -62,8 +62,9 @@ enum TgPollEvent {
 #[cfg(feature = "esp32")]
 fn main() {
     esp_idf_sys::link_patches();
-    let (backtrace_key, backtrace_value) = smsgate::diagnostics::rust_backtrace_env();
-    std::env::set_var(backtrace_key, backtrace_value);
+    for (key, value) in smsgate::diagnostics::firmware_diagnostic_env() {
+        std::env::set_var(key, value);
+    }
     esp_idf_svc::log::EspLogger::initialize_default();
 
     let starting_message = smsgate::ota::format_starting_message(Config::GIT_COMMIT);
