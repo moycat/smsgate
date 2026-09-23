@@ -11,9 +11,6 @@ pub fn nvs_fail() -> &'static str {
     "⚠️ NVS 初始化失败，以无持久化模式运行。\
      黑名单和游标将在重启后重置。"
 }
-pub fn rebooting() -> &'static str {
-    "♻️ 正在重启…"
-}
 pub fn low_heap(free_bytes: u32) -> String {
     format!("⚠️ 可用内存不足：{} 字节", free_bytes)
 }

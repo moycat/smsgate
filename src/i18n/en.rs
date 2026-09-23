@@ -11,9 +11,6 @@ pub fn nvs_fail() -> &'static str {
     "⚠️ NVS init failed — running without persistence. \
      Block list and cursor will reset on reboot."
 }
-pub fn rebooting() -> &'static str {
-    "♻️ Rebooting now…"
-}
 pub fn low_heap(free_bytes: u32) -> String {
     format!("⚠️ Low heap: {} bytes", free_bytes)
 }

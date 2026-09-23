@@ -975,8 +975,7 @@ fn main() {
                         }
                         if outcome.restart_requested {
                             log::info!("[main] restart requested via /restart command");
-                            let _ = messenger.send_message(smsgate::i18n::rebooting());
-                            drain_tg_send!();
+                            // The dispatcher has already sent the command reply.
                             esp_idf_hal::reset::restart();
                         }
                     }
