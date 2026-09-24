@@ -10,16 +10,24 @@ use std::time::Duration;
 
 const HOST: &str = "api.telegram.org";
 const PORT: u16 = 443;
-const READ_TIMEOUT: Duration = Duration::from_secs(30);
+const READ_TIMEOUT: Duration = Duration::from_secs(55);
 const FILE_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_HEADER_BYTES: usize = 2 * 1024;
-const MAX_BODY_BYTES: usize = 8 * 1024;
+const MAX_BODY_BYTES: usize = 24 * 1024;
 const STREAM_BUF_BYTES: usize = 4096;
 
 /// TLS-backed HTTPS client for api.telegram.org.
 pub struct TelegramHttpClient {
     tls: Option<EspTls<InternalSocket>>,
     ca_bundle: Option<&'static [u8]>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TelegramHttpError {
+    #[error("request was not sent: {0}")]
+    NotSent(#[source] anyhow::Error),
+    #[error("request outcome is unknown: {0}")]
+    OutcomeUnknown(#[source] anyhow::Error),
 }
 
 impl TelegramHttpClient {
@@ -53,31 +61,19 @@ impl TelegramHttpClient {
 
     /// POST JSON to a Telegram Bot API path; returns the response body.
     ///
-    /// On connection-level failure (server closed keep-alive, timeout, etc.),
-    /// reconnects once and retries automatically.
-    pub fn post(&mut self, path: &str, json_body: &str) -> anyhow::Result<String> {
+    /// Never replay a POST after an uncertain response: Telegram may already
+    /// have accepted a side-effecting request such as sendMessage.
+    pub fn post(&mut self, path: &str, json_body: &str) -> Result<String, TelegramHttpError> {
         let method = bot_api_method(path);
-        match self.do_post(path, json_body, "initial") {
+        if self.tls.is_none() {
+            self.reconnect().map_err(TelegramHttpError::NotSent)?;
+        }
+        match self.do_post(path, json_body) {
             Ok(body) => Ok(body),
             Err(e) => {
-                let initial_error = format!("{:#}", e);
-                log::warn!(
-                    "[http] {} request failed ({}), reconnecting",
-                    method,
-                    initial_error
-                );
-                self.reconnect().with_context(|| {
-                    format!(
-                        "{} reconnect failed after initial error: {}",
-                        method, initial_error
-                    )
-                })?;
-                self.do_post(path, json_body, "retry").with_context(|| {
-                    format!(
-                        "{} retry failed after reconnect; initial error: {}",
-                        method, initial_error
-                    )
-                })
+                log::warn!("[http] {} request failed: {:#}", method, e);
+                self.tls.take();
+                Err(TelegramHttpError::OutcomeUnknown(e))
             }
         }
     }
@@ -165,7 +161,8 @@ impl TelegramHttpClient {
 
         let mut buf = [0u8; STREAM_BUF_BYTES];
         let mut deadline = std::time::Instant::now() + FILE_IDLE_TIMEOUT;
-        while headers.content_length.map_or(true, |cl| received < cl) {
+        while headers.content_length.is_none_or(|cl| received < cl) {
+            reset_current_task_watchdog();
             if std::time::Instant::now() > deadline {
                 anyhow::bail!("file download idle timeout");
             }
@@ -196,7 +193,7 @@ impl TelegramHttpClient {
         Ok(received)
     }
 
-    fn do_post(&mut self, path: &str, json_body: &str, attempt: &str) -> anyhow::Result<String> {
+    fn do_post(&mut self, path: &str, json_body: &str) -> anyhow::Result<String> {
         let method = bot_api_method(path);
         let body_bytes = json_body.as_bytes();
         log::debug!(
@@ -218,79 +215,112 @@ impl TelegramHttpClient {
 
         let tls = self.tls_mut()?;
         tls.write_all(request_head.as_bytes())
-            .with_context(|| format!("{} {} write failed", method, attempt))?;
+            .with_context(|| format!("{} header write failed", method))?;
         tls.write_all(body_bytes)
-            .with_context(|| format!("{} {} body write failed", method, attempt))?;
+            .with_context(|| format!("{} body write failed", method))?;
 
-        let mut response = String::with_capacity(4096);
-        let mut buf = [0u8; 1024];
+        let headers = self.read_binary_headers()?;
+        let close_after_response = headers.connection_close;
         let deadline = std::time::Instant::now() + READ_TIMEOUT;
-
-        // Read until we have the full headers
-        loop {
-            if std::time::Instant::now() > deadline {
-                anyhow::bail!("read timeout");
+        let body = if headers.chunked {
+            self.read_chunked_body(headers.remainder, deadline)?
+        } else {
+            let length = headers.content_length.ok_or_else(|| {
+                anyhow::anyhow!("HTTP response lacks Content-Length or chunked framing")
+            })?;
+            if length > MAX_BODY_BYTES {
+                anyhow::bail!(
+                    "HTTP body length {} exceeds {} bytes",
+                    length,
+                    MAX_BODY_BYTES
+                );
             }
-            let n = self
-                .tls_mut()?
-                .read(&mut buf)
-                .with_context(|| format!("{} {} header read failed", method, attempt))?;
-            if n == 0 {
-                // Server closed the connection — trigger reconnect
-                anyhow::bail!("connection closed before headers received");
+            let mut body = headers.remainder;
+            while body.len() < length {
+                self.read_more(&mut body, deadline, length)?;
             }
-            response.push_str(&String::from_utf8_lossy(&buf[..n]));
-            if response.len() > MAX_HEADER_BYTES && !response.contains("\r\n\r\n") {
-                anyhow::bail!("HTTP headers exceeded {} bytes", MAX_HEADER_BYTES);
-            }
-            if response.contains("\r\n\r\n") {
-                break;
-            }
+            body.truncate(length);
+            body
+        };
+        let body = String::from_utf8(body).context("HTTP response body is not UTF-8")?;
+        if !(200..300).contains(&headers.status) && !body.trim_start().starts_with('{') {
+            anyhow::bail!("HTTP {} from Telegram", headers.status);
         }
-
-        // Parse Content-Length
-        let cl: usize = response
-            .lines()
-            .find(|l| {
-                l.get(..15)
-                    .is_some_and(|p| p.eq_ignore_ascii_case("content-length:"))
-            })
-            .and_then(|l| l.splitn(2, ':').nth(1))
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(0);
-        if cl > MAX_BODY_BYTES {
-            anyhow::bail!("HTTP body length {} exceeds {} bytes", cl, MAX_BODY_BYTES);
+        if close_after_response {
+            self.tls.take();
         }
-
-        // Find body start
-        let body_start = response
-            .find("\r\n\r\n")
-            .map(|i| i + 4)
-            .unwrap_or(response.len());
-        let mut body = response[body_start..].to_string();
-        if body.len() > MAX_BODY_BYTES {
-            anyhow::bail!("HTTP body exceeded {} bytes", MAX_BODY_BYTES);
-        }
-
-        // Read remaining body bytes
-        while body.len() < cl {
-            if std::time::Instant::now() > deadline {
-                anyhow::bail!("body read timeout");
-            }
-            let n = self
-                .tls_mut()?
-                .read(&mut buf)
-                .with_context(|| format!("{} {} body read failed", method, attempt))?;
-            if n == 0 {
-                break;
-            }
-            if body.len() + n > MAX_BODY_BYTES {
-                anyhow::bail!("HTTP body exceeded {} bytes", MAX_BODY_BYTES);
-            }
-            body.push_str(&String::from_utf8_lossy(&buf[..n]));
-        }
-
         Ok(body)
+    }
+
+    fn read_more(
+        &mut self,
+        bytes: &mut Vec<u8>,
+        deadline: std::time::Instant,
+        limit: usize,
+    ) -> anyhow::Result<()> {
+        reset_current_task_watchdog();
+        if std::time::Instant::now() > deadline {
+            anyhow::bail!("HTTP response read timeout");
+        }
+        let mut buf = [0u8; 1024];
+        let n = self
+            .tls_mut()?
+            .read(&mut buf)
+            .context("HTTP body read failed")?;
+        if n == 0 {
+            anyhow::bail!("HTTP response closed before body completed");
+        }
+        if bytes.len().saturating_add(n) > limit.saturating_add(1024) {
+            anyhow::bail!("HTTP response exceeded {} bytes", limit);
+        }
+        bytes.extend_from_slice(&buf[..n]);
+        Ok(())
+    }
+
+    fn read_chunked_body(
+        &mut self,
+        mut raw: Vec<u8>,
+        deadline: std::time::Instant,
+    ) -> anyhow::Result<Vec<u8>> {
+        let mut body = Vec::new();
+        loop {
+            let line_end = loop {
+                if let Some(pos) = raw.windows(2).position(|pair| pair == b"\r\n") {
+                    break pos;
+                }
+                if raw.len() > 128 {
+                    anyhow::bail!("HTTP chunk header too long");
+                }
+                self.read_more(&mut raw, deadline, MAX_BODY_BYTES)?;
+            };
+            let size_line = std::str::from_utf8(&raw[..line_end])?;
+            let size = usize::from_str_radix(size_line.split(';').next().unwrap_or(""), 16)
+                .context("invalid HTTP chunk size")?;
+            raw.drain(..line_end + 2);
+            if size == 0 {
+                // Consume optional trailer fields before reusing the socket.
+                loop {
+                    if raw.starts_with(b"\r\n") || find_header_end(&raw).is_some() {
+                        return Ok(body);
+                    }
+                    if raw.len() > MAX_HEADER_BYTES {
+                        anyhow::bail!("HTTP chunk trailers exceeded {} bytes", MAX_HEADER_BYTES);
+                    }
+                    self.read_more(&mut raw, deadline, MAX_HEADER_BYTES)?;
+                }
+            }
+            if size > MAX_BODY_BYTES - body.len() {
+                anyhow::bail!("HTTP chunked body exceeds {} bytes", MAX_BODY_BYTES);
+            }
+            while raw.len() < size + 2 {
+                self.read_more(&mut raw, deadline, MAX_BODY_BYTES)?;
+            }
+            if &raw[size..size + 2] != b"\r\n" {
+                anyhow::bail!("HTTP chunk terminator missing");
+            }
+            body.extend_from_slice(&raw[..size]);
+            raw.drain(..size + 2);
+        }
     }
 
     fn read_binary_headers(&mut self) -> anyhow::Result<ResponseHeaders> {
@@ -299,13 +329,14 @@ impl TelegramHttpClient {
         let deadline = std::time::Instant::now() + READ_TIMEOUT;
 
         loop {
+            reset_current_task_watchdog();
             if std::time::Instant::now() > deadline {
                 anyhow::bail!("header read timeout");
             }
             let n = self
                 .tls_mut()?
                 .read(&mut buf)
-                .context("file download header read failed")?;
+                .context("HTTP response header read failed")?;
             if n == 0 {
                 anyhow::bail!("connection closed before headers received");
             }
@@ -340,6 +371,13 @@ impl TelegramHttpClient {
     }
 }
 
+fn reset_current_task_watchdog() {
+    // SAFETY: ESP-IDF only touches the current task's watchdog subscription.
+    unsafe {
+        let _ = esp_idf_sys::esp_task_wdt_reset();
+    }
+}
+
 fn bot_api_method(path: &str) -> &str {
     path.rsplit('/')
         .next()
@@ -351,6 +389,7 @@ struct ResponseHeaders {
     status: u16,
     content_length: Option<usize>,
     chunked: bool,
+    connection_close: bool,
     remainder: Vec<u8>,
 }
 
@@ -378,10 +417,20 @@ fn parse_headers(header: &str, remainder: Vec<u8>) -> anyhow::Result<ResponseHea
             .is_some_and(|p| p.eq_ignore_ascii_case("transfer-encoding:"))
             && line.to_ascii_lowercase().contains("chunked")
     });
+    let connection_close = header.lines().any(|line| {
+        line.get(..11)
+            .is_some_and(|p| p.eq_ignore_ascii_case("connection:"))
+            && line.split_once(':').is_some_and(|(_, value)| {
+                value
+                    .split(',')
+                    .any(|token| token.trim().eq_ignore_ascii_case("close"))
+            })
+    });
     Ok(ResponseHeaders {
         status,
         content_length,
         chunked,
+        connection_close,
         remainder,
     })
 }

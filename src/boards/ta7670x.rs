@@ -33,6 +33,8 @@ impl Board for TA7670X {
         // (LilyGo gpio.h: "The modem power switch must be set to HIGH for the
         //  modem to supply power.")
         let mut poweron = unsafe {
+            // SAFETY: GPIO12 is reserved for the modem rail on this board and
+            // no other driver acquires it during the firmware lifetime.
             esp_idf_hal::gpio::PinDriver::output(AnyOutputPin::steal(BOARD_POWERON_PIN))
                 .map_err(|e| BoardError::Gpio(e.to_string()))?
         };
@@ -103,7 +105,7 @@ impl Board for TA7670X {
         let mut modem = A76xxModem::new(port);
         const INIT_ATTEMPTS: usize = 2;
         for attempt in 1..=INIT_ATTEMPTS {
-            match modem.init(config.cellular_data, &config.sim_pin) {
+            match modem.init(&config.sim_pin) {
                 Ok(()) => return Ok(Arc::new(Mutex::new(modem))),
                 Err(e) if attempt < INIT_ATTEMPTS => {
                     log::error!(
@@ -126,6 +128,7 @@ fn modem_power_on_sequence() -> Result<(), BoardError> {
     // Sequence from LilyGo C++ reference (MODEM_RESET_LEVEL=HIGH for T-A7670X):
     //   LOW for 100 ms -> HIGH for 2600 ms -> LOW.
     let mut reset_pin = unsafe {
+        // SAFETY: GPIO5 is reserved for modem reset, with no other owner.
         esp_idf_hal::gpio::PinDriver::output(AnyOutputPin::steal(MODEM_RESET_PIN))
             .map_err(|e| BoardError::Gpio(e.to_string()))?
     };
@@ -146,6 +149,7 @@ fn modem_power_on_sequence() -> Result<(), BoardError> {
     // A7670G datasheet: minimum PWRKEY HIGH time for power-on is 1000 ms.
     // (100 ms is only enough to power OFF an already-running modem.)
     let mut pwrkey = unsafe {
+        // SAFETY: GPIO4 is reserved for modem PWRKEY, with no other owner.
         esp_idf_hal::gpio::PinDriver::output(AnyOutputPin::steal(Config::PWRKEY_PIN))
             .map_err(|e| BoardError::Gpio(e.to_string()))?
     };

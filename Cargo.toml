@@ -21,9 +21,9 @@ testing = []
 
 [dependencies]
 # ESP32 HAL (omitted for host-side test builds)
-esp-idf-hal = { version = "0.46", features = ["std"],      optional = true }
-esp-idf-svc = { version = "0.52", features = ["std"],      optional = true }
-esp-idf-sys  = { version = "0.37", features = ["binstart"], optional = true }
+esp-idf-hal = { version = "0.47", features = ["std"],      optional = true }
+esp-idf-svc = { version = "0.53", features = ["std"],      optional = true }
+esp-idf-sys  = { version = "0.38", features = ["binstart"], optional = true }
 
 # Shared — compile on both ESP32 and x86 host
 log      = "0.4"
@@ -33,7 +33,7 @@ serde_json = "1"
 anyhow   = "1"
 
 [build-dependencies]
-embuild = "0.33"
+embuild = "0.33.5"
 toml    = "1"
 
 [profile.release]
@@ -42,4 +42,4 @@ lto        = true
 
 # ---- ESP-IDF version ----
 [package.metadata.esp-idf-sys]
-esp_idf_version = "v5.2"
+esp_idf_version = "v5.5.5"

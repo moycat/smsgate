@@ -11,12 +11,16 @@ fn hidden_at_command_accepts_one_at_line() {
         Some(Ok("+CREG?"))
     );
     assert_eq!(parse_hidden_at_command("/at AT"), Some(Ok("")));
+    assert_eq!(
+        parse_hidden_at_command("/at AT+SIMCOMATI"),
+        Some(Ok("+SIMCOMATI"))
+    );
     assert!(parse_hidden_at_command("/atom AT+CSQ").is_none());
     assert!(parse_hidden_at_command("/ota AT+CSQ").is_none());
 }
 
 #[test]
-fn hidden_at_command_rejects_invalid_and_interactive_inputs() {
+fn hidden_at_command_rejects_invalid_or_non_diagnostic_inputs() {
     assert_eq!(
         parse_hidden_at_command("/at"),
         Some(Err(AtRequestError::MissingCommand))
@@ -35,7 +39,15 @@ fn hidden_at_command_rejects_invalid_and_interactive_inputs() {
     );
     assert_eq!(
         parse_hidden_at_command("/at AT+CMGS=10"),
-        Some(Err(AtRequestError::InteractiveCommand))
+        Some(Err(AtRequestError::UnsupportedCommand))
+    );
+    assert_eq!(
+        parse_hidden_at_command("/at AT+CGATT=1"),
+        Some(Err(AtRequestError::UnsupportedCommand))
+    );
+    assert_eq!(
+        parse_hidden_at_command("/at AT+HTTPINIT"),
+        Some(Err(AtRequestError::UnsupportedCommand))
     );
     assert_eq!(
         parse_hidden_at_command(&format!("/at AT+{}", "A".repeat(128))),

@@ -2,6 +2,7 @@
 
 use smsgate::bridge::reply_router::ReplyRouter;
 use smsgate::persist::mem::MemStore;
+use smsgate::persist::{keys, Store};
 
 #[test]
 fn put_and_lookup_roundtrip() {
@@ -27,6 +28,49 @@ fn save_and_load_round_trip() {
     let mut router2 = ReplyRouter::new();
     router2.load(&store);
     assert_eq!(router2.lookup(42), Some("+441234567890"));
+}
+
+#[test]
+fn persisted_slots_use_stable_legacy_bytes_without_padding_contents() {
+    let mut store = MemStore::new();
+    let mut router = ReplyRouter::new();
+    router.put(42, "+123", &mut store);
+
+    let bytes = store.load(keys::REPLY_MAP).unwrap();
+    assert_eq!(bytes.len(), 200 * 32);
+    let record = &bytes[42 * 32..43 * 32];
+    assert_eq!(&record[..8], &42i64.to_le_bytes());
+    assert_eq!(&record[8..13], b"+123\0");
+    assert!(record[13..].iter().all(|byte| *byte == 0));
+}
+
+#[test]
+fn loads_existing_32_byte_slot_records() {
+    let mut bytes = vec![0u8; 200 * 32];
+    let record = &mut bytes[42 * 32..43 * 32];
+    record[..8].copy_from_slice(&42i64.to_le_bytes());
+    record[8..13].copy_from_slice(b"+123\0");
+    record[31] = 0xA5; // Legacy Rust padding had no defined value.
+    let mut store = MemStore::new();
+    store.save(keys::REPLY_MAP, &bytes).unwrap();
+
+    let mut router = ReplyRouter::new();
+    router.load(&store);
+    assert_eq!(router.lookup(42), Some("+123"));
+}
+
+#[test]
+fn rejects_record_in_the_wrong_hash_slot() {
+    let mut bytes = vec![0u8; 200 * 32];
+    let record = &mut bytes[42 * 32..43 * 32];
+    record[..8].copy_from_slice(&43i64.to_le_bytes());
+    record[8..13].copy_from_slice(b"+123\0");
+    let mut store = MemStore::new();
+    store.save(keys::REPLY_MAP, &bytes).unwrap();
+
+    let mut router = ReplyRouter::new();
+    router.load(&store);
+    assert_eq!(router.lookup(43), None);
 }
 
 #[test]

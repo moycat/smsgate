@@ -3,7 +3,39 @@
 use smsgate::im::telegram::types::{
     json_escape, ApiResult, SendMessageResult, TelegramFile, Update,
 };
-use smsgate::im::telegram::update_to_inbound_message;
+use smsgate::im::telegram::{
+    collect_inbound_updates, confirmed_message_id, update_to_inbound_message,
+};
+
+#[test]
+fn send_message_requires_positive_receipt_id() {
+    assert_eq!(
+        confirmed_message_id(Some(SendMessageResult { message_id: 42 })).unwrap(),
+        42
+    );
+    assert!(confirmed_message_id(None).is_err());
+    assert!(confirmed_message_id(Some(SendMessageResult { message_id: 0 })).is_err());
+}
+
+#[test]
+fn ignored_update_advances_poll_cursor_past_wrong_chat() {
+    let ignored: Vec<Update> = serde_json::from_str(
+        r#"[{"update_id":40,"message":{"message_id":1,"text":"/status","chat":{"id":999}}}]"#,
+    )
+    .unwrap();
+    let first = collect_inbound_updates(ignored, 111, 0);
+    assert!(first.messages.is_empty());
+    assert_eq!(first.next_cursor, 41);
+
+    let accepted: Vec<Update> = serde_json::from_str(
+        r#"[{"update_id":41,"message":{"message_id":2,"text":"/status","chat":{"id":111}}}]"#,
+    )
+    .unwrap();
+    let second = collect_inbound_updates(accepted, 111, first.next_cursor);
+    assert_eq!(second.next_cursor, 42);
+    assert_eq!(second.messages.len(), 1);
+    assert_eq!(second.messages[0].text, "/status");
+}
 
 // ---------------------------------------------------------------------------
 // json_escape — used by send_message to build valid JSON bodies

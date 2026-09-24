@@ -26,9 +26,15 @@ Reference hardware: **LilyGo T-A7670X** (A7670G LTE modem, CH9102 USB bridge).
 
 ## Quick Start
 
+The current build targets ESP-IDF 5.5.5 with `esp-idf-sys` 0.38.1,
+`esp-idf-hal` 0.47.0, and `esp-idf-svc` 0.53.0. It is tested with host Rust
+1.98.1 and the Espressif Xtensa Rust 1.97.0.0 toolchain.
+
 ```bash
 # 1. Install Xtensa Rust toolchain
-cargo install espup && espup install
+cargo install espup
+espup install --toolchain-version 1.97.0.0 --std --targets esp32
+# Linux/macOS: source ~/export-esp.sh before building
 
 # 2. Copy and fill in config
 cp config.toml.example config.toml
@@ -39,11 +45,13 @@ cargo test --no-default-features --features testing
 
 # 4. Build firmware
 cargo +esp build --release --target xtensa-esp32-espidf
-# Windows note: ESP-IDF has path-length limits. Set a short target dir:
-#   CARGO_TARGET_DIR=C:\t cargo +esp build --release --target xtensa-esp32-espidf
+# Windows note: ESP-IDF has path-length limits. Clone to a short path such as C:\s,
+# and keep CARGO_TARGET_DIR at its default or set it to a direct child such as C:\s\t.
+# The custom partition CSV path in sdkconfig.defaults assumes the target directory
+# is a direct child of the repository.
 
 # 5. Flash
-cargo install espflash
+cargo install espflash --version 4.6.0 --locked
 espflash flash target/xtensa-esp32-espidf/release/smsgate --port <PORT> --partition-table partitions_ota.csv --target-app-partition ota_0 --erase-parts otadata
 # PORT is /dev/ttyUSB0 (Linux), /dev/cu.wchusbserial* (macOS), or COM3 (Windows)
 ```
@@ -61,11 +69,15 @@ The script writes:
 - `smsgate-ota-software-only.bin` — update firmware software only; keep the
   existing NVS `smsgcfg` runtime configuration.
 - `smsgate-ota-with-config.bin` — update firmware software and, on first boot
-  of the new image, write the compiled `config.toml` WiFi, Telegram, modem/APN/SIM,
+  of the new image, write the compiled `config.toml` WiFi, Telegram, modem/SIM,
   and bridge runtime configuration into NVS.
 
 Send the chosen `.bin` to the configured Telegram chat with caption `/ota`.
-OTA downloads use WiFi HTTPS only; cellular fallback mode will reject OTA.
+OTA downloads use WiFi HTTPS. With WiFi unavailable, SMS storage stays active
+and the firmware periodically retries WiFi.
+
+Telegram and OTA are WiFi-only. The hidden `/at` command accepts a fixed set
+of read-only modem diagnostics, such as `AT+SIMCOMATI` and `AT+CSQ`.
 
 When flashing over USB, keep the `--partition-table partitions_ota.csv` and
 `--target-app-partition ota_0` flags, and erase `otadata`. The firmware uses a
@@ -122,7 +134,7 @@ device will be provisioned again. Verify the next boot lists `otadata`, `ota_0`,
 
 ## Configuration
 
-`config.toml` supplies compile-time defaults for WiFi, Telegram, modem pins, modem/APN/SIM settings, bridge timing, and UI locale. Runtime network, modem/SIM, and bridge settings are stored in NVS under the `smsgcfg` namespace. Images built with `SMSGATE_APPLY_COMPILED_CONFIG=1` overwrite those NVS runtime values with the compiled defaults on boot; images built with `SMSGATE_APPLY_COMPILED_CONFIG=0` preserve the existing NVS values. UI locale is still selected at compile time. See [`config.toml.example`](config.toml.example) for all options.
+`config.toml` supplies compile-time defaults for WiFi, Telegram, modem pins, SIM settings, bridge timing, and UI locale. Runtime network, modem/SIM, and bridge settings are stored in NVS under the `smsgcfg` namespace. Images built with `SMSGATE_APPLY_COMPILED_CONFIG=1` overwrite those NVS runtime values with the compiled defaults on boot; images built with `SMSGATE_APPLY_COMPILED_CONFIG=0` preserve the existing NVS values. UI locale is still selected at compile time. See [`config.toml.example`](config.toml.example) for all options.
 
 To build with Chinese UI strings, add to your `config.toml`:
 
@@ -133,11 +145,19 @@ locale = "zh"
 
 ## Design Tradeoffs
 
-**`serde_json` for Telegram API parsing** — The Telegram HTTP layer uses `serde_json`, which requires heap allocation. This is a deliberate tradeoff: the ESP32 has ample SRAM (320 KB + optional PSRAM), a typical Telegram API response is a few kilobytes, and `serde-json-core` (the `no_std` alternative) would add significant implementation complexity for marginal gain. If you port this to a more constrained MCU, swapping out `im/telegram/` is the only change needed.
+**`serde_json` for Telegram API parsing** — The Telegram HTTP layer uses
+`serde_json`, which allocates from a limited ESP32 heap. Responses and outbound
+notification queues are bounded; modem-stored SMS is retained when the Telegram
+queue is full. A streaming parser would reduce peak memory further, but would
+substantially complicate the Telegram backend.
 
 **Configuration boundaries** — Hardware defaults and locale are compile-time settings. Runtime network, modem/SIM, and bridge settings can be baked into `config.toml` for simple deployments or provisioned over serial into NVS without rebuilding the firmware. OTA images choose whether to preserve or overwrite the NVS-backed runtime config through `SMSGATE_APPLY_COMPILED_CONFIG`.
 
-**Runtime task split** — Telegram polling and Telegram outbound delivery run in separate worker threads. SMS and modem AT operations keep a single ordered UART owner so URCs, SMS reads/deletes, and `AT+CMGS` prompt handling do not interleave.
+**Runtime task split** — Telegram polling and outbound delivery run in separate
+worker threads. The main loop queues SMS and call notifications without waiting
+for Telegram; modem-stored SMS is deleted only after delivery is confirmed.
+Modem AT operations keep one ordered UART owner so URCs, reads/deletes, and
+`AT+CMGS` prompt handling do not interleave.
 
 ## Architecture
 

@@ -29,8 +29,8 @@ pub fn signal_restored(csq: u8) -> String {
 pub fn operator_changed(old: &str, new: &str) -> String {
     format!("⚠️ Operator changed: {} → {}", old, new)
 }
-pub fn ota_wifi_required() -> &'static str {
-    "OTA requires WiFi. Cellular fallback mode cannot download firmware."
+pub fn wifi_unavailable() -> &'static str {
+    "WiFi unavailable (SMS service active)"
 }
 pub fn ota_starting(name: &str, size: Option<u64>) -> String {
     match size {
@@ -67,8 +67,8 @@ pub fn at_invalid_command() -> &'static str {
 pub fn at_command_too_long() -> &'static str {
     "AT command is too long (maximum 128 bytes)."
 }
-pub fn at_interactive_unsupported() -> &'static str {
-    "Interactive/data-mode AT commands are not supported by /at."
+pub fn at_unsupported_command() -> &'static str {
+    "Only read-only diagnostic AT commands are supported by /at."
 }
 pub fn at_transport_error(error: &str) -> String {
     format!("AT transport error: {error}")
@@ -351,6 +351,9 @@ pub fn resume_already_active() -> &'static str {
 }
 pub fn resume_ok() -> &'static str {
     "Forwarding resumed."
+}
+pub fn storage_write_failed() -> &'static str {
+    "❌ Setting was not saved. Check /log and retry."
 }
 
 // ── /restart ──────────────────────────────────────────────────────────────────

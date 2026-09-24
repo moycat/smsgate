@@ -8,20 +8,17 @@ pub mod worker;
 
 use super::{
     InboundCallback, InboundDocument, InboundMessage, InlineKeyboard, MessageFormat, MessageId,
-    MessengerError,
+    MessengerError, PollBatch,
 };
 #[cfg(feature = "esp32")]
 use super::{MessageSink, MessageSource};
 #[cfg(feature = "esp32")]
-use crate::modem::ModemPort;
-#[cfg(feature = "esp32")]
 use http::TelegramHttpClient;
-#[cfg(feature = "esp32")]
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use types::Update;
 #[cfg(feature = "esp32")]
-use types::{ApiResult, SendMessageResult};
+use types::ApiResult;
+use types::SendMessageResult;
+use types::Update;
 
 // One update keeps the bounded HTTP response independent of burst size.
 const GET_UPDATES_LIMIT: u8 = 1;
@@ -31,6 +28,18 @@ const POLL_ERROR_LOG_EVERY: u16 = 12;
 const POLL_ERROR_RECOVERY_EVERY: u16 = POLL_ERROR_LOG_EVERY;
 const TELEGRAM_SEND_RETRY_INTERVAL_SECS: u64 = 30;
 const TELEGRAM_RESTART_AFTER_SECS: u64 = 5 * 60;
+
+/// A successful HTTP/API response is not a delivery receipt without a valid ID.
+pub fn confirmed_message_id(
+    result: Option<SendMessageResult>,
+) -> Result<MessageId, MessengerError> {
+    match result {
+        Some(message) if message.message_id > 0 => Ok(message.message_id),
+        _ => Err(MessengerError::Json(
+            "sendMessage response has no valid message_id".into(),
+        )),
+    }
+}
 
 /// Build a bounded `getUpdates` request body for the embedded runtime.
 pub fn build_get_updates_body(since: i64, timeout_sec: u32) -> String {
@@ -270,7 +279,7 @@ pub fn update_to_inbound_message(update: Update, chat_id: i64) -> Option<Inbound
             return None;
         }
         return Some(InboundMessage {
-            cursor: update.update_id + 1,
+            cursor: update.update_id.saturating_add(1),
             text: data.clone(),
             reply_to: None,
             document: None,
@@ -320,7 +329,7 @@ pub fn update_to_inbound_message(update: Update, chat_id: i64) -> Option<Inbound
     }
 
     Some(InboundMessage {
-        cursor: update.update_id + 1,
+        cursor: update.update_id.saturating_add(1),
         text,
         reply_to: msg.reply_to_message.map(|r| r.message_id),
         document,
@@ -328,35 +337,36 @@ pub fn update_to_inbound_message(update: Update, chat_id: i64) -> Option<Inbound
     })
 }
 
-#[cfg(feature = "esp32")]
-enum Transport {
-    Wifi(TelegramHttpClient),
-    Modem(Arc<Mutex<dyn ModemPort + Send>>),
+/// Telegram offsets must advance past every update, including filtered ones.
+/// Otherwise one update from another chat can block all later bot commands.
+pub fn collect_inbound_updates(updates: Vec<Update>, chat_id: i64, since: i64) -> PollBatch {
+    let mut next_cursor = since;
+    let mut messages = Vec::with_capacity(updates.len());
+    for update in updates {
+        next_cursor = next_cursor.max(update.update_id.saturating_add(1));
+        if let Some(message) = update_to_inbound_message(update, chat_id) {
+            messages.push(message);
+        }
+    }
+    PollBatch {
+        messages,
+        next_cursor,
+    }
 }
 
 /// Telegram Bot API messenger.
 #[cfg(feature = "esp32")]
 pub struct TelegramMessenger {
-    transport: Transport,
+    http: TelegramHttpClient,
     chat_id: i64,
     token: String,
 }
 
 #[cfg(feature = "esp32")]
 impl TelegramMessenger {
-    pub fn new_wifi(http: TelegramHttpClient, token: String, chat_id: i64) -> Self {
+    pub fn new(http: TelegramHttpClient, token: String, chat_id: i64) -> Self {
         TelegramMessenger {
-            transport: Transport::Wifi(http),
-            chat_id,
-            token,
-        }
-    }
-
-    /// IM over the modem's built-in HTTP stack (cellular PDP).
-    /// Use a short `timeout_sec` in `poll` — the UART is shared with SMS.
-    pub fn new_modem(modem: Arc<Mutex<dyn ModemPort + Send>>, token: String, chat_id: i64) -> Self {
-        TelegramMessenger {
-            transport: Transport::Modem(modem),
+            http,
             chat_id,
             token,
         }
@@ -365,26 +375,16 @@ impl TelegramMessenger {
     fn post_json(&mut self, method: &str, body: &str) -> Result<String, MessengerError> {
         let path = format!("/bot{}/{}", self.token, method);
         log::debug!(
-            "[tg] API request: method={} transport={} body_len={}",
+            "[tg] API request: method={} body_len={}",
             method,
-            match &self.transport {
-                Transport::Wifi(_) => "wifi",
-                Transport::Modem(_) => "modem",
-            },
             body.len()
         );
-        match &mut self.transport {
-            Transport::Wifi(http) => http
-                .post(&path, body)
-                .map_err(|e| MessengerError::Http(format!("{:#}", e))),
-            Transport::Modem(m) => {
-                let mut g = m.lock().map_err(|_| MessengerError::Disconnected)?;
-                let raw = g
-                    .post_telegram_https(&path, body)
-                    .map_err(|e| MessengerError::Http(format!("modem {}", e)))?;
-                Ok(raw)
+        self.http.post(&path, body).map_err(|error| match error {
+            http::TelegramHttpError::NotSent(error) => MessengerError::Http(format!("{error:#}")),
+            http::TelegramHttpError::OutcomeUnknown(error) => {
+                MessengerError::OutcomeUnknown(format!("{error:#}"))
             }
-        }
+        })
     }
 
     fn post_and_parse<T: serde::de::DeserializeOwned>(
@@ -424,7 +424,7 @@ impl TelegramMessenger {
     }
 
     fn register_commands_body(&mut self, body: &str) -> Result<(), MessengerError> {
-        let result: ApiResult<bool> = self.post_and_parse("setMyCommands", &body)?;
+        let result: ApiResult<bool> = self.post_and_parse("setMyCommands", body)?;
         Self::check_ok(result)?;
         Ok(())
     }
@@ -443,8 +443,7 @@ impl MessageSink for TelegramMessenger {
     ) -> Result<MessageId, MessengerError> {
         let body = build_send_message_body_with_format(self.chat_id, text, None, format);
         let result: ApiResult<SendMessageResult> = self.post_and_parse("sendMessage", &body)?;
-        let r = Self::check_ok(result)?;
-        Ok(r.map(|r| r.message_id).unwrap_or(0))
+        confirmed_message_id(Self::check_ok(result)?)
     }
 
     fn send_message_with_keyboard(
@@ -463,8 +462,7 @@ impl MessageSink for TelegramMessenger {
     ) -> Result<MessageId, MessengerError> {
         let body = build_send_message_body_with_format(self.chat_id, text, Some(keyboard), format);
         let result: ApiResult<SendMessageResult> = self.post_and_parse("sendMessage", &body)?;
-        let r = Self::check_ok(result)?;
-        Ok(r.map(|r| r.message_id).unwrap_or(0))
+        confirmed_message_id(Self::check_ok(result)?)
     }
 
     fn edit_message(&mut self, message_id: MessageId, text: &str) -> Result<(), MessengerError> {
@@ -527,11 +525,7 @@ impl MessageSink for TelegramMessenger {
 
 #[cfg(feature = "esp32")]
 impl MessageSource for TelegramMessenger {
-    fn poll(
-        &mut self,
-        since: i64,
-        timeout_sec: u32,
-    ) -> Result<Vec<InboundMessage>, MessengerError> {
+    fn poll(&mut self, since: i64, timeout_sec: u32) -> Result<PollBatch, MessengerError> {
         let body = build_get_updates_body(since, timeout_sec);
         log::debug!(
             "[tg] polling updates: since={} timeout={}s",
@@ -539,17 +533,15 @@ impl MessageSource for TelegramMessenger {
             timeout_sec
         );
         let result: ApiResult<Vec<Update>> = self.post_and_parse("getUpdates", &body)?;
-        let updates = Self::check_ok(result)?.unwrap_or_default();
+        let updates = Self::check_ok(result)?
+            .ok_or_else(|| MessengerError::Json("getUpdates response has no result".into()))?;
         let update_count = updates.len();
-        let messages: Vec<InboundMessage> = updates
-            .into_iter()
-            .filter_map(|u| update_to_inbound_message(u, self.chat_id))
-            .collect();
+        let batch = collect_inbound_updates(updates, self.chat_id, since);
         log::debug!(
             "[tg] polling result: updates={} accepted_messages={}",
             update_count,
-            messages.len()
+            batch.messages.len()
         );
-        Ok(messages)
+        Ok(batch)
     }
 }

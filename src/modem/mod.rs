@@ -7,8 +7,7 @@
 //!
 //! - `ModemPort: AtTransport` — SMS and voice operations built on top.
 //!   `send_pdu_sms` and `hang_up` have standard AT default implementations,
-//!   so a new modem gets them for free; only `post_telegram_https` needs an
-//!   override for modems with a built-in HTTP stack (e.g. the A7670G).
+//!   so a new modem gets them for free.
 //!
 //! Concrete implementations live under `a76xx/`.
 
@@ -36,6 +35,8 @@ pub struct AtResponse {
 pub enum ModemError {
     #[error("timeout waiting for response")]
     Timeout,
+    #[error("AT operation interrupted for incoming call")]
+    InterruptedForCall,
     #[error("modem returned ERROR: {0}")]
     AtError(String),
     #[error("UART write failed")]
@@ -44,8 +45,6 @@ pub enum ModemError {
     NotReady,
     #[error("AT response exceeded the bounded body buffer")]
     ResponseTooLong,
-    #[error("feature not supported on this modem")]
-    NotSupported,
 }
 
 /// Bounded AT receive faults collected between main-loop iterations.
@@ -148,10 +147,8 @@ pub fn cnmi_store_notifications_enabled(body: &str) -> bool {
 
 /// Raw AT transport seam.
 ///
-/// Implement the four methods below for any new modem.
-/// `ModemPort` is then blanket-available: `send_pdu_sms` (standard CMGS
-/// handshake) and `hang_up` (ATH) both use only `AtTransport` primitives,
-/// so they do not need to be reimplemented for each new modem.
+/// Implement the four methods below for any new modem. The modem-specific
+/// `ModemPort::send_pdu_sms` must also preserve unrelated URCs during CMGS.
 pub trait AtTransport {
     /// Send `AT<cmd>\r` and collect the response lines until OK/ERROR/timeout.
     fn send_at(&mut self, cmd: &str) -> Result<AtResponse, ModemError>;
@@ -203,12 +200,7 @@ pub trait AtTransport {
 pub trait ModemPort: AtTransport {
     /// Send an SMS in PDU mode; return the message reference number.
     ///
-    /// Default: standard `AT+CMGS` / `>` / Ctrl-Z handshake.
-    #[cfg(feature = "esp32")]
-    fn send_pdu_sms(&mut self, hex: &str, tpdu_len: u8) -> Result<u8, ModemError> {
-        crate::modem::a76xx::sms::send_pdu(self, hex, tpdu_len)
-    }
-    #[cfg(not(feature = "esp32"))]
+    /// Implementations must preserve unrelated URCs during the CMGS exchange.
     fn send_pdu_sms(&mut self, hex: &str, tpdu_len: u8) -> Result<u8, ModemError>;
 
     /// Hang up the current call.
@@ -221,15 +213,6 @@ pub trait ModemPort: AtTransport {
         } else {
             Err(ModemError::AtError("ATH failed".into()))
         }
-    }
-
-    /// HTTPS POST JSON via the modem's built-in HTTP stack (Quectel `AT+QHTTP*`).
-    /// Used when the ESP32 has no WiFi and IM traffic goes over cellular PDP.
-    ///
-    /// Default: `NotSupported` — override for modems with a built-in HTTP stack.
-    fn post_telegram_https(&mut self, path: &str, json: &str) -> Result<String, ModemError> {
-        let _ = (path, json);
-        Err(ModemError::NotSupported)
     }
 
     /// Query CSQ, operator name, and registration status from the modem.

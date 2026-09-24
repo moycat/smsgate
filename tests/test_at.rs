@@ -6,6 +6,7 @@ use smsgate::modem::a76xx::at::{AtPort, UartPort};
 use smsgate::testing::mocks::MockUart;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 struct SharedUart {
     rx: Arc<Mutex<VecDeque<u8>>>,
@@ -13,6 +14,30 @@ struct SharedUart {
 
 struct ControlledUart {
     inner: Arc<Mutex<MockUart>>,
+}
+
+struct NoisyUart {
+    offset: usize,
+    response: VecDeque<u8>,
+    command_written: bool,
+}
+
+impl UartPort for NoisyUart {
+    fn read_byte(&mut self, _ticks: u32) -> Option<u8> {
+        if self.command_written {
+            self.response.pop_front()
+        } else {
+            const NOISE: &[u8] = b"+CGEV: ME PDN ACT 8,0\r\n";
+            let byte = NOISE[self.offset % NOISE.len()];
+            self.offset += 1;
+            Some(byte)
+        }
+    }
+
+    fn write_all(&mut self, _data: &[u8]) -> Result<(), smsgate::modem::ModemError> {
+        self.command_written = true;
+        Ok(())
+    }
 }
 
 impl UartPort for SharedUart {
@@ -37,6 +62,22 @@ impl UartPort for ControlledUart {
 
 fn port(uart: MockUart) -> AtPort<MockUart> {
     AtPort::new(uart)
+}
+
+#[test]
+fn continuous_urcs_do_not_block_at_command() {
+    let mut port = AtPort::new(NoisyUart {
+        offset: 0,
+        response: VecDeque::from(b"+CSQ: 13,0\r\nOK\r\n".to_vec()),
+        command_written: false,
+    });
+    let start = Instant::now();
+    let response = port
+        .send_at_with_timeout("+CSQ", Duration::from_secs(1))
+        .unwrap();
+    assert!(response.ok);
+    assert_eq!(response.body, "+CSQ: 13,0");
+    assert!(start.elapsed() < Duration::from_secs(1));
 }
 
 // ── send_at ──────────────────────────────────────────────────────────────────
@@ -111,7 +152,7 @@ fn send_at_with_timeout_returns_quick_timeout() {
     let uart = MockUart::new();
     let mut p = port(uart);
     let started = std::time::Instant::now();
-    let result = p.send_at_with_timeout("+QHTTPREAD=30", std::time::Duration::from_millis(50));
+    let result = p.send_at_with_timeout("+CSQ", std::time::Duration::from_millis(50));
 
     assert!(matches!(result, Err(smsgate::modem::ModemError::Timeout)));
     assert!(started.elapsed() < std::time::Duration::from_millis(250));
@@ -256,60 +297,6 @@ fn wait_for_prompt_timeout() {
     assert!(!found);
 }
 
-// ── send_at_connect_payload ───────────────────────────────────────────────────
-
-#[test]
-fn send_at_connect_payload_ok() {
-    let mut uart = MockUart::new();
-    // First write (the AT command) → CONNECT
-    uart.queue_response_line("CONNECT");
-    uart.finish_response();
-    // Second write (the payload) → response lines + OK
-    uart.queue_response_line("+QHTTPPOST: 0,200,52");
-    uart.queue_response_line("OK");
-    let mut p = port(uart);
-    let r = p
-        .send_at_connect_payload_with_timeout(
-            "+QHTTPPOST=52,60,60",
-            "{\"test\":1}",
-            std::time::Duration::from_secs(30),
-        )
-        .unwrap();
-    assert!(r.ok);
-    let sent = p.inner().sent_str();
-    assert!(sent.contains("{\"test\":1}"));
-}
-
-#[test]
-fn send_at_connect_payload_error_before_connect() {
-    let mut uart = MockUart::new();
-    uart.queue_response_line("ERROR");
-    let mut p = port(uart);
-    let r = p
-        .send_at_connect_payload_with_timeout(
-            "+QHTTPPOST=52,60,60",
-            "body",
-            std::time::Duration::from_secs(30),
-        )
-        .unwrap();
-    assert!(!r.ok);
-}
-
-#[test]
-fn send_at_connect_payload_with_timeout_returns_quick_timeout() {
-    let uart = MockUart::new();
-    let mut p = port(uart);
-    let started = std::time::Instant::now();
-    let result = p.send_at_connect_payload_with_timeout(
-        "+QHTTPPOST=52,30,30",
-        "body",
-        std::time::Duration::from_millis(50),
-    );
-
-    assert!(matches!(result, Err(smsgate::modem::ModemError::Timeout)));
-    assert!(started.elapsed() < std::time::Duration::from_millis(250));
-}
-
 // ── CMGS with concurrent URCs ──────────────────────────────────────────────
 
 #[test]
@@ -379,6 +366,21 @@ fn body_lines_capped() {
 }
 
 #[test]
+fn body_bytes_capped_even_when_line_count_is_small() {
+    let mut uart = MockUart::new();
+    for _ in 0..30 {
+        uart.queue_response_line(&"A".repeat(800));
+    }
+    uart.queue_response_line("OK");
+    let mut port = port(uart);
+    assert!(matches!(
+        port.send_at("+TEST"),
+        Err(smsgate::modem::ModemError::ResponseTooLong)
+    ));
+    assert!(port.take_diagnostics().dropped_response_lines > 0);
+}
+
+#[test]
 fn streaming_at_response_reads_past_body_cap_and_preserves_urcs() {
     let mut uart = MockUart::new();
     for index in 1..=100 {
@@ -405,6 +407,43 @@ fn streaming_at_response_reads_past_body_cap_and_preserves_urcs() {
     assert_eq!(headers.len(), 100);
     assert_eq!(p.poll_urc().as_deref(), Some("+CMTI: \"ME\",101"));
     assert_eq!(p.take_diagnostics().dropped_response_lines, 0);
+}
+
+#[test]
+fn storage_listing_yields_to_incoming_call_urcs() {
+    let mut uart = MockUart::new();
+    uart.queue_response_line("+CMGL: 1,0,,18");
+    uart.queue_response_line("001122");
+    uart.queue_response_line("RING");
+    uart.queue_response_line("+CLIP: \"+15551234567\",145");
+    uart.queue_response_line("OK");
+    let mut p = port(uart);
+
+    assert!(matches!(
+        p.send_at_streaming(
+            "+CMGL=4",
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(120),
+            &mut |_| {},
+        ),
+        Err(smsgate::modem::ModemError::InterruptedForCall)
+    ));
+    assert_eq!(p.poll_urc().as_deref(), Some("RING"));
+    assert_eq!(p.poll_urc().as_deref(), Some("+CLIP: \"+15551234567\",145"));
+}
+
+#[test]
+fn stored_sms_read_yields_to_incoming_call() {
+    let mut uart = MockUart::new();
+    uart.queue_response_line("RING");
+    uart.queue_response_line("OK");
+    let mut p = port(uart);
+
+    assert!(matches!(
+        p.send_at("+CMGR=3"),
+        Err(smsgate::modem::ModemError::InterruptedForCall)
+    ));
+    assert_eq!(p.poll_urc().as_deref(), Some("RING"));
 }
 
 #[test]

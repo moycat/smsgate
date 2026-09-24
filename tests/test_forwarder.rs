@@ -291,7 +291,7 @@ fn unblock_removes_number() {
     let mut store = MemStore::new();
     add_to_blocklist("10086", &mut store).unwrap();
     assert!(is_blocked("10086", &store));
-    let removed = remove_from_blocklist("10086", &mut store);
+    let removed = remove_from_blocklist("10086", &mut store).unwrap();
     assert!(removed);
     assert!(!is_blocked("10086", &store));
 }
@@ -299,7 +299,7 @@ fn unblock_removes_number() {
 #[test]
 fn unblock_nonexistent_returns_false() {
     let mut store = MemStore::new();
-    assert!(!remove_from_blocklist("99999", &mut store));
+    assert!(!remove_from_blocklist("99999", &mut store).unwrap());
 }
 
 #[test]

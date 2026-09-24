@@ -1,13 +1,13 @@
 //! Poller sentinel processing tests.
 
 use smsgate::bridge::forwarder::is_blocked;
-use smsgate::bridge::poller::poll_and_dispatch;
+use smsgate::bridge::poller::{checkpoint_cursor, poll_and_dispatch};
 use smsgate::bridge::reply_router::ReplyRouter;
 use smsgate::commands::{builtin::*, CommandRegistry};
 use smsgate::im::{InboundCallback, InboundDocument, InboundMessage, MessageFormat};
 use smsgate::log_ring::{LogKind, LogRing};
 use smsgate::modem::ModemStatus;
-use smsgate::persist::{keys, load_bool, mem::MemStore};
+use smsgate::persist::{keys, load_bool, load_i64, mem::MemStore, Store, StoreError};
 use smsgate::sms::sender::SmsSender;
 use smsgate::testing::mocks::RecordingMessenger;
 
@@ -26,6 +26,118 @@ fn make_registry() -> CommandRegistry {
     r.register(Box::new(ResumeCommand));
     r.register(Box::new(RestartCommand));
     r
+}
+
+struct FailingCursorStore {
+    inner: MemStore,
+    fail: bool,
+    fail_key: &'static str,
+}
+
+impl Store for FailingCursorStore {
+    fn load(&self, key: &str) -> Option<Vec<u8>> {
+        self.inner.load(key)
+    }
+
+    fn save(&mut self, key: &str, data: &[u8]) -> Result<(), StoreError> {
+        if self.fail && key == self.fail_key {
+            return Err(StoreError::Nvs("simulated write failure".into()));
+        }
+        self.inner.save(key, data)
+    }
+}
+
+#[test]
+fn cursor_checkpoint_advances_only_after_durable_save() {
+    let mut store = FailingCursorStore {
+        inner: MemStore::new(),
+        fail: true,
+        fail_key: keys::IM_CURSOR,
+    };
+    let mut persisted = 5;
+    assert!(checkpoint_cursor(&mut store, &mut persisted, 42).is_err());
+    assert_eq!(persisted, 5);
+    assert_eq!(load_i64(&store, keys::IM_CURSOR), None);
+
+    store.fail = false;
+    checkpoint_cursor(&mut store, &mut persisted, 42).unwrap();
+    assert_eq!(persisted, 42);
+    assert_eq!(load_i64(&store, keys::IM_CURSOR), Some(42));
+    checkpoint_cursor(&mut store, &mut persisted, 41).unwrap();
+    assert_eq!(persisted, 42);
+}
+
+#[test]
+fn failed_setting_writes_do_not_claim_success() {
+    for (command, fail_key) in [
+        ("/block 10086", keys::BLOCK_LIST),
+        ("/unblock 10086", keys::BLOCK_LIST),
+        ("/pause 30", keys::FWD_ENABLED),
+        ("/resume", keys::FWD_ENABLED),
+    ] {
+        let mut inner = MemStore::new();
+        if command.starts_with("/unblock") {
+            smsgate::bridge::forwarder::add_to_blocklist("10086", &mut inner).unwrap();
+        }
+        if command == "/resume" {
+            smsgate::persist::save_bool(&mut inner, keys::FWD_ENABLED, false).unwrap();
+        }
+        let mut store = FailingCursorStore {
+            inner,
+            fail: true,
+            fail_key,
+        };
+        let mut messenger = RecordingMessenger::new();
+        let outcome = poll_and_dispatch(
+            &[msg(command)],
+            &mut messenger,
+            &mut SmsSender::new(),
+            &ReplyRouter::new(),
+            &make_registry(),
+            &mut store,
+            &LogRing::new(),
+            &ModemStatus::default(),
+            0,
+            0,
+            0,
+            "",
+        )
+        .unwrap();
+        assert_eq!(outcome.pause_mins, None, "{command}");
+        assert!(!outcome.events[0].forwarded, "{command}");
+        assert_eq!(
+            messenger.last_sent().unwrap(),
+            smsgate::i18n::storage_write_failed()
+        );
+    }
+}
+
+#[test]
+fn unblock_requires_exact_saved_number() {
+    let mut store = MemStore::new();
+    smsgate::bridge::forwarder::add_to_blocklist("+441234567890", &mut store).unwrap();
+    let mut messenger = RecordingMessenger::new();
+    let outcome = poll_and_dispatch(
+        &[msg("/unblock 567890")],
+        &mut messenger,
+        &mut SmsSender::new(),
+        &ReplyRouter::new(),
+        &make_registry(),
+        &mut store,
+        &LogRing::new(),
+        &ModemStatus::default(),
+        0,
+        0,
+        0,
+        "",
+    )
+    .unwrap();
+    assert!(!outcome.events[0].forwarded);
+    assert_eq!(
+        messenger.last_sent().unwrap(),
+        smsgate::i18n::unblock_not_found("567890")
+    );
+    assert!(is_blocked("+441234567890", &store));
 }
 
 fn msg(text: &str) -> InboundMessage {
@@ -529,8 +641,9 @@ fn restart_sentinel_returns_true() {
     assert_eq!(outcome.events.len(), 1);
     assert_eq!(outcome.events[0].sender, "/restart");
 
-    let reply = messenger.last_sent().unwrap();
+    let reply = outcome.restart_reply.unwrap();
     assert!(!reply.contains("__RESTART__"), "sentinel leaked: {}", reply);
+    assert_eq!(messenger.sent_count(), 0);
 }
 
 #[test]

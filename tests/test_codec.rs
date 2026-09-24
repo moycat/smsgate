@@ -42,6 +42,16 @@ fn normalize_local_unchanged() {
     assert_eq!(normalize_phone("07911123456"), "07911123456");
 }
 
+#[test]
+fn destination_length_and_shape_are_checked_before_pdu_encoding() {
+    assert!(is_valid_sms_destination("123"));
+    assert!(is_valid_sms_destination("+12345678901234567890"));
+    for invalid in ["", "+", "12+3", "++123", "+123456789012345678901"] {
+        assert!(!is_valid_sms_destination(invalid));
+        assert!(build_sms_submit_pdus(invalid, "Hello", 1, false).is_empty());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Timestamp helpers
 // ---------------------------------------------------------------------------
@@ -492,6 +502,17 @@ fn pdu_timestamp_unix_invalid_month_returns_zero() {
     // Month 13 is invalid
     let ts = "24/13/01,00:00:00+00";
     assert_eq!(pdu_timestamp_to_unix(ts), 0);
+}
+
+#[test]
+fn pdu_timestamp_rejects_malformed_utf8_and_invalid_calendar_dates() {
+    assert_eq!(pdu_timestamp_to_unix("24/01/01,00:00:00+💡"), 0);
+    assert_eq!(pdu_timestamp_to_unix("24/02/30,00:00:00+00"), 0);
+    assert_eq!(
+        pdu_timestamp_to_unix("24/01/01,00:00:00+999999999999999999"),
+        0
+    );
+    assert_ne!(pdu_timestamp_to_unix("24/02/29,00:00:00+00"), 0);
 }
 
 // ---------------------------------------------------------------------------

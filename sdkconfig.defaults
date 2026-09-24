@@ -1,6 +1,7 @@
 # ESP32 sdkconfig defaults for smsgate
-# ESP-IDF v5.2 caps this at 60; 120 (config.toml) is enforced by the kick interval
+# The main task feeds the watchdog during longer modem operations.
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=60
+CONFIG_ESP_TASK_WDT_PANIC=y
 CONFIG_LWIP_DNS_MAX_SERVERS=2
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 CONFIG_ESP_TLS_INSECURE=n
@@ -30,7 +31,9 @@ CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 # ---- OTA dual-partition layout ----
 # Custom partition table with two OTA slots plus a 128 KiB future log ring partition.
 CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_ota.csv"
+# esp-idf-sys runs CMake from target/<triple>/<profile>/build/<hash>/out.
+# Resolve the tracked CSV from there on a clean build, before our build.rs runs.
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../../../../../../partitions_ota.csv"
 CONFIG_PARTITION_TABLE_OFFSET=0x8000
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 

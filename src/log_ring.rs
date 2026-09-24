@@ -351,7 +351,7 @@ impl<S: LogFlashStorage> FlashLogRing<S> {
         let slots = size / FLASH_LOG_RECORD_SIZE;
         let slots_per_erase = erase_size / FLASH_LOG_RECORD_SIZE;
         let headers = scan_record_headers(&mut storage, slots)?;
-        let (next_seq, next_slot) = headers
+        let (next_seq, mut next_slot) = headers
             .iter()
             .max_by_key(|header| header.seq)
             .map(|header| {
@@ -363,6 +363,17 @@ impl<S: LogFlashStorage> FlashLogRing<S> {
                 (next_seq, (header.slot + 1) % slots)
             })
             .unwrap_or((1, 0));
+
+        // A power loss can leave an invalid but partially programmed record
+        // after the last valid slot. Flash cannot turn its zero bits back to
+        // ones, so continue at the next sector that append will erase.
+        if !next_slot.is_multiple_of(slots_per_erase) {
+            let mut record = [0xFFu8; FLASH_LOG_RECORD_SIZE];
+            storage.read(next_slot * FLASH_LOG_RECORD_SIZE, &mut record)?;
+            if record.iter().any(|byte| *byte != 0xFF) {
+                next_slot = ((next_slot / slots_per_erase + 1) * slots_per_erase) % slots;
+            }
+        }
 
         Ok(Self {
             storage,
@@ -390,8 +401,19 @@ impl<S: LogFlashStorage> FlashLogRing<S> {
         record[FLASH_LOG_HEADER_SIZE..FLASH_LOG_HEADER_SIZE + payload.len()]
             .copy_from_slice(&payload);
 
-        self.storage
-            .write(self.next_slot * FLASH_LOG_RECORD_SIZE, &record)?;
+        if let Err(error) = self
+            .storage
+            .write(self.next_slot * FLASH_LOG_RECORD_SIZE, &record)
+        {
+            // The failed write may have programmed a prefix. Never retry on
+            // that same slot unless the next attempt first erases its sector.
+            if !self.next_slot.is_multiple_of(self.slots_per_erase) {
+                self.next_slot = ((self.next_slot / self.slots_per_erase + 1)
+                    * self.slots_per_erase)
+                    % self.slots;
+            }
+            return Err(error);
+        }
 
         self.next_seq = if self.next_seq == u32::MAX {
             1

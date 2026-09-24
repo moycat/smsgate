@@ -16,15 +16,17 @@ const CMGS_PROMPT_TIMEOUT: Duration = Duration::from_secs(10);
 const CMGS_RESULT_TIMEOUT: Duration = Duration::from_secs(60);
 const RESYNC_TERMINAL_WAIT: Duration = Duration::from_secs(2);
 const RESYNC_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const URC_DRAIN_BUDGET: Duration = Duration::from_millis(100);
+const MAX_URC_DRAIN_LINES: usize = 32;
 /// Maximum buffered URC lines. Prevents unbounded queue growth on UART noise flood.
 const MAX_URC_BUF: usize = 32;
 /// Maximum response body lines collected per AT command.
 /// A well-formed modem never sends more; caps UART garbage.
 const MAX_BODY_LINES: usize = 64;
+const MAX_BODY_BYTES: usize = 16 * 1024;
 const INITIAL_LINE_CAPACITY: usize = 64;
-/// SMS PDUs are far smaller; 16 KiB also admits typical modem HTTP JSON replies
-/// without allowing an unterminated UART line to exhaust the ESP32 heap.
-const MAX_LINE_LEN: usize = 16 * 1024;
+/// Bound an unterminated UART line before it can exhaust the ESP32 heap.
+const MAX_LINE_LEN: usize = 1024;
 const CMT_BODY_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn command_timeout(cmd: &str) -> Duration {
@@ -103,8 +105,14 @@ impl<U: UartPort> AtPort<U> {
 
         let deadline = Instant::now() + timeout;
         let mut body = ResponseBody::new();
-        let terminal = self.collect_until_ok(deadline, &mut body, true);
-        if matches!(terminal, Err(ModemError::Timeout)) {
+        let interruptible = ["+CPMS", "+CMGR=", "+CMGD="]
+            .iter()
+            .any(|prefix| cmd.starts_with(prefix));
+        let terminal = self.collect_until_ok(deadline, &mut body, true, interruptible);
+        if matches!(
+            terminal,
+            Err(ModemError::Timeout | ModemError::InterruptedForCall)
+        ) {
             self.mark_timed_out(cmd);
         }
         if let Some(err) = terminal? {
@@ -157,7 +165,16 @@ impl<U: UartPort> AtPort<U> {
                 return Err(ModemError::AtError(line));
             }
             if urc::is_urc(&line) {
+                let incoming_call = cmd.starts_with("+CMGL=")
+                    && (line.starts_with("RING") || line.starts_with("+CLIP:"));
                 self.queue_urc(line);
+                if incoming_call {
+                    // A long storage listing must not hide a call for up to
+                    // its two-minute hard timeout. Resync before the next AT
+                    // command because the listing may still finish later.
+                    self.mark_timed_out(cmd);
+                    return Err(ModemError::InterruptedForCall);
+                }
                 continue;
             }
             on_line(&line);
@@ -277,8 +294,16 @@ impl<U: UartPort> AtPort<U> {
     }
 
     fn drain_urcs(&mut self) {
-        // Short window collects bytes already waiting in the UART FIFO.
-        while let Some(line) = self.read_line(Duration::from_millis(20)) {
+        // Bound both elapsed time and line count: a noisy modem must not keep
+        // the modem owner inside prepare_command indefinitely.
+        let deadline = Instant::now() + URC_DRAIN_BUDGET;
+        for _ in 0..MAX_URC_DRAIN_LINES {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            let Some(line) = self.read_line(remaining.min(Duration::from_millis(20))) else {
+                break;
+            };
             if let Some(line) = normalize_line(line) {
                 if !self.route_cmt_line(&line) {
                     self.queue_urc(line);
@@ -294,6 +319,7 @@ impl<U: UartPort> AtPort<U> {
         deadline: Instant,
         body: &mut ResponseBody,
         kick_wdt: bool,
+        interruptible: bool,
     ) -> Result<Option<AtResponse>, ModemError> {
         loop {
             if kick_wdt {
@@ -323,6 +349,10 @@ impl<U: UartPort> AtPort<U> {
                         body: line,
                         ok: false,
                     }));
+                }
+                if interruptible && (line.starts_with("RING") || line.starts_with("+CLIP:")) {
+                    self.queue_urc(line);
+                    return Err(ModemError::InterruptedForCall);
                 }
                 self.buffer_line(line, body);
             }
@@ -375,7 +405,9 @@ impl<U: UartPort> AtPort<U> {
     fn buffer_line(&mut self, line: String, body: &mut ResponseBody) {
         if urc::is_urc(&line) {
             self.queue_urc(line);
-        } else if body.line_count() < MAX_BODY_LINES {
+        } else if body.line_count() < MAX_BODY_LINES
+            && body.text.len() + line.len() + usize::from(!body.text.is_empty()) <= MAX_BODY_BYTES
+        {
             body.push(line);
         } else {
             self.diagnostics.dropped_response_lines =
@@ -527,7 +559,7 @@ impl<U: UartPort> AtPort<U> {
 
         let mut body = ResponseBody::new();
         let result_deadline = Instant::now() + CMGS_RESULT_TIMEOUT;
-        let terminal = match self.collect_until_ok(result_deadline, &mut body, true) {
+        let terminal = match self.collect_until_ok(result_deadline, &mut body, true, false) {
             Err(ModemError::Timeout) => {
                 log::warn!("[at] CMGS final result timed out");
                 self.mark_timed_out("+CMGS");
@@ -554,74 +586,6 @@ impl<U: UartPort> AtPort<U> {
         if let Err(e) = self.uart.write_all(&[0x1B]) {
             log::warn!("[at] failed to abort CMGS input: {}", e);
         }
-    }
-
-    /// Send a CONNECT-style command with a caller-provided timeout.
-    pub fn send_at_connect_payload_with_timeout(
-        &mut self,
-        cmd: &str,
-        payload: &str,
-        timeout: Duration,
-    ) -> Result<AtResponse, ModemError> {
-        self.prepare_command()?;
-        let command = format!("AT{}\r", cmd);
-        self.uart.write_all(command.as_bytes())?;
-
-        let deadline = Instant::now() + timeout;
-        let mut body = ResponseBody::new();
-
-        loop {
-            let Some(read_timeout) = deadline
-                .checked_duration_since(Instant::now())
-                .map(|remaining| remaining.min(READLINE_TIMEOUT))
-            else {
-                self.mark_timed_out(cmd);
-                return Err(ModemError::Timeout);
-            };
-            if let Some(line) = self.read_line(read_timeout) {
-                let Some(line) = normalize_line(line) else {
-                    continue;
-                };
-                if line.is_empty() {
-                    continue;
-                }
-                if self.route_cmt_line(&line) {
-                    continue;
-                }
-                if line.contains("CONNECT") {
-                    break;
-                }
-                if line == "OK" || line.starts_with("ERROR") || line.starts_with("+CME ERROR") {
-                    return Ok(AtResponse {
-                        body: line.clone(),
-                        ok: line == "OK",
-                    });
-                }
-                self.buffer_line(line, &mut body);
-            }
-        }
-
-        let pl = format!(
-            "{}\r\n",
-            payload.trim_end_matches('\r').trim_end_matches('\n')
-        );
-        self.uart.write_all(pl.as_bytes())?;
-
-        body.clear();
-        let terminal = self.collect_until_ok(deadline, &mut body, false);
-        if matches!(terminal, Err(ModemError::Timeout)) {
-            self.mark_timed_out(cmd);
-        }
-        if let Some(err) = terminal? {
-            return Ok(err);
-        }
-        if body.truncated {
-            return Err(ModemError::ResponseTooLong);
-        }
-        Ok(AtResponse {
-            body: body.into_string(),
-            ok: true,
-        })
     }
 
     /// Read until `prompt` byte or timeout (used for AT+CMGS '>' prompt).
@@ -661,12 +625,6 @@ impl ResponseBody {
         }
         self.text.push_str(&line);
         self.lines += 1;
-    }
-
-    fn clear(&mut self) {
-        self.text.clear();
-        self.lines = 0;
-        self.truncated = false;
     }
 
     fn line_count(&self) -> usize {

@@ -306,6 +306,21 @@ fn send_command_valid() {
 }
 
 #[test]
+fn send_command_rejects_invalid_destination() {
+    let store = MemStore::new();
+    let status = ModemStatus::default();
+    let log = LogRing::new();
+    let queue = SmsSender::new();
+    for phone in ["++123", "123456789012345678901", "123abc", "123#45"] {
+        let result = SendCommand.handle(
+            &format!("{} Hello", phone),
+            &ctx(&store, &status, &log, &queue),
+        );
+        assert!(result.contains(i18n::send_invalid_number()));
+    }
+}
+
+#[test]
 fn send_command_too_long_rejected() {
     let store = MemStore::new();
     let status = ModemStatus::default();

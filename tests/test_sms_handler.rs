@@ -3,10 +3,10 @@
 use smsgate::bridge::forwarder::add_to_blocklist;
 use smsgate::bridge::reply_router::ReplyRouter;
 use smsgate::bridge::sms_handler::{
-    delete_sms_slot, delete_sms_slots, prepare_pdu_hex_with_slot, prepare_stored_sms,
-    process_pdu_hex, process_stored_sms, process_stored_sms_with_slots, read_new_sms_pdu,
-    read_stored_sms, read_stored_sms_batch, read_stored_sms_with_report, scan_stored_sms_indices,
-    SmsDisposition, SmsPreparation,
+    delete_sms_slot, delete_sms_slots, delete_verified_sms_slot, prepare_pdu_hex_with_slot,
+    prepare_stored_sms, process_pdu_hex, process_stored_sms, process_stored_sms_with_slots,
+    read_new_sms_pdu, read_stored_sms, read_stored_sms_batch, read_stored_sms_with_report,
+    scan_stored_sms_indices, SmsDisposition, SmsPreparation, VerifiedDeletion,
 };
 use smsgate::log_ring::LogRing;
 use smsgate::persist::mem::MemStore;
@@ -492,6 +492,54 @@ fn read_new_sms_pdu_does_not_delete_slot() {
 }
 
 #[test]
+fn verified_delete_removes_only_the_delivered_message() {
+    let response = format!("+CMGR: 0,,18\n{}", pdu(HELLO_PDU));
+    let mut modem = ScriptedModem::new()
+        .expect("+CMGF=0", "", true)
+        .expect("+CPMS=\"ME\"", "", true)
+        .expect("+CMGR=8", &response, true)
+        .expect("+CMGF=0", "", true)
+        .expect("+CPMS=\"ME\"", "", true)
+        .expect("+CMGR=8", &response, true)
+        .expect("+CMGD=8", "", true);
+    let slot = read_new_sms_pdu("ME", 8, &mut modem)
+        .unwrap()
+        .storage_slot();
+    assert_eq!(
+        delete_verified_sms_slot(&slot, &mut modem).unwrap(),
+        VerifiedDeletion::Deleted
+    );
+    modem.check_consumed();
+}
+
+#[test]
+fn verified_delete_retains_reused_slot() {
+    let mut modem = ScriptedModem::new()
+        .expect("+CMGF=0", "", true)
+        .expect("+CPMS=\"ME\"", "", true)
+        .expect(
+            "+CMGR=8",
+            &format!("+CMGR: 0,,18\n{}", pdu(HELLO_PDU)),
+            true,
+        )
+        .expect("+CMGF=0", "", true)
+        .expect("+CPMS=\"ME\"", "", true)
+        .expect(
+            "+CMGR=8",
+            &format!("+CMGR: 0,,18\n{}", pdu(CONCAT_PART1_PDU)),
+            true,
+        );
+    let slot = read_new_sms_pdu("ME", 8, &mut modem)
+        .unwrap()
+        .storage_slot();
+    assert_eq!(
+        delete_verified_sms_slot(&slot, &mut modem).unwrap(),
+        VerifiedDeletion::SlotChanged
+    );
+    modem.check_consumed();
+}
+
+#[test]
 fn new_sms_read_process_delete_flow() {
     let modem = ScriptedModem::new()
         .expect("+CMGF=0", "", true)
@@ -808,6 +856,20 @@ fn slot_batch_selects_storage_once_for_reads_and_deletes() {
     modem.check_consumed();
     assert!(deleted[0].is_ok());
     assert!(deleted[1].is_err());
+}
+
+#[test]
+fn slot_batch_stops_immediately_when_call_interrupts_read() {
+    let mut modem = ScriptedModem::new()
+        .expect("+CMGF=0", "", true)
+        .expect("+CPMS=\"ME\"", "", true)
+        .expect_error("+CMGR=1", smsgate::modem::ModemError::InterruptedForCall);
+
+    assert!(matches!(
+        read_stored_sms_batch("ME", &[1, 2, 3], &mut modem),
+        Err(smsgate::bridge::sms_handler::SmsReadError::InterruptedForCall)
+    ));
+    modem.check_consumed();
 }
 
 #[test]

@@ -24,11 +24,6 @@ pub struct RuntimeConfig {
     pub wifi_pass: String,
     pub bot_token: String,
     pub chat_id: i64,
-    pub cellular_data: bool,
-    pub cellular_fallback: bool,
-    pub apn: String,
-    pub apn_user: String,
-    pub apn_pass: String,
     pub sim_pin: String,
     pub max_failures_before_reboot: u8,
     pub poll_interval_ms: u32,
@@ -43,11 +38,6 @@ impl Default for RuntimeConfig {
             wifi_pass: Config::WIFI_PASSWORD.to_string(),
             bot_token: Config::BOT_TOKEN.to_string(),
             chat_id: Config::CHAT_ID,
-            cellular_data: Config::MODEM_CELLULAR_DATA,
-            cellular_fallback: Config::CELLULAR_FALLBACK,
-            apn: Config::MODEM_APN.to_string(),
-            apn_user: Config::MODEM_APN_USER.to_string(),
-            apn_pass: Config::MODEM_APN_PASS.to_string(),
             sim_pin: Config::MODEM_SIM_PIN.to_string(),
             max_failures_before_reboot: Config::MAX_FAILURES,
             poll_interval_ms: Config::POLL_INTERVAL_MS,
@@ -69,10 +59,9 @@ impl RuntimeConfig {
         }
     }
 
-    /// Minimum to operate: non-empty bot token **and** non-zero chat_id.
-    /// WiFi SSID absence is allowed (cellular-only setups).
+    /// Minimum to operate: WiFi SSID, bot token, and non-zero chat ID.
     pub fn is_provisioned(&self) -> bool {
-        !self.bot_token.is_empty() && self.chat_id != 0
+        !self.wifi_ssid.is_empty() && !self.bot_token.is_empty() && self.chat_id != 0
     }
 }
 
@@ -81,17 +70,17 @@ impl RuntimeConfig {
 #[cfg(feature = "esp32")]
 const CREDS_NS: &str = "smsgcfg";
 
+#[cfg(any(feature = "esp32", test))]
+fn decode_nvs_string(value: Option<&[u8]>) -> Option<String> {
+    std::str::from_utf8(value?).ok().map(str::to_owned)
+}
+
 #[cfg(any(feature = "esp32", feature = "testing"))]
 mod keys {
     pub const WIFI_SSID: &str = "wifi_ssid";
     pub const WIFI_PASS: &str = "wifi_pass";
     pub const BOT_TOKEN: &str = "bot_token";
     pub const CHAT_ID: &str = "chat_id";
-    pub const CELLULAR_DATA: &str = "cell_data";
-    pub const CELLULAR_FALLBACK: &str = "cell_fallback";
-    pub const APN: &str = "apn";
-    pub const APN_USER: &str = "apn_user";
-    pub const APN_PASS: &str = "apn_pass";
     pub const SIM_PIN: &str = "sim_pin";
     pub const MAX_FAILURES: &str = "max_failures";
     pub const POLL_INTERVAL_MS: &str = "poll_ms";
@@ -105,15 +94,21 @@ impl RuntimeConfig {
             keys::WIFI_PASS,
             keys::BOT_TOKEN,
             keys::CHAT_ID,
-            keys::CELLULAR_DATA,
-            keys::CELLULAR_FALLBACK,
-            keys::APN,
-            keys::APN_USER,
-            keys::APN_PASS,
             keys::SIM_PIN,
             keys::MAX_FAILURES,
             keys::POLL_INTERVAL_MS,
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_nvs_string;
+
+    #[test]
+    fn empty_stored_value_overrides_compiled_default() {
+        assert_eq!(decode_nvs_string(Some(b"")), Some(String::new()));
+        assert_eq!(decode_nvs_string(None), None);
     }
 }
 
@@ -146,20 +141,7 @@ impl RuntimeConfig {
         let load = |key: &str| -> Option<String> {
             let mut buf = [0u8; 512];
             let bytes = nvs.get_blob(key, &mut buf).ok()??;
-            let s = std::str::from_utf8(bytes).ok()?;
-            if s.is_empty() {
-                None
-            } else {
-                Some(s.to_string())
-            }
-        };
-
-        let load_bool = |key: &str| -> Option<bool> {
-            load(key).and_then(|value| match value.trim() {
-                "1" | "true" | "TRUE" | "True" | "yes" | "YES" | "on" | "ON" => Some(true),
-                "0" | "false" | "FALSE" | "False" | "no" | "NO" | "off" | "OFF" => Some(false),
-                _ => None,
-            })
+            decode_nvs_string(Some(bytes))
         };
 
         let load_u8 = |key: &str| -> Option<u8> { load(key)?.parse().ok() };
@@ -178,21 +160,6 @@ impl RuntimeConfig {
             if let Ok(id) = v.parse::<i64>() {
                 c.chat_id = id;
             }
-        }
-        if let Some(v) = load_bool(keys::CELLULAR_DATA) {
-            c.cellular_data = v;
-        }
-        if let Some(v) = load_bool(keys::CELLULAR_FALLBACK) {
-            c.cellular_fallback = v;
-        }
-        if let Some(v) = load(keys::APN) {
-            c.apn = v;
-        }
-        if let Some(v) = load(keys::APN_USER) {
-            c.apn_user = v;
-        }
-        if let Some(v) = load(keys::APN_PASS) {
-            c.apn_pass = v;
         }
         if let Some(v) = load(keys::SIM_PIN) {
             c.sim_pin = v;
@@ -230,13 +197,6 @@ impl RuntimeConfig {
         set_blob(keys::BOT_TOKEN, self.bot_token.as_bytes())?;
         let chat_id = self.chat_id.to_string();
         set_blob(keys::CHAT_ID, chat_id.as_bytes())?;
-        let cellular_data = self.cellular_data.to_string();
-        set_blob(keys::CELLULAR_DATA, cellular_data.as_bytes())?;
-        let cellular_fallback = self.cellular_fallback.to_string();
-        set_blob(keys::CELLULAR_FALLBACK, cellular_fallback.as_bytes())?;
-        set_blob(keys::APN, self.apn.as_bytes())?;
-        set_blob(keys::APN_USER, self.apn_user.as_bytes())?;
-        set_blob(keys::APN_PASS, self.apn_pass.as_bytes())?;
         set_blob(keys::SIM_PIN, self.sim_pin.as_bytes())?;
         let max_failures = self.max_failures_before_reboot.to_string();
         set_blob(keys::MAX_FAILURES, max_failures.as_bytes())?;

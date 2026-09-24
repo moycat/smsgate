@@ -3,6 +3,13 @@
 use smsgate::log_clock::{parse_cclk_time, LogClock};
 
 #[test]
+fn malformed_cclk_never_panics_or_overflows() {
+    assert!(parse_cclk_time("+CCLK: \"26/06/21,20:30:45+💡\"").is_none());
+    assert!(parse_cclk_time("+CCLK: \"26/06/21,20:30:45+999999999999999999\"").is_none());
+    assert!(parse_cclk_time("+CCLK: \"26/06/21,20:30:45+97\"").is_none());
+}
+
+#[test]
 fn unsynced_clock_starts_at_year_zero_boot_time() {
     let clock = LogClock::new();
 
@@ -57,4 +64,16 @@ fn synced_clock_uses_wraparound_safe_uptime_delta() {
     clock.sync_from_network(u32::MAX - 999, dt);
 
     assert_eq!(clock.timestamp(2_000), "2026-06-21 20:30:48+08:00");
+}
+
+#[test]
+fn synced_clock_continues_after_full_uptime_wrap() {
+    let mut clock = LogClock::new();
+    let dt = parse_cclk_time(r#"+CCLK: "26/06/21,20:30:45+32""#).unwrap();
+    clock.sync_from_network(0, dt);
+
+    assert_eq!(clock.timestamp(u32::MAX - 999), "2026-08-10 13:33:31+08:00");
+    assert_eq!(clock.timestamp(2_000), "2026-08-10 13:33:34+08:00");
+    assert_eq!(clock.timestamp(u32::MAX - 999), "2026-08-10 13:33:31+08:00");
+    assert_eq!(clock.timestamp(3_000), "2026-08-10 13:33:35+08:00");
 }

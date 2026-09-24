@@ -20,8 +20,8 @@ cargo test --no-default-features --features testing --test <name>
 
 # Build firmware (requires Xtensa toolchain — see Toolchain Setup below)
 cargo +esp build --release --target xtensa-esp32-espidf
-# Windows: ESP-IDF has path-length limits; use a short target dir:
-#   CARGO_TARGET_DIR=C:\t cargo +esp build --release --target xtensa-esp32-espidf
+# Windows: ESP-IDF has path-length limits. Clone to a short path such as C:\s.
+# Keep CARGO_TARGET_DIR at its default or use a direct child such as C:\s\t.
 
 # Generate both Telegram OTA images:
 #   smsgate-ota-software-only.bin keeps existing NVS runtime config
@@ -209,7 +209,7 @@ The `"smsgate"` NVS namespace stores exactly four keys: `im_cursor` (i64),
 `reply_map` (blob), `block_list` (blob), `fwd_enabled` (bool). Runtime config
 lives in the separate `"smsgcfg"` namespace and normally overrides compile-time
 defaults from `config.toml`. Firmware built with
-`SMSGATE_APPLY_COMPILED_CONFIG=1` writes the compiled WiFi, Telegram, modem/APN/SIM,
+`SMSGATE_APPLY_COMPILED_CONFIG=1` writes the compiled WiFi, Telegram, modem/SIM,
 and bridge runtime config back into `"smsgcfg"` on boot.
 
 ### Partition Table
@@ -291,7 +291,7 @@ Generate both `.bin` files to send to the bot with:
 Send `smsgate-ota-software-only.bin` with caption `/ota` to update firmware software
 while preserving existing NVS runtime config. Send `smsgate-ota-with-config.bin` with
 caption `/ota` to update firmware software and overwrite NVS runtime config with the
-compiled `config.toml` WiFi, Telegram, modem/APN/SIM, and bridge runtime values.
+compiled `config.toml` WiFi, Telegram, modem/SIM, and bridge runtime values.
 
 ### CI / Release Notes
 
@@ -390,12 +390,14 @@ Keep `sdkconfig.defaults` aligned with the board and firmware behavior:
 - Watchdog timeouts high enough for modem, flash, and TLS operations while still catching
   stuck tasks.
 
-Long blocking operations such as modem HTTP, SMS send, and flash erase/write must yield
+Long blocking operations such as SMS send and flash erase/write must yield
 or reset watchdog state often enough for ESP-IDF watchdogs. Avoid long critical sections and
 avoid blocking interrupts around UART or flash work.
 
 Telegram polling (`tg-poll`) and outbound Telegram delivery (`tg-send`) are separate runtime
-threads. Main/SMS code should not own a WiFi TLS client directly. Keep modem UART operations
+threads. Ordinary command replies enqueue without waiting for network I/O in the main loop;
+the intentional `/restart` acknowledgement and OTA flow may wait before rebooting. Main/SMS
+code should not own a WiFi TLS client directly outside OTA. Keep modem UART operations
 single-owner and ordered; do not let multiple tasks issue AT commands concurrently.
 
 After changing the partition layout, run a firmware build so ESP-IDF regenerates
@@ -411,9 +413,10 @@ SIM PIN unlock runs after the basic AT probe and `ATE0`, before PDU mode, CNMI s
 storage checks, and network registration. Preserve this ordering: locked SIMs cannot
 register, and SMS setup may fail or behave inconsistently before `+CPIN: READY`.
 
-Cellular fallback is opt-in only. Runtime WiFi failure or Telegram poll staleness may switch
-Telegram transport to modem HTTP only when `[modem].cellular_fallback = true` and APN is
-configured. If fallback is disabled, keep retrying WiFi and do not attach PDP.
+WiFi is the only IP transport. When it is unavailable, keep retrying WiFi while
+SMS and call handling continue through the modem.
+Keep the hidden `/at` command limited to a fixed set of read-only diagnostics;
+do not expose modem data-session commands through it.
 
 ## Key Invariants
 
@@ -425,13 +428,20 @@ Verify after every change:
 - `ScriptedModem` unconsumed steps → test failure (no silent pass)
 - Command count ≤ 10 (hard cap — adding one requires removing one)
 - `"smsgate"` NVS key set unchanged (4 keys only: im_cursor, reply_map, block_list, fwd_enabled)
-- `"smsgcfg"` NVS runtime config keys unchanged (12 keys: wifi_ssid, wifi_pass, bot_token, chat_id, cell_data, cell_fallback, apn, apn_user, apn_pass, sim_pin, max_failures, poll_ms)
+- `"smsgcfg"` NVS runtime config keys unchanged (7 keys: wifi_ssid, wifi_pass, bot_token, chat_id, sim_pin, max_failures, poll_ms)
 
 ## sdkconfig.defaults Known Quirk
 
 `ESP_IDF_SDKCONFIG_DEFAULTS` in `.cargo/config.toml` must be an **absolute path**. A relative
 path is resolved against the esp-idf-sys crate directory in `~/.cargo/registry`, not the project
 root, and silently produces the wrong (default) sdkconfig values.
+
+The custom partition CSV path in `sdkconfig.defaults` is relative to the generated
+esp-idf-sys project at `<target-dir>/<triple>/<profile>/build/<hash>/out`. Keep the
+Cargo target directory as a direct child of the repository so clean builds find
+`partitions_ota.csv`. A target directory elsewhere needs an absolute partition
+CSV path in a generated sdkconfig; do not assume the application `build.rs` can
+copy the CSV before esp-idf-sys starts.
 
 If you change `sdkconfig.defaults` and the change doesn't seem to take effect, delete the cached
 sdkconfig to force kconfgen to regenerate from scratch:

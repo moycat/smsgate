@@ -87,6 +87,13 @@ pub fn normalize_phone(raw: &str) -> String {
     out
 }
 
+/// SMS destinations may be short codes or international numbers, but the
+/// address field must contain only digits and an optional leading plus sign.
+pub fn is_valid_sms_destination(phone: &str) -> bool {
+    let digits = phone.strip_prefix('+').unwrap_or(phone);
+    (1..=20).contains(&digits.len()) && digits.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 /// Convert a CMGR/PDU timestamp to RFC 3339.
 /// `gmt_offset_minutes` is e.g. 480 for UTC+8, -300 for UTC-5.
 pub fn timestamp_to_rfc3339(ts: &str, gmt_offset_minutes: i32) -> String {
@@ -129,37 +136,72 @@ pub fn pdu_timestamp_to_unix(ts: &str) -> i64 {
     if ts.len() < 17 {
         return 0;
     }
-    let parse2 = |s: &str| -> i64 { s.parse().unwrap_or(0) };
-    let yy = parse2(&ts[0..2]);
-    let mo = parse2(&ts[3..5]);
-    let dd = parse2(&ts[6..8]);
-    let hh = parse2(&ts[9..11]);
-    let mm = parse2(&ts[12..14]);
-    let ss = parse2(&ts[15..17]);
+    let bytes = ts.as_bytes();
+    if bytes[2] != b'/'
+        || bytes[5] != b'/'
+        || bytes[8] != b','
+        || bytes[11] != b':'
+        || bytes[14] != b':'
+    {
+        return 0;
+    }
+    let parse2 = |start: usize| -> Option<i64> {
+        let digits = bytes.get(start..start + 2)?;
+        (digits[0].is_ascii_digit() && digits[1].is_ascii_digit())
+            .then(|| i64::from(digits[0] - b'0') * 10 + i64::from(digits[1] - b'0'))
+    };
+    let (Some(yy), Some(mo), Some(dd), Some(hh), Some(mm), Some(ss)) = (
+        parse2(0),
+        parse2(3),
+        parse2(6),
+        parse2(9),
+        parse2(12),
+        parse2(15),
+    ) else {
+        return 0;
+    };
 
-    if !(1..=12).contains(&mo) || !(1..=31).contains(&dd) || hh > 23 || mm > 59 || ss > 60 {
+    if !(1..=12).contains(&mo) || hh > 23 || mm > 59 || ss > 60 {
         return 0;
     }
 
     let year = 2000 + yy;
     let month_days = [0i64, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
     let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let max_day = match mo {
+        2 if is_leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if !(1..=max_day).contains(&dd) {
+        return 0;
+    }
     let leaps =
         (year - 1) / 4 - (year - 1) / 100 + (year - 1) / 400 - (1969 / 4 - 1969 / 100 + 1969 / 400);
     let doy = month_days[(mo - 1) as usize] + dd - 1 + if mo > 2 && is_leap { 1 } else { 0 };
     let days = (year - 1970) * 365 + leaps + doy;
     let local = days * 86400 + hh * 3600 + mm * 60 + ss;
 
-    let tz_offset_min: i64 = if ts.len() >= 18 {
-        let sign = if ts.as_bytes()[17] == b'-' {
-            -1i64
-        } else {
-            1i64
-        };
-        let raw: i64 = ts[18..].parse().unwrap_or(0);
-        sign * raw * 15
-    } else {
-        0
+    let tz_offset_min: i64 = match bytes.get(17..) {
+        None => 0,
+        Some([sign @ (b'+' | b'-'), quarters @ ..]) if !quarters.is_empty() => {
+            if !quarters.iter().all(u8::is_ascii_digit) {
+                return 0;
+            }
+            let Some(raw) = std::str::from_utf8(quarters)
+                .ok()
+                .and_then(|value| value.parse::<i64>().ok())
+            else {
+                return 0;
+            };
+            if raw > 96 {
+                return 0;
+            }
+            let signed_quarters = if *sign == b'-' { -raw } else { raw };
+            signed_quarters * 15
+        }
+        Some(_) => return 0,
     };
 
     local - tz_offset_min * 60
@@ -933,7 +975,7 @@ pub fn build_sms_submit_pdus(
     max_parts: usize,
     request_status_report: bool,
 ) -> Vec<SmsSubmitPdu> {
-    if phone.is_empty() || body.is_empty() {
+    if !is_valid_sms_destination(phone) || body.is_empty() || max_parts == 0 {
         return vec![];
     }
 
@@ -983,7 +1025,7 @@ fn build_gsm7_pdus(phone: &str, septets: &[u8], max_parts: usize, srr: bool) -> 
     }
 
     let total = slices.len();
-    if total > max_parts {
+    if total > max_parts || total > u8::MAX as usize {
         return vec![];
     }
 
@@ -1055,7 +1097,7 @@ fn build_ucs2_pdus(phone: &str, ucs2: &[u8], max_parts: usize, srr: bool) -> Vec
     }
 
     let total = slices.len();
-    if total > max_parts {
+    if total > max_parts || total > u8::MAX as usize {
         return vec![];
     }
 

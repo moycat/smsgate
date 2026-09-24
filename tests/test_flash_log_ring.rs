@@ -1,7 +1,8 @@
 //! Flash-backed log ring tests.
 
 use smsgate::log_ring::{
-    FlashLogRing, LogEntry, LogEvent, LogKind, MemFlashLogStorage, FLASH_LOG_RECORD_SIZE,
+    FlashLogRing, LogEntry, LogEvent, LogFlashStorage, LogKind, MemFlashLogStorage,
+    FLASH_LOG_RECORD_SIZE,
 };
 
 fn event(subject: &str, detail: &str) -> LogEntry {
@@ -83,6 +84,27 @@ fn flash_log_skips_corrupt_records() {
 
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].sender, "good");
+}
+
+#[test]
+fn flash_log_skips_torn_write_after_remount() {
+    let storage = MemFlashLogStorage::new(FLASH_LOG_RECORD_SIZE * 8, FLASH_LOG_RECORD_SIZE * 4);
+    let mut ring = FlashLogRing::mount(storage).unwrap();
+    ring.append(&event("first", "saved")).unwrap();
+    ring.append(&event("second", "saved")).unwrap();
+
+    let mut storage = ring.into_storage();
+    storage.write(FLASH_LOG_RECORD_SIZE * 2, &[0; 32]).unwrap();
+    let mut ring = FlashLogRing::mount(storage).unwrap();
+    ring.append(&event("after-reboot", "saved")).unwrap();
+
+    let subjects: Vec<_> = ring
+        .last_n(4)
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.sender)
+        .collect();
+    assert_eq!(subjects, vec!["first", "second", "after-reboot"]);
 }
 
 #[test]

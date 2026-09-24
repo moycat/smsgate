@@ -29,8 +29,8 @@ pub fn signal_restored(csq: u8) -> String {
 pub fn operator_changed(old: &str, new: &str) -> String {
     format!("⚠️ 运营商变更：{} → {}", old, new)
 }
-pub fn ota_wifi_required() -> &'static str {
-    "OTA 需要 WiFi。蜂窝回退模式不能下载固件。"
+pub fn wifi_unavailable() -> &'static str {
+    "WiFi 不可用（短信服务仍运行）"
 }
 pub fn ota_starting(name: &str, size: Option<u64>) -> String {
     match size {
@@ -67,8 +67,8 @@ pub fn at_invalid_command() -> &'static str {
 pub fn at_command_too_long() -> &'static str {
     "AT 指令过长（最多 128 字节）。"
 }
-pub fn at_interactive_unsupported() -> &'static str {
-    "/at 不支持需要继续输入数据的交互式 AT 指令。"
+pub fn at_unsupported_command() -> &'static str {
+    "/at 只支持只读诊断 AT 指令。"
 }
 pub fn at_transport_error(error: &str) -> String {
     format!("AT 通信错误：{error}")
@@ -351,6 +351,9 @@ pub fn resume_already_active() -> &'static str {
 }
 pub fn resume_ok() -> &'static str {
     "转发已恢复。"
+}
+pub fn storage_write_failed() -> &'static str {
+    "❌ 设置未保存，请查看 /log 后重试。"
 }
 
 // ── /restart ─────────────────────────────────────────────────────────────────

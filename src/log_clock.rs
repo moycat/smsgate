@@ -4,7 +4,7 @@
 //! the firmware uses this clock: before network time is available it starts at
 //! `0000-01-01 00:00:00`, then advances from the modem's NITZ/CCLK time.
 
-use crate::timer::elapsed_since;
+use std::cell::Cell;
 
 const MIN_NETWORK_YEAR: u16 = 2024;
 
@@ -57,7 +57,7 @@ impl NetworkDateTime {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ClockSync {
-    uptime_ms: u32,
+    uptime_ms: u64,
     local_seconds: i64,
     offset_minutes: i32,
 }
@@ -65,11 +65,15 @@ struct ClockSync {
 #[derive(Debug, Clone, Default)]
 pub struct LogClock {
     sync: Option<ClockSync>,
+    extended_uptime_ms: Cell<u64>,
 }
 
 impl LogClock {
     pub fn new() -> Self {
-        Self { sync: None }
+        Self {
+            sync: None,
+            extended_uptime_ms: Cell::new(0),
+        }
     }
 
     pub fn is_synced(&self) -> bool {
@@ -77,6 +81,7 @@ impl LogClock {
     }
 
     pub fn sync_from_network(&mut self, uptime_ms: u32, time: NetworkDateTime) {
+        let uptime_ms = self.extend_uptime(uptime_ms);
         self.sync = Some(ClockSync {
             uptime_ms,
             local_seconds: time.local_seconds(),
@@ -85,17 +90,38 @@ impl LogClock {
     }
 
     pub fn timestamp(&self, uptime_ms: u32) -> String {
+        let uptime_ms = self.extend_uptime(uptime_ms);
         match self.sync {
             Some(sync) => {
-                let elapsed_s = elapsed_since(sync.uptime_ms, uptime_ms) as i64 / 1000;
+                let elapsed_s = uptime_ms.saturating_sub(sync.uptime_ms) as i64 / 1000;
                 NetworkDateTime::from_local_seconds(
                     sync.local_seconds + elapsed_s,
                     sync.offset_minutes,
                 )
                 .format()
             }
-            None => format_unsynced_timestamp(uptime_ms as u64 / 1000),
+            None => format_unsynced_timestamp(uptime_ms / 1000),
         }
+    }
+
+    fn extend_uptime(&self, uptime_ms: u32) -> u64 {
+        let previous = self.extended_uptime_ms.get();
+        let previous_low = previous as u32;
+        // A large backward jump is a 32-bit millisecond counter wrap. Small
+        // backward jumps can come from callers reusing an earlier loop sample.
+        let previous_epoch = previous >> 32;
+        let epoch = if uptime_ms < previous_low && previous_low - uptime_ms > i32::MAX as u32 {
+            previous_epoch + 1
+        } else if uptime_ms > previous_low && uptime_ms - previous_low > i32::MAX as u32 {
+            previous_epoch.saturating_sub(1)
+        } else {
+            previous_epoch
+        };
+        let extended = (epoch << 32) | u64::from(uptime_ms);
+        if extended > previous {
+            self.extended_uptime_ms.set(extended);
+        }
+        extended
     }
 }
 
@@ -111,27 +137,30 @@ pub fn parse_cclk_time(body: &str) -> Option<NetworkDateTime> {
         trimmed.strip_prefix("+CCLK:")?.trim()
     };
 
-    if value.len() < 20
-        || &value[2..3] != "/"
-        || &value[5..6] != "/"
-        || &value[8..9] != ","
-        || &value[11..12] != ":"
-        || &value[14..15] != ":"
+    let bytes = value.as_bytes();
+    if bytes.len() < 20
+        || bytes[2] != b'/'
+        || bytes[5] != b'/'
+        || bytes[8] != b','
+        || bytes[11] != b':'
+        || bytes[14] != b':'
     {
         return None;
     }
 
-    let year = 2000 + parse_u8(&value[0..2])? as u16;
-    let month = parse_u8(&value[3..5])?;
-    let day = parse_u8(&value[6..8])?;
-    let hour = parse_u8(&value[9..11])?;
-    let minute = parse_u8(&value[12..14])?;
-    let second = parse_u8(&value[15..17])?;
-    let sign = &value[17..18];
-    let tz_quarters: i32 = value[18..].parse().ok()?;
-    let offset_minutes = match sign {
-        "+" => tz_quarters * 15,
-        "-" => -tz_quarters * 15,
+    let year = 2000 + u16::from(parse_u8(value.get(0..2)?)?);
+    let month = parse_u8(value.get(3..5)?)?;
+    let day = parse_u8(value.get(6..8)?)?;
+    let hour = parse_u8(value.get(9..11)?)?;
+    let minute = parse_u8(value.get(12..14)?)?;
+    let second = parse_u8(value.get(15..17)?)?;
+    let tz_quarters: i32 = value.get(18..)?.parse().ok()?;
+    if !(0..=96).contains(&tz_quarters) {
+        return None;
+    }
+    let offset_minutes = match bytes[17] {
+        b'+' => tz_quarters * 15,
+        b'-' => -tz_quarters * 15,
         _ => return None,
     };
 
@@ -152,6 +181,9 @@ pub fn parse_cclk_time(body: &str) -> Option<NetworkDateTime> {
 }
 
 fn parse_u8(s: &str) -> Option<u8> {
+    if s.len() != 2 || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
     s.parse().ok()
 }
 

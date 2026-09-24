@@ -76,6 +76,14 @@ pub struct InboundMessage {
     pub callback: Option<InboundCallback>,
 }
 
+/// One poll result, including the next cursor for updates intentionally ignored
+/// by the backend (for example, messages from another Telegram chat).
+#[derive(Debug, Clone)]
+pub struct PollBatch {
+    pub messages: Vec<InboundMessage>,
+    pub next_cursor: i64,
+}
+
 /// A document received from the IM backend.
 #[derive(Debug, Clone)]
 pub struct InboundDocument {
@@ -98,6 +106,8 @@ pub struct InboundDocument {
 pub enum MessengerError {
     #[error("HTTP error: {0}")]
     Http(String),
+    #[error("Telegram request outcome unknown: {0}")]
+    OutcomeUnknown(String),
     #[error("JSON parse error: {0}")]
     Json(String),
     #[error("API rate limited: retry after {retry_after_secs}s: {description}")]
@@ -201,9 +211,71 @@ pub trait MessageSink {
     }
 }
 
+/// Command replies do not need a delivery ID. Implementations may enqueue
+/// them without waiting for the network, keeping the modem owner responsive.
+pub trait CommandResponder {
+    fn send_reply(
+        &mut self,
+        text: &str,
+        keyboard: Option<&InlineKeyboard>,
+        format: MessageFormat,
+    ) -> Result<(), MessengerError>;
+
+    fn edit_reply(
+        &mut self,
+        message_id: MessageId,
+        text: &str,
+        keyboard: Option<&InlineKeyboard>,
+        format: MessageFormat,
+    ) -> Result<(), MessengerError>;
+
+    fn answer_callback(
+        &mut self,
+        callback_query_id: &str,
+        text: Option<&str>,
+    ) -> Result<(), MessengerError>;
+}
+
+impl<T: MessageSink + ?Sized> CommandResponder for T {
+    fn send_reply(
+        &mut self,
+        text: &str,
+        keyboard: Option<&InlineKeyboard>,
+        format: MessageFormat,
+    ) -> Result<(), MessengerError> {
+        match keyboard {
+            Some(keyboard) => self.send_message_with_keyboard_and_format(text, keyboard, format),
+            None => self.send_message_with_format(text, format),
+        }
+        .map(|_| ())
+    }
+
+    fn edit_reply(
+        &mut self,
+        message_id: MessageId,
+        text: &str,
+        keyboard: Option<&InlineKeyboard>,
+        format: MessageFormat,
+    ) -> Result<(), MessengerError> {
+        match keyboard {
+            Some(keyboard) => {
+                self.edit_message_with_keyboard_and_format(message_id, text, keyboard, format)
+            }
+            None => self.edit_message_with_format(message_id, text, format),
+        }
+    }
+
+    fn answer_callback(
+        &mut self,
+        callback_query_id: &str,
+        text: Option<&str>,
+    ) -> Result<(), MessengerError> {
+        self.answer_callback_query(callback_query_id, text)
+    }
+}
+
 /// Inbound command source.
 pub trait MessageSource {
     /// Poll for new messages. `since` = cursor from last poll (0 on first call).
-    fn poll(&mut self, since: i64, timeout_sec: u32)
-        -> Result<Vec<InboundMessage>, MessengerError>;
+    fn poll(&mut self, since: i64, timeout_sec: u32) -> Result<PollBatch, MessengerError>;
 }

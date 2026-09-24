@@ -116,6 +116,7 @@ pub struct AtScript {
     pub command_suffix: String, // what comes after "AT" (without CRLF)
     pub response_body: String,
     pub ok: bool,
+    pub error: Option<ModemError>,
 }
 
 /// Programmable modem mock.
@@ -145,6 +146,18 @@ impl ScriptedModem {
             command_suffix: cmd.to_string(),
             response_body: body.to_string(),
             ok,
+            error: None,
+        });
+        self
+    }
+
+    /// Push an AT command that fails before yielding a response.
+    pub fn expect_error(mut self, cmd: &str, error: ModemError) -> Self {
+        self.script.push_back(AtScript {
+            command_suffix: cmd.to_string(),
+            response_body: String::new(),
+            ok: false,
+            error: Some(error),
         });
         self
     }
@@ -186,6 +199,9 @@ impl AtTransport for ScriptedModem {
                 "ScriptedModem: expected AT{} but got AT{}",
                 step.command_suffix, cmd
             );
+        }
+        if let Some(error) = step.error {
+            return Err(error);
         }
         Ok(AtResponse {
             body: step.response_body,

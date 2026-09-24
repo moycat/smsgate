@@ -13,7 +13,7 @@ pub enum AtRequestError {
     MissingCommand,
     InvalidCommand,
     CommandTooLong,
-    InteractiveCommand,
+    UnsupportedCommand,
 }
 
 impl AtRequestError {
@@ -22,7 +22,7 @@ impl AtRequestError {
             Self::MissingCommand => crate::i18n::at_usage(),
             Self::InvalidCommand => crate::i18n::at_invalid_command(),
             Self::CommandTooLong => crate::i18n::at_command_too_long(),
-            Self::InteractiveCommand => crate::i18n::at_interactive_unsupported(),
+            Self::UnsupportedCommand => crate::i18n::at_unsupported_command(),
         }
     }
 }
@@ -52,29 +52,43 @@ pub fn parse_hidden_at_command(text: &str) -> Option<Result<&str, AtRequestError
         return Some(Err(AtRequestError::InvalidCommand));
     }
     let uppercase = command.to_ascii_uppercase();
-    if is_interactive_command(&uppercase) {
-        return Some(Err(AtRequestError::InteractiveCommand));
+    if !is_diagnostic_command(&uppercase) {
+        return Some(Err(AtRequestError::UnsupportedCommand));
     }
     Some(Ok(&command[2..]))
 }
 
-fn is_interactive_command(command: &str) -> bool {
-    [
-        "AT+CMGS",
-        "AT+CMGW",
-        "AT+QHTTPURL",
-        "AT+QHTTPPOST",
-        "AT+QHTTPREAD",
-        "AT+HTTPDATA",
-        "AT+CIPSEND",
-        "AT+CGDATA",
-        "AT+CMUX",
-        "ATD",
-        "ATA",
-        "ATO",
-    ]
-    .iter()
-    .any(|prefix| command.starts_with(prefix))
+fn is_diagnostic_command(command: &str) -> bool {
+    matches!(
+        command,
+        "AT" | "ATI"
+            | "AT+SIMCOMATI"
+            | "AT+CSQ"
+            | "AT+CREG?"
+            | "AT+CGREG?"
+            | "AT+CEREG?"
+            | "AT+COPS?"
+            | "AT+CPIN?"
+            | "AT+CCLK?"
+            | "AT+CNMI?"
+            | "AT+CMGF?"
+            | "AT+CPMS?"
+            | "AT+CGATT?"
+            | "AT+CGACT?"
+            | "AT+CPSI?"
+            | "AT+CEER"
+            | "AT+CBC"
+            | "AT+CCID"
+            | "AT+CLCC"
+            | "AT+CGMI"
+            | "AT+CGMM"
+            | "AT+CGMR"
+            | "AT+CGSN"
+            | "AT+GMI"
+            | "AT+GMM"
+            | "AT+GMR"
+            | "AT+GSN"
+    )
 }
 
 pub struct AtCommandReply {

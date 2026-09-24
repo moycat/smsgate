@@ -17,8 +17,9 @@ use smsgate::{
         poller::poll_and_dispatch,
         reply_router::ReplyRouter,
         sms_handler::{
-            delete_sms_slots, prepare_pdu_hex_with_slot, prepare_stored_sms, read_new_sms_pdu,
-            read_stored_sms_batch, scan_stored_sms_indices, PreparedSms, SmsPreparation,
+            delete_verified_sms_slot, prepare_pdu_hex_with_slot, prepare_stored_sms,
+            read_new_sms_pdu, read_stored_sms_batch, scan_stored_sms_indices, PreparedSms,
+            SmsPreparation, VerifiedDeletion,
         },
     },
     commands::{builtin::*, CommandRegistry},
@@ -29,16 +30,15 @@ use smsgate::{
             http::TelegramHttpClient,
             poll_error_log_detail, should_log_poll_error, should_recover_after_poll_errors,
             should_restart_after_stale_poll,
-            worker::{TelegramSendEvent, TelegramSendWorker},
+            worker::{QueuedCommandResponder, TelegramSendEvent, TelegramSendWorker},
             TelegramMessenger,
         },
-        MessageFormat, MessageId, MessageSink, MessageSource, MessengerError,
+        MessageFormat, MessageId, MessageSink, MessageSource, MessengerError, PollBatch,
     },
     log_clock::LogClock,
     log_ring::LogRing,
     log_ring::{LogEvent, LogKind},
     modem::{
-        a76xx::qhttp,
         cnmi_store_notifications_enabled,
         urc::{parse_urc, Urc},
         AtResponse, ModemDiagnostics, ModemError, ModemPort,
@@ -53,7 +53,7 @@ use smsgate::{
 use std::collections::VecDeque;
 
 #[cfg(feature = "esp32")]
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
 
 #[cfg(not(feature = "esp32"))]
 fn main() {
@@ -70,9 +70,63 @@ macro_rules! lock {
 
 #[cfg(feature = "esp32")]
 enum TgPollEvent {
-    Batch(Vec<smsgate::im::InboundMessage>),
+    Batch {
+        batch: PollBatch,
+        ack: Option<SyncSender<()>>,
+    },
     Log(LogEvent),
-    RecoverTransport { reason: String },
+    RecoverTransport {
+        reason: String,
+    },
+}
+
+#[cfg(feature = "esp32")]
+struct PollEventSender(SyncSender<TgPollEvent>);
+
+#[cfg(feature = "esp32")]
+struct PendingDeletion {
+    slot: StorageSlot,
+    retry_after: Option<std::time::Instant>,
+}
+
+#[cfg(feature = "esp32")]
+struct PendingSmsRead {
+    mem: String,
+    index: u16,
+    attempts: u8,
+    retry_after: Option<std::time::Instant>,
+}
+
+#[cfg(feature = "esp32")]
+impl PendingDeletion {
+    fn new(slot: StorageSlot) -> Self {
+        Self {
+            slot,
+            retry_after: None,
+        }
+    }
+}
+
+#[cfg(feature = "esp32")]
+impl PollEventSender {
+    fn send(&self, mut event: TgPollEvent) -> Result<(), ()> {
+        loop {
+            match self.0.try_send(event) {
+                Ok(()) => return Ok(()),
+                Err(TrySendError::Disconnected(_)) => return Err(()),
+                Err(TrySendError::Full(queued)) => {
+                    event = queued;
+                    // Backpressure must not trip the poll task watchdog while
+                    // the modem owner is completing a slow AT operation.
+                    unsafe {
+                        // SAFETY: This feeds only the current poll task's watchdog.
+                        let _ = esp_idf_sys::esp_task_wdt_reset();
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+        }
+    }
 }
 
 #[cfg(feature = "esp32")]
@@ -86,6 +140,7 @@ enum DeferredNotification {
 struct PendingNotification {
     item: DeferredNotification,
     receipt: Receiver<Result<MessageId, MessengerError>>,
+    queued_at: std::time::Instant,
 }
 
 #[cfg(feature = "esp32")]
@@ -96,6 +151,9 @@ const MAX_PENDING_NOTIFICATIONS: usize = 4;
 
 #[cfg(feature = "esp32")]
 const MAX_PENDING_DELETIONS: usize = 32;
+
+#[cfg(feature = "esp32")]
+const MAX_TG_POLL_EVENTS_PER_PASS: usize = 8;
 
 #[cfg(feature = "esp32")]
 fn main() {
@@ -227,8 +285,7 @@ fn main() {
     };
     let mut wifi = esp_idf_svc::wifi::BlockingWifi::wrap(wifi_inner, sysloop.clone())
         .expect("WiFi wrap failed");
-    let wifi_ok = setup_wifi(&mut wifi, &creds.wifi_ssid, &creds.wifi_pass).is_ok();
-    let mut using_cellular = false;
+    let mut wifi_ok = setup_wifi(&mut wifi, &creds.wifi_ssid, &creds.wifi_pass).is_ok();
     if wifi_ok {
         record_event(
             &mut log,
@@ -244,56 +301,19 @@ fn main() {
             elapsed_since(boot_ms, now_ms()),
             LogEvent::network("wifi", "failed after retries", false),
         );
-        if creds.cellular_fallback && !creds.apn.is_empty() {
-            log::info!("[main] cellular fallback: attaching PDP context");
-            match qhttp::attach_pdp(
-                &mut *lock!(modem),
-                &creds.apn,
-                &creds.apn_user,
-                &creds.apn_pass,
-            ) {
-                Ok(()) => {
-                    record_event(
-                        &mut log,
-                        &log_clock,
-                        elapsed_since(boot_ms, now_ms()),
-                        LogEvent::network("cellular", "fallback PDP attached", true),
-                    );
-                }
-                Err(e) => {
-                    record_event(
-                        &mut log,
-                        &log_clock,
-                        elapsed_since(boot_ms, now_ms()),
-                        LogEvent::network(
-                            "cellular",
-                            &format!("fallback attach failed: {}", e),
-                            false,
-                        ),
-                    );
-                    panic!("PDP attach failed: {}", e);
-                }
-            }
-            using_cellular = true;
-        } else {
-            panic!(
-                "no WiFi and no cellular fallback (set modem.cellular_fallback + modem.apn, or fix WiFi)"
-            );
-        }
+        record_event(
+            &mut log,
+            &log_clock,
+            elapsed_since(boot_ms, now_ms()),
+            LogEvent::network("wifi", "offline; SMS service continues", false),
+        );
     }
     let mut wifi = wifi; // keep WiFi driver alive; also used for reconnect on drop
 
     // ---- IM (Telegram) ----
-    let transport_cellular =
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(using_cellular));
     let (tg_send_event_tx, tg_send_event_rx) = std::sync::mpsc::channel::<TelegramSendEvent>();
-    let mut messenger = TelegramSendWorker::spawn(
-        modem.clone(),
-        creds.bot_token.clone(),
-        creds.chat_id,
-        transport_cellular.clone(),
-        tg_send_event_tx,
-    );
+    let mut messenger =
+        TelegramSendWorker::spawn(creds.bot_token.clone(), creds.chat_id, tg_send_event_tx);
     let mut ready_notifications: VecDeque<DeferredNotification> = VecDeque::new();
 
     // ---- Subsystems ----
@@ -310,7 +330,8 @@ fn main() {
                 &mut log,
                 &log_clock,
                 elapsed_since(boot_ms, now_ms()),
-            ) {
+            ) && wifi_ok
+            {
                 esp_idf_hal::reset::restart();
             }
         };
@@ -321,23 +342,11 @@ fn main() {
     let help_text = build_registry("").help_text();
     let registry = build_registry(&help_text);
 
-    // Register bot commands with Telegram
-    let mut command_registration = match messenger.try_register_commands(&registry.command_list()) {
-        Ok(receipt) => Some(receipt),
-        Err(error) => {
-            record_event(
-                &mut log,
-                &log_clock,
-                elapsed_since(boot_ms, now_ms()),
-                LogEvent::network(
-                    "telegram",
-                    &format!("register commands enqueue failed: {}", error),
-                    false,
-                ),
-            );
-            None
-        }
-    };
+    // Register only when a transport is usable. An offline startup must not
+    // leave the send worker retrying a cosmetic menu update for five minutes.
+    let mut command_registration = None;
+    let mut commands_registered = false;
+    let mut last_command_registration_attempt: Option<std::time::Instant> = None;
 
     // Alert if NVS init failed (now that we have a messenger to send the notification)
     if nvs_failed {
@@ -441,6 +450,7 @@ fn main() {
 
     // Subscribe main task to the Task WDT configured by sdkconfig.defaults.
     unsafe {
+        // SAFETY: A null handle selects the current FreeRTOS task.
         esp_idf_sys::esp_task_wdt_add(std::ptr::null_mut());
     }
 
@@ -449,25 +459,18 @@ fn main() {
     // waiting for the network. The channel delivers batches of inbound messages.
     let initial_cursor =
         smsgate::persist::load_i64(&*store, smsgate::persist::keys::IM_CURSOR).unwrap_or(0);
-    let (tg_tx, tg_rx) = std::sync::mpsc::channel::<TgPollEvent>();
-    let modem_tg = modem.clone();
+    let (tg_poll_tx, tg_rx) = std::sync::mpsc::sync_channel::<TgPollEvent>(8);
+    let tg_tx = PollEventSender(tg_poll_tx);
     let tg_token_poll = creds.bot_token.clone();
     let tg_chat_id_poll = creds.chat_id;
     let tg_poll_interval_ms = creds.poll_interval_ms;
-    let tg_transport_cellular = transport_cellular.clone();
     std::thread::Builder::new()
         .name("tg-poll".into())
         .stack_size(16 * 1024)
         .spawn(move || {
-            let mut poll_cellular = tg_transport_cellular.load(std::sync::atomic::Ordering::SeqCst);
             let mut consecutive_poll_errors: u16 = 0;
             let mut poll_messenger = loop {
-                match build_telegram_messenger(
-                    poll_cellular,
-                    modem_tg.clone(),
-                    tg_token_poll.clone(),
-                    tg_chat_id_poll,
-                ) {
+                match build_telegram_messenger(tg_token_poll.clone(), tg_chat_id_poll) {
                     Ok(m) => break m,
                     Err(e) => {
                         log::error!("[tg-poll] messenger init failed: {}", e);
@@ -494,8 +497,6 @@ fn main() {
                             return;
                         }
                         std::thread::sleep(std::time::Duration::from_secs(5));
-                        poll_cellular =
-                            tg_transport_cellular.load(std::sync::atomic::Ordering::SeqCst);
                     }
                 }
             };
@@ -504,74 +505,48 @@ fn main() {
             // Subscribe this thread to the same Task WDT as main.
             // If poll() hangs indefinitely the WDT fires and reboots the device.
             unsafe {
+                // SAFETY: A null handle selects this poll task only.
                 esp_idf_sys::esp_task_wdt_add(std::ptr::null_mut());
             }
             loop {
                 unsafe {
+                    // SAFETY: The current poll task was registered above.
                     esp_idf_sys::esp_task_wdt_reset();
                 }
-                let desired_cellular =
-                    tg_transport_cellular.load(std::sync::atomic::Ordering::SeqCst);
-                if desired_cellular != poll_cellular {
-                    match build_telegram_messenger(
-                        desired_cellular,
-                        modem_tg.clone(),
-                        tg_token_poll.clone(),
-                        tg_chat_id_poll,
-                    ) {
-                        Ok(m) => {
-                            poll_messenger = m;
-                            poll_cellular = desired_cellular;
-                            consecutive_poll_errors = 0;
-                            log::info!(
-                                "[tg-poll] switched to {} transport",
-                                if poll_cellular { "cellular" } else { "WiFi" }
-                            );
-                        }
-                        Err(e) => {
-                            log::error!("[tg-poll] transport switch failed: {}", e);
-                            consecutive_poll_errors = consecutive_poll_errors.saturating_add(1);
-                            let error = format!("transport switch failed: {}", e);
-                            if should_log_poll_error(consecutive_poll_errors) {
-                                let detail = poll_error_log_detail(consecutive_poll_errors, &error);
-                                if tg_tx
-                                    .send(TgPollEvent::Log(LogEvent::network(
-                                        "telegram", &detail, false,
-                                    )))
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                            }
-                            if should_recover_after_poll_errors(consecutive_poll_errors)
-                                && tg_tx
-                                    .send(TgPollEvent::RecoverTransport {
-                                        reason: poll_error_log_detail(
-                                            consecutive_poll_errors,
-                                            &error,
-                                        ),
-                                    })
-                                    .is_err()
+                let poll_secs = telegram_poll_timeout_secs(tg_poll_interval_ms);
+                match poll_messenger.poll(cursor, poll_secs) {
+                    Ok(batch) => {
+                        consecutive_poll_errors = 0;
+                        let next_cursor = batch.next_cursor;
+                        if next_cursor > cursor {
+                            let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
+                            if tg_tx
+                                .send(TgPollEvent::Batch {
+                                    batch,
+                                    ack: Some(ack_tx),
+                                })
+                                .is_err()
                             {
                                 break;
                             }
-                            std::thread::sleep(std::time::Duration::from_secs(5));
-                            continue;
-                        }
-                    }
-                }
-                let poll_secs = telegram_poll_timeout_secs(poll_cellular, tg_poll_interval_ms);
-                match poll_messenger.poll(cursor, poll_secs) {
-                    Ok(msgs) if !msgs.is_empty() => {
-                        consecutive_poll_errors = 0;
-                        cursor = msgs.iter().map(|m| m.cursor).max().unwrap_or(cursor);
-                        if tg_tx.send(TgPollEvent::Batch(msgs)).is_err() {
-                            break;
-                        }
-                    }
-                    Ok(_) => {
-                        consecutive_poll_errors = 0;
-                        if tg_tx.send(TgPollEvent::Batch(Vec::new())).is_err() {
+                            // A higher getUpdates offset confirms this update
+                            // on Telegram's server. Wait until main has saved
+                            // the cursor and handled the update first.
+                            loop {
+                                unsafe {
+                                    // SAFETY: The current poll task was registered above.
+                                    let _ = esp_idf_sys::esp_task_wdt_reset();
+                                }
+                                match ack_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                                    Ok(()) => {
+                                        cursor = next_cursor;
+                                        break;
+                                    }
+                                    Err(RecvTimeoutError::Timeout) => continue,
+                                    Err(RecvTimeoutError::Disconnected) => return,
+                                }
+                            }
+                        } else if tg_tx.send(TgPollEvent::Batch { batch, ack: None }).is_err() {
                             break;
                         }
                     }
@@ -597,10 +572,19 @@ fn main() {
                             {
                                 break;
                             }
-                            if tg_tx.send(TgPollEvent::Batch(Vec::new())).is_err() {
+                            if tg_tx
+                                .send(TgPollEvent::Batch {
+                                    batch: PollBatch {
+                                        messages: Vec::new(),
+                                        next_cursor: cursor,
+                                    },
+                                    ack: None,
+                                })
+                                .is_err()
+                            {
                                 break;
                             }
-                            if !sleep_with_poll_activity(retry_after, &tg_tx) {
+                            if !sleep_with_poll_activity(retry_after, &tg_tx, cursor) {
                                 break;
                             }
                             continue;
@@ -639,8 +623,11 @@ fn main() {
     let mut consecutive_failures: u8 = 0;
     let mut last_status_update = now_ms();
     let mut pause_until: Option<std::time::Instant> = None;
-    let mut wifi_info = fmt_network(using_cellular, wifi_ok, None, &creds.wifi_ssid);
+    let mut wifi_info = fmt_network(wifi_ok, None, &creds.wifi_ssid);
     let mut last_tg_activity = std::time::Instant::now();
+    let mut persisted_tg_cursor = initial_cursor;
+    let mut pending_tg_batch: Option<(PollBatch, SyncSender<()>)> = None;
+    let mut cursor_retry_after: Option<std::time::Instant> = None;
     let mut low_signal_alerted = false;
     let mut low_heap_alerted = false;
     let mut last_operator = String::new();
@@ -661,7 +648,8 @@ fn main() {
     let mut last_sms_malformed_log: Option<u32> = None;
     let mut last_sms_batch_failure: Option<u32> = None;
     let mut pending_notifications: Vec<PendingNotification> = Vec::new();
-    let mut pending_deletions: VecDeque<StorageSlot> = VecDeque::new();
+    let mut pending_deletions: VecDeque<PendingDeletion> = VecDeque::new();
+    let mut pending_sms_reads: VecDeque<PendingSmsRead> = VecDeque::new();
     let mut pending_modem_diagnostics = ModemDiagnostics::default();
     let mut last_modem_diagnostics_log: Option<u32> = None;
     let mut last_pdn_event_log: Option<u32> = None;
@@ -678,15 +666,41 @@ fn main() {
 
         // Kick the hardware watchdog
         unsafe {
+            // SAFETY: The current main task was registered during startup.
             esp_idf_sys::esp_task_wdt_reset();
         }
 
-        if drain_telegram_send_events(&tg_send_event_rx, &mut log, &log_clock, uptime_ms) {
+        if drain_telegram_send_events(&tg_send_event_rx, &mut log, &log_clock, uptime_ms) && wifi_ok
+        {
             esp_idf_hal::reset::restart();
+        }
+        if wifi_ok
+            && !commands_registered
+            && command_registration.is_none()
+            && last_command_registration_attempt
+                .is_none_or(|attempt| attempt.elapsed() >= std::time::Duration::from_secs(60))
+        {
+            last_command_registration_attempt = Some(std::time::Instant::now());
+            match messenger.try_register_commands(&registry.command_list()) {
+                Ok(receipt) => command_registration = Some(receipt),
+                Err(error) => record_event(
+                    &mut log,
+                    &log_clock,
+                    uptime_ms,
+                    LogEvent::network(
+                        "telegram",
+                        &format!("register commands enqueue failed: {}", error),
+                        false,
+                    ),
+                ),
+            }
         }
         if let Some(receipt) = command_registration.as_ref() {
             match receipt.try_recv() {
-                Ok(Ok(())) => command_registration = None,
+                Ok(Ok(())) => {
+                    commands_registered = true;
+                    command_registration = None;
+                }
                 Ok(Err(error)) => {
                     record_event(
                         &mut log,
@@ -703,6 +717,37 @@ fn main() {
                 Err(TryRecvError::Disconnected) => command_registration = None,
                 Err(TryRecvError::Empty) => {}
             }
+        }
+
+        if messenger.active_for().is_some_and(|elapsed| {
+            elapsed
+                > smsgate::im::telegram::telegram_restart_after()
+                    + std::time::Duration::from_secs(90)
+        }) {
+            record_event(
+                &mut log,
+                &log_clock,
+                uptime_ms,
+                LogEvent::network("telegram", "outbound worker stalled; rebooting", false),
+            );
+            esp_idf_hal::reset::restart();
+        }
+        if pending_notifications.iter().any(|pending| {
+            pending.queued_at.elapsed()
+                > smsgate::im::telegram::telegram_restart_after()
+                    + std::time::Duration::from_secs(90)
+        }) {
+            record_event(
+                &mut log,
+                &log_clock,
+                uptime_ms,
+                LogEvent::network(
+                    "telegram",
+                    "outbound receipt stalled; rebooting with stored SMS retained",
+                    false,
+                ),
+            );
+            esp_idf_hal::reset::restart();
         }
 
         let mut index = 0;
@@ -726,7 +771,7 @@ fn main() {
                         &mut *store,
                         &log_timestamp,
                     );
-                    pending_deletions.extend(prepared.slots);
+                    pending_deletions.extend(prepared.slots.into_iter().map(PendingDeletion::new));
                 }
                 (DeferredNotification::Sms(prepared), Err(error)) => {
                     record_forward_failure(&prepared.sms, &error, &mut log, &log_timestamp);
@@ -765,15 +810,26 @@ fn main() {
             }
         }
 
-        if let Some(slot) = pending_deletions.pop_front() {
-            delete_consumed_slots(
-                vec![slot],
-                &modem,
-                &mut consumed_slots,
-                &mut sms_delete_error_logs,
-                &mut log,
-                &log_timestamp,
-            );
+        if let Some(mut deletion) = pending_deletions.pop_front() {
+            if deletion
+                .retry_after
+                .is_some_and(|after| std::time::Instant::now() < after)
+            {
+                pending_deletions.push_back(deletion);
+            } else {
+                if !delete_consumed_slot(
+                    &deletion.slot,
+                    &modem,
+                    &mut consumed_slots,
+                    &mut sms_delete_error_logs,
+                    &mut log,
+                    &log_timestamp,
+                ) {
+                    deletion.retry_after =
+                        Some(std::time::Instant::now() + std::time::Duration::from_secs(30));
+                    pending_deletions.push_back(deletion);
+                }
+            }
         }
 
         // Auto-resume after timed /pause
@@ -887,20 +943,31 @@ fn main() {
                 sync_log_clock_from_modem(&modem, &mut log_clock, &mut log, boot_ms, false);
             }
 
+            // Association alone is not enough: Telegram also needs a usable
+            // network interface (for example, after a DHCP lease is lost).
+            let network_up = wifi.is_up().unwrap_or(false);
+            if network_up && !wifi_ok {
+                last_tg_activity = std::time::Instant::now();
+                record_event(
+                    &mut log,
+                    &log_clock,
+                    uptime_ms,
+                    LogEvent::network("wifi", "network interface restored", true),
+                );
+                last_wifi_reconnect_attempt = None;
+            }
+            wifi_ok = network_up;
+
             // Refresh WiFi RSSI
-            let rssi = if wifi_ok && !using_cellular {
-                unsafe {
-                    let mut ap: esp_idf_sys::wifi_ap_record_t = std::mem::zeroed();
-                    if esp_idf_sys::esp_wifi_sta_get_ap_info(&mut ap) == esp_idf_sys::ESP_OK {
-                        Some(ap.rssi as i32)
-                    } else {
-                        None
-                    }
-                }
+            let rssi = if wifi_ok {
+                wifi.wifi()
+                    .get_rssi()
+                    .ok()
+                    .filter(|rssi| (-127..0).contains(rssi))
             } else {
                 None
             };
-            wifi_info = fmt_network(using_cellular, wifi_ok, rssi, &creds.wifi_ssid);
+            wifi_info = fmt_network(wifi_ok, rssi, &creds.wifi_ssid);
 
             // Low-heap alert
             if let Some(alert) = check_low_heap() {
@@ -990,13 +1057,9 @@ fn main() {
                 last_operator.clone_from(&modem_status.operator);
             }
 
-            // WiFi watchdog: reconnect if the station lost its association.
-            // This is the primary recovery path for "device alive but Telegram dead"
-            // after a router reboot or DHCP expiry.  Only attempted in WiFi mode;
-            // in cellular fallback mode wifi_ok is false and wifi is not used.
-            if !using_cellular
-                && wifi_ok
-                && !wifi.is_connected().unwrap_or(false)
+            // WiFi watchdog: recover both a failed initial connection and a
+            // station that later loses its association or DHCP lease.
+            if !wifi_ok
                 && last_wifi_reconnect_attempt
                     .is_none_or(|attempt| attempt.elapsed() >= std::time::Duration::from_secs(60))
             {
@@ -1008,8 +1071,13 @@ fn main() {
                     uptime_ms,
                     LogEvent::network("wifi", "disconnected", false),
                 );
-                let reconnected = reconnect_wifi(&mut wifi);
+                let reconnected = if wifi.is_started().unwrap_or(false) {
+                    reconnect_wifi(&mut wifi)
+                } else {
+                    start_wifi_once(&mut wifi, &creds.wifi_ssid, &creds.wifi_pass)
+                };
                 if reconnected {
+                    wifi_ok = true;
                     last_wifi_reconnect_attempt = None;
                     log::info!("[wifi] reconnected OK");
                     record_event(
@@ -1019,6 +1087,7 @@ fn main() {
                         LogEvent::network("wifi", "reconnected", true),
                     );
                 } else {
+                    wifi_ok = false;
                     log::error!("[wifi] reconnect failed — will retry next cycle");
                     record_event(
                         &mut log,
@@ -1026,31 +1095,11 @@ fn main() {
                         uptime_ms,
                         LogEvent::network("wifi", "reconnect failed", false),
                     );
-                    let switched = try_enable_cellular_fallback(
-                        "WiFi disconnected",
-                        &modem,
-                        &creds,
-                        &mut using_cellular,
-                        &transport_cellular,
-                    );
-                    if switched {
-                        wifi_info = fmt_network(using_cellular, wifi_ok, None, &creds.wifi_ssid);
-                        record_event(
-                            &mut log,
-                            &log_clock,
-                            uptime_ms,
-                            LogEvent::network(
-                                "cellular",
-                                "fallback enabled after WiFi disconnect",
-                                true,
-                            ),
-                        );
-                    }
                 }
             }
 
             let stale_elapsed = last_tg_activity.elapsed();
-            if should_restart_after_stale_poll(stale_elapsed) {
+            if wifi_ok && should_restart_after_stale_poll(stale_elapsed) {
                 let mins = (stale_elapsed.as_secs() / 60) as u32;
                 log::error!("[main] tg-poll stale for {} min — rebooting", mins);
                 record_event(
@@ -1068,7 +1117,7 @@ fn main() {
         }
 
         let mut pending_sms = Vec::new();
-        let mut pending_sms_errors = Vec::new();
+        let mut pending_sms_errors: Vec<(String, u16, String)> = Vec::new();
         let mut direct_pdus = Vec::new();
         let mut call_notifications = Vec::new();
 
@@ -1096,10 +1145,39 @@ fn main() {
                 }
 
                 match parse_urc(&urc) {
-                    Urc::NewSms { mem, index } => match read_new_sms_pdu(&mem, index, &mut *md) {
-                        Ok(stored) => pending_sms.push(stored),
-                        Err(e) => pending_sms_errors.push((mem, index, e.to_string())),
-                    },
+                    Urc::NewSms { mem, index } => {
+                        if !pending_sms_reads
+                            .iter()
+                            .any(|pending| pending.mem == mem && pending.index == index)
+                        {
+                            const MAX_PENDING_SMS_READS: usize = 128;
+                            if pending_sms_reads.len() >= MAX_PENDING_SMS_READS && mem == "SM" {
+                                // ME slots are recovered by the periodic sweep; an SM
+                                // notification has no such recovery path on this modem.
+                                if let Some(position) = pending_sms_reads
+                                    .iter()
+                                    .position(|pending| pending.mem == "ME")
+                                {
+                                    pending_sms_reads.remove(position);
+                                }
+                            }
+                            if pending_sms_reads.len() < MAX_PENDING_SMS_READS {
+                                pending_sms_reads.push_back(PendingSmsRead {
+                                    mem,
+                                    index,
+                                    attempts: 0,
+                                    retry_after: None,
+                                });
+                            } else {
+                                let detail = if mem == "SM" {
+                                    "SM read queue full; no automatic SM sweep configured"
+                                } else {
+                                    "SMS read queue full; ME storage sweep needed"
+                                };
+                                pending_sms_errors.push((mem, index, detail.into()));
+                            }
+                        }
+                    }
                     Urc::SmsDelivery => {
                         cmt_pdu_pending = true; // next poll_urc() line is the raw PDU
                     }
@@ -1201,7 +1279,11 @@ fn main() {
                     ),
                 );
             }
-            if reserve_critical_notification_slot(&mut ready_notifications) {
+            if reserve_ephemeral_notification_slot(
+                &mut ready_notifications,
+                &mut log,
+                &log_timestamp,
+            ) {
                 ready_notifications.push_front(DeferredNotification::Call(notification));
             } else {
                 record_event(
@@ -1214,7 +1296,11 @@ fn main() {
         }
 
         for pdu in direct_pdus {
-            if !reserve_critical_notification_slot(&mut ready_notifications) {
+            if !reserve_ephemeral_notification_slot(
+                &mut ready_notifications,
+                &mut log,
+                &log_timestamp,
+            ) {
                 record_event(
                     &mut log,
                     &log_clock,
@@ -1240,6 +1326,48 @@ fn main() {
                 &mut *store,
                 &log_timestamp,
             );
+        }
+
+        // Service URCs and queue unrepeatable notifications before a possibly
+        // slow CPMS/CMGR exchange. Read at most one stored slot per pass.
+        if let Some(index) = pending_sms_reads.iter().position(|pending| {
+            pending
+                .retry_after
+                .is_none_or(|after| std::time::Instant::now() >= after)
+        }) {
+            let mut pending = pending_sms_reads
+                .remove(index)
+                .expect("pending SMS index checked");
+            let result = {
+                let mut md = lock!(modem);
+                read_new_sms_pdu(&pending.mem, pending.index, &mut *md)
+            };
+            match result {
+                Ok(stored) => pending_sms.push(stored),
+                Err(error) => {
+                    pending.attempts = pending.attempts.saturating_add(1);
+                    record_event(
+                        &mut log,
+                        &log_clock,
+                        uptime_ms,
+                        LogEvent::new(
+                            LogKind::Sms,
+                            &format!("{}:{}", pending.mem, pending.index),
+                            &format!(
+                                "read failed (attempt {}); slot retained: {}",
+                                pending.attempts, error
+                            ),
+                            false,
+                        ),
+                    );
+                    if pending.attempts < 8 || pending.mem == "SM" {
+                        let delay = if pending.attempts < 8 { 30 } else { 5 * 60 };
+                        pending.retry_after =
+                            Some(std::time::Instant::now() + std::time::Duration::from_secs(delay));
+                        pending_sms_reads.push_back(pending);
+                    }
+                }
+            }
         }
 
         for sms in pending_sms {
@@ -1316,6 +1444,14 @@ fn main() {
                         );
                     }
                     last_sms_malformed_count = scan.malformed_entries;
+                    // A previously delivered slot may have disappeared while
+                    // CMGD was failing. Do not keep its retry in RAM forever.
+                    if scan.malformed_entries == 0 {
+                        pending_deletions.retain(|deletion| {
+                            deletion.slot.mem != "ME"
+                                || scan.indices.binary_search(&deletion.slot.index).is_ok()
+                        });
+                    }
                     pending_sweep_indices.extend(scan.indices);
                 }
                 Err(e) => {
@@ -1446,19 +1582,27 @@ fn main() {
 
         // Collect any Telegram messages delivered by the polling thread
         let mut telegram_recovery_reason = None;
-        let tg_messages: Vec<smsgate::im::InboundMessage> = {
+        let mut tg_messages: Vec<smsgate::im::InboundMessage> = {
             let mut batch = Vec::new();
             let mut channel_active = false;
-            loop {
+            for _ in 0..MAX_TG_POLL_EVENTS_PER_PASS {
                 match tg_rx.try_recv() {
-                    Ok(TgPollEvent::Batch(msgs)) => {
+                    Ok(TgPollEvent::Batch { batch: polled, ack }) => {
                         channel_active = true;
-                        batch.extend(msgs);
+                        if let Some(ack) = ack {
+                            // The poll task will not fetch a later update until
+                            // this batch is checkpointed and acknowledged.
+                            pending_tg_batch = Some((polled, ack));
+                            break;
+                        }
+                        batch.extend(polled.messages);
                     }
                     Ok(TgPollEvent::Log(event)) => {
+                        channel_active = true;
                         record_event(&mut log, &log_clock, uptime_ms, event);
                     }
                     Ok(TgPollEvent::RecoverTransport { reason }) => {
+                        channel_active = true;
                         if telegram_recovery_reason.is_none() {
                             telegram_recovery_reason = Some(reason);
                         }
@@ -1483,20 +1627,47 @@ fn main() {
             batch
         };
 
+        let mut tg_ack = None;
+        if pending_tg_batch.is_some()
+            && cursor_retry_after.is_none_or(|after| std::time::Instant::now() >= after)
+        {
+            let next_cursor = pending_tg_batch
+                .as_ref()
+                .map(|(batch, _)| batch.next_cursor)
+                .unwrap_or(persisted_tg_cursor);
+            match smsgate::bridge::poller::checkpoint_cursor(
+                &mut *store,
+                &mut persisted_tg_cursor,
+                next_cursor,
+            ) {
+                Ok(()) => {
+                    cursor_retry_after = None;
+                    let (batch, ack) = pending_tg_batch.take().expect("pending batch checked");
+                    log::info!("[main] Telegram cursor persisted: {}", next_cursor);
+                    tg_messages.extend(batch.messages);
+                    tg_ack = Some(ack);
+                }
+                Err(error) => {
+                    cursor_retry_after =
+                        Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
+                    log::error!("[main] Telegram cursor persistence failed: {}", error);
+                    record_event(
+                        &mut log,
+                        &log_clock,
+                        uptime_ms,
+                        LogEvent::network(
+                            "telegram",
+                            &format!("cursor persistence failed: {}", error),
+                            false,
+                        ),
+                    );
+                }
+            }
+        }
+
         if let Some(reason) = telegram_recovery_reason {
             recover_wifi_after_telegram_failure(
-                &reason,
-                &mut wifi,
-                &modem,
-                &creds,
-                &mut using_cellular,
-                &transport_cellular,
-                &mut log,
-                &log_clock,
-                uptime_ms,
-                &mut wifi_info,
-                wifi_ok,
-                &creds.wifi_ssid,
+                &reason, &mut wifi, &mut log, &log_clock, uptime_ms, &wifi_info, wifi_ok,
             );
         }
 
@@ -1508,17 +1679,6 @@ fn main() {
                 tg_messages.len(),
                 document_count
             );
-            if let Some(new_cursor) = tg_messages.iter().map(|m| m.cursor).max() {
-                let _ = smsgate::persist::save_i64(
-                    &mut *store,
-                    smsgate::persist::keys::IM_CURSOR,
-                    new_cursor,
-                );
-                log::info!(
-                    "[main] Telegram cursor persisted before dispatch: {}",
-                    new_cursor
-                );
-            }
             let latest_ota_cursor = smsgate::ota::latest_ota_document_cursor(&tg_messages);
             for msg in tg_messages.iter().filter(|m| m.document.is_some()) {
                 if let Some(document) = msg.document.as_ref() {
@@ -1554,7 +1714,6 @@ fn main() {
                         document,
                         &mut messenger,
                         &creds.bot_token,
-                        using_cellular,
                         &mut log,
                         &log_clock,
                         boot_ms,
@@ -1601,22 +1760,28 @@ fn main() {
                 dispatch_messages.push(msg);
             }
             if dispatch_messages.iter().any(|m| m.document.is_none()) {
+                // SAFETY: These ESP-IDF getters return scalar heap statistics.
                 let free_heap = unsafe { esp_idf_sys::esp_get_free_heap_size() };
+                // SAFETY: This getter also takes no pointers or mutable arguments.
                 let min_free_heap = unsafe { esp_idf_sys::esp_get_minimum_free_heap_size() };
-                match poll_and_dispatch(
-                    &dispatch_messages,
-                    &mut messenger,
-                    &mut sender,
-                    &router,
-                    &registry,
-                    &mut *store,
-                    &log,
-                    &modem_status,
-                    uptime_ms,
-                    free_heap,
-                    min_free_heap,
-                    &wifi_info,
-                ) {
+                let dispatch = {
+                    let mut command_responder = QueuedCommandResponder::new(&messenger);
+                    poll_and_dispatch(
+                        &dispatch_messages,
+                        &mut command_responder,
+                        &mut sender,
+                        &router,
+                        &registry,
+                        &mut *store,
+                        &log,
+                        &modem_status,
+                        uptime_ms,
+                        free_heap,
+                        min_free_heap,
+                        &wifi_info,
+                    )
+                };
+                match dispatch {
                     Ok(outcome) => {
                         drain_tg_send!();
                         consecutive_failures = 0;
@@ -1634,7 +1799,11 @@ fn main() {
                         }
                         if outcome.restart_requested {
                             log::info!("[main] restart requested via /restart command");
-                            // The dispatcher has already sent the command reply.
+                            if let Some(reply) = outcome.restart_reply {
+                                if let Err(error) = messenger.send_message(&reply) {
+                                    log::warn!("[main] restart reply failed: {}", error);
+                                }
+                            }
                             esp_idf_hal::reset::restart();
                         }
                     }
@@ -1659,6 +1828,13 @@ fn main() {
                     }
                 }
             }
+        }
+
+        // Only now may the poll task advance the Telegram server-side offset.
+        // The NVS checkpoint was written before command side effects, so an
+        // intentional reboot does not replay /restart or /ota.
+        if let Some(ack) = tg_ack {
+            let _ = ack.send(());
         }
 
         let drain = {
@@ -1700,10 +1876,19 @@ fn main() {
             _ => {}
         }
 
-        while pending_notifications.len() < MAX_PENDING_NOTIFICATIONS
-            && pending_deletions.len() < MAX_PENDING_DELETIONS
-        {
-            let Some(next) = ready_notifications.front() else {
+        while wifi_ok && pending_notifications.len() < MAX_PENDING_NOTIFICATIONS {
+            // Pause new SMS forwards if too many delivered slots still need
+            // deletion, but keep call and operational notifications flowing.
+            let next_index = if pending_deletions.len() >= MAX_PENDING_DELETIONS {
+                ready_notifications
+                    .iter()
+                    .position(|item| !matches!(item, DeferredNotification::Sms(_)))
+            } else {
+                Some(0)
+            };
+            let Some((next_index, next)) = next_index
+                .and_then(|index| ready_notifications.get(index).map(|item| (index, item)))
+            else {
                 break;
             };
             let (text, format) = match next {
@@ -1718,9 +1903,13 @@ fn main() {
             match messenger.try_send_message_with_format_owned(text, format) {
                 Ok(receipt) => {
                     let item = ready_notifications
-                        .pop_front()
-                        .expect("checked queue front");
-                    pending_notifications.push(PendingNotification { item, receipt });
+                        .remove(next_index)
+                        .expect("checked notification index");
+                    pending_notifications.push(PendingNotification {
+                        item,
+                        receipt,
+                        queued_at: std::time::Instant::now(),
+                    });
                 }
                 Err(MessengerError::Timeout(_)) => break,
                 Err(error) => {
@@ -1752,7 +1941,7 @@ fn main() {
 fn queue_sms_preparation(
     preparation: SmsPreparation,
     ready: &mut VecDeque<DeferredNotification>,
-    deletions: &mut VecDeque<StorageSlot>,
+    deletions: &mut VecDeque<PendingDeletion>,
     router: &mut ReplyRouter,
     log: &mut LogRing,
     messenger: &mut dyn MessageSink,
@@ -1761,14 +1950,16 @@ fn queue_sms_preparation(
 ) {
     match preparation {
         SmsPreparation::Retain => {}
-        SmsPreparation::Consumed(slots) => deletions.extend(slots),
+        SmsPreparation::Consumed(slots) => {
+            deletions.extend(slots.into_iter().map(PendingDeletion::new));
+        }
         SmsPreparation::Ready(prepared) => {
             if load_bool(store, keys::FWD_ENABLED) == Some(false)
                 || is_blocked(&prepared.sms.sender, store)
             {
                 // forward_sms records the intentional drop without issuing an IM request.
                 let _ = forward_sms(&prepared.sms, messenger, router, log, store, timestamp);
-                deletions.extend(prepared.slots);
+                deletions.extend(prepared.slots.into_iter().map(PendingDeletion::new));
             } else {
                 let priority_end = ready
                     .iter()
@@ -1819,6 +2010,34 @@ fn reserve_critical_notification_slot(ready: &mut VecDeque<DeferredNotification>
 }
 
 #[cfg(feature = "esp32")]
+fn reserve_ephemeral_notification_slot(
+    ready: &mut VecDeque<DeferredNotification>,
+    log: &mut LogRing,
+    timestamp: &str,
+) -> bool {
+    if reserve_critical_notification_slot(ready) {
+        return true;
+    }
+    // A stored SMS remains in the modem until Telegram confirms delivery;
+    // sweeping it later is safer than losing an unrepeatable call or Class 0
+    // notification while the outbound queue is full.
+    if let Some(index) = ready.iter().rposition(
+        |item| matches!(item, DeferredNotification::Sms(prepared) if !prepared.slots.is_empty()),
+    ) {
+        ready.remove(index);
+        log.push(
+            LogEvent::network(
+                "telegram",
+                "stored SMS deferred for call or direct SMS; modem slot retained",
+                false,
+            )
+            .at(timestamp),
+        );
+    }
+    ready.len() < MAX_READY_NOTIFICATIONS
+}
+
+#[cfg(feature = "esp32")]
 fn notification_slot_in_flight(
     slot: &StorageSlot,
     ready: &VecDeque<DeferredNotification>,
@@ -1836,10 +2055,10 @@ fn notification_slot_in_flight(
 }
 
 #[cfg(feature = "esp32")]
-fn deletion_slot_pending(slot: &StorageSlot, pending: &VecDeque<StorageSlot>) -> bool {
+fn deletion_slot_pending(slot: &StorageSlot, pending: &VecDeque<PendingDeletion>) -> bool {
     pending
         .iter()
-        .any(|candidate| candidate.mem == slot.mem && candidate.index == slot.index)
+        .any(|candidate| candidate.slot.mem == slot.mem && candidate.slot.index == slot.index)
 }
 
 #[cfg(feature = "esp32")]
@@ -1861,36 +2080,24 @@ fn build_registry(help_text: &str) -> CommandRegistry {
 }
 
 #[cfg(feature = "esp32")]
-fn build_telegram_messenger(
-    use_cellular: bool,
-    modem: std::sync::Arc<std::sync::Mutex<dyn smsgate::modem::ModemPort + Send>>,
-    token: String,
-    chat_id: i64,
-) -> anyhow::Result<TelegramMessenger> {
-    if use_cellular {
-        Ok(TelegramMessenger::new_modem(modem, token, chat_id))
-    } else {
-        Ok(TelegramMessenger::new_wifi(
-            TelegramHttpClient::new(None)?,
-            token,
-            chat_id,
-        ))
-    }
+fn build_telegram_messenger(token: String, chat_id: i64) -> anyhow::Result<TelegramMessenger> {
+    Ok(TelegramMessenger::new(
+        TelegramHttpClient::new(None)?,
+        token,
+        chat_id,
+    ))
 }
 
 #[cfg(feature = "esp32")]
-fn telegram_poll_timeout_secs(use_cellular: bool, poll_interval_ms: u32) -> u32 {
-    if use_cellular {
-        5
-    } else {
-        (poll_interval_ms / 1000).clamp(1, 30)
-    }
+fn telegram_poll_timeout_secs(poll_interval_ms: u32) -> u32 {
+    (poll_interval_ms / 1000).clamp(1, 30)
 }
 
 #[cfg(feature = "esp32")]
 fn sleep_with_poll_activity(
     duration: std::time::Duration,
-    tx: &std::sync::mpsc::Sender<TgPollEvent>,
+    tx: &PollEventSender,
+    cursor: i64,
 ) -> bool {
     const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(30);
     const WATCHDOG_TICK: std::time::Duration = std::time::Duration::from_secs(5);
@@ -1899,6 +2106,7 @@ fn sleep_with_poll_activity(
     let mut last_heartbeat = started;
     loop {
         unsafe {
+            // SAFETY: This resets only the current registered poll task.
             let _ = esp_idf_sys::esp_task_wdt_reset();
         }
         let remaining = duration.saturating_sub(started.elapsed());
@@ -1908,7 +2116,16 @@ fn sleep_with_poll_activity(
         std::thread::sleep(remaining.min(WATCHDOG_TICK));
         if last_heartbeat.elapsed() >= HEARTBEAT {
             last_heartbeat = std::time::Instant::now();
-            if tx.send(TgPollEvent::Batch(Vec::new())).is_err() {
+            if tx
+                .send(TgPollEvent::Batch {
+                    batch: PollBatch {
+                        messages: Vec::new(),
+                        next_cursor: cursor,
+                    },
+                    ack: None,
+                })
+                .is_err()
+            {
                 return false;
             }
         }
@@ -2025,87 +2242,79 @@ fn at_command_failure(result: &Result<AtResponse, ModemError>) -> Option<String>
 }
 
 #[cfg(feature = "esp32")]
-fn delete_consumed_slots(
-    slots: Vec<StorageSlot>,
+fn delete_consumed_slot(
+    slot: &StorageSlot,
     modem: &std::sync::Arc<std::sync::Mutex<dyn ModemPort + Send>>,
     consumed_slots: &mut Vec<StorageSlot>,
     delete_error_logs: &mut Vec<(StorageSlot, u32)>,
     log: &mut LogRing,
     log_timestamp: &str,
-) {
+) -> bool {
     const MAX_DELETE_ERROR_LOGS: usize = 64;
     const DELETE_ERROR_LOG_INTERVAL_MS: u32 = 60 * 60 * 1000;
-    const DELETE_BATCH_SIZE: usize = 4;
-    let mut banks: Vec<(String, Vec<StorageSlot>)> = Vec::new();
-    for slot in slots {
-        if consumed_slots.contains(&slot) {
-            continue;
-        }
-        consumed_slots.push(slot.clone());
-        if let Some((_, bank_slots)) = banks.iter_mut().find(|(mem, _)| mem == &slot.mem) {
-            bank_slots.push(slot);
-        } else {
-            banks.push((slot.mem.clone(), vec![slot]));
-        }
+    let result = {
+        let mut md = lock!(modem);
+        delete_verified_sms_slot(slot, &mut *md)
+    };
+    // A slow modem read and delete can span multiple AT commands.
+    unsafe {
+        // SAFETY: This resets only the current registered main task's watchdog.
+        let _ = esp_idf_sys::esp_task_wdt_reset();
     }
-
-    for (mem, bank_slots) in banks {
-        for chunk in bank_slots.chunks(DELETE_BATCH_SIZE) {
-            let indices: Vec<u16> = chunk.iter().map(|slot| slot.index).collect();
-            let results = {
-                let mut md = lock!(modem);
-                delete_sms_slots(&mem, &indices, &mut *md)
-            };
-            let errors: Vec<Option<String>> = match results {
-                Ok(results) => results
-                    .into_iter()
-                    .map(|result| result.err().map(|error| error.to_string()))
-                    .collect(),
-                Err(error) => vec![Some(error.to_string()); chunk.len()],
-            };
-            for (slot, error) in chunk.iter().zip(errors) {
-                let Some(error) = error else {
-                    delete_error_logs.retain(|(logged_slot, _)| logged_slot != slot);
-                    continue;
-                };
-                let now = now_ms();
-                let logged = delete_error_logs
-                    .iter_mut()
-                    .find(|(logged_slot, _)| logged_slot == slot);
-                let should_log = logged.as_ref().is_none_or(|(_, previous)| {
-                    elapsed_since(*previous, now) >= DELETE_ERROR_LOG_INTERVAL_MS
-                });
-                if should_log {
-                    log::error!(
-                        "[main] SMS delete failed at {} slot {}: {}",
-                        slot.mem,
-                        slot.index,
-                        error
-                    );
-                    log.push(
-                        LogEvent::new(
-                            LogKind::Sms,
-                            &format!("{}:{}", slot.mem, slot.index),
-                            &format!("delete failed; slot retained: {}", error),
-                            false,
-                        )
-                        .at(log_timestamp),
-                    );
-                    if let Some((_, previous)) = logged {
-                        *previous = now;
-                    } else {
-                        if delete_error_logs.len() >= MAX_DELETE_ERROR_LOGS {
-                            delete_error_logs.remove(0);
-                        }
-                        delete_error_logs.push((slot.clone(), now));
+    match result {
+        Ok(VerifiedDeletion::Deleted) => {
+            consumed_slots.push(slot.clone());
+            delete_error_logs.retain(|(logged_slot, _)| logged_slot != slot);
+            true
+        }
+        Ok(VerifiedDeletion::SlotChanged) => {
+            consumed_slots.push(slot.clone());
+            delete_error_logs.retain(|(logged_slot, _)| logged_slot != slot);
+            log.push(
+                LogEvent::new(
+                    LogKind::Sms,
+                    &format!("{}:{}", slot.mem, slot.index),
+                    "delivered slot changed before deletion; new message retained",
+                    false,
+                )
+                .at(log_timestamp),
+            );
+            true
+        }
+        Err(error) => {
+            let now = now_ms();
+            let logged = delete_error_logs
+                .iter_mut()
+                .find(|(logged_slot, _)| logged_slot == slot);
+            let should_log = logged.as_ref().is_none_or(|(_, previous)| {
+                elapsed_since(*previous, now) >= DELETE_ERROR_LOG_INTERVAL_MS
+            });
+            if should_log {
+                log::error!(
+                    "[main] SMS delete failed at {} slot {}: {}",
+                    slot.mem,
+                    slot.index,
+                    error
+                );
+                log.push(
+                    LogEvent::new(
+                        LogKind::Sms,
+                        &format!("{}:{}", slot.mem, slot.index),
+                        &format!("delete failed; slot retained for retry: {}", error),
+                        false,
+                    )
+                    .at(log_timestamp),
+                );
+                if let Some((_, previous)) = logged {
+                    *previous = now;
+                } else {
+                    if delete_error_logs.len() >= MAX_DELETE_ERROR_LOGS {
+                        delete_error_logs.remove(0);
                     }
+                    delete_error_logs.push((slot.clone(), now));
                 }
             }
-            // A large multipart cleanup can span many AT commands.
-            unsafe {
-                // SAFETY: This resets only the current registered main task's watchdog.
-                esp_idf_sys::esp_task_wdt_reset();
-            }
+            false
         }
     }
 }
@@ -2186,55 +2395,16 @@ fn sync_log_clock_from_modem(
 }
 
 #[cfg(feature = "esp32")]
-fn try_enable_cellular_fallback(
-    reason: &str,
-    modem: &std::sync::Arc<std::sync::Mutex<dyn smsgate::modem::ModemPort + Send>>,
-    creds: &RuntimeConfig,
-    using_cellular: &mut bool,
-    transport_cellular: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> bool {
-    if *using_cellular {
-        return true;
-    }
-    if !creds.cellular_fallback || creds.apn.is_empty() {
-        log::warn!(
-            "[main] cellular fallback disabled or APN empty; staying on WiFi after {}",
-            reason
-        );
-        return false;
-    }
-
-    log::warn!("[main] enabling cellular fallback after {}", reason);
-    let attach = {
-        let mut md = lock!(modem);
-        qhttp::attach_pdp(&mut *md, &creds.apn, &creds.apn_user, &creds.apn_pass)
-    };
-    if let Err(e) = attach {
-        log::error!("[main] cellular fallback attach failed: {}", e);
-        return false;
-    }
-
-    *using_cellular = true;
-    transport_cellular.store(true, std::sync::atomic::Ordering::SeqCst);
-    true
-}
-
-#[cfg(feature = "esp32")]
 fn recover_wifi_after_telegram_failure(
     reason: &str,
     wifi: &mut esp_idf_svc::wifi::BlockingWifi<esp_idf_svc::wifi::EspWifi<'static>>,
-    modem: &std::sync::Arc<std::sync::Mutex<dyn smsgate::modem::ModemPort + Send>>,
-    creds: &RuntimeConfig,
-    using_cellular: &mut bool,
-    transport_cellular: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     log: &mut LogRing,
     log_clock: &LogClock,
     uptime_ms: u32,
-    wifi_info: &mut String,
+    wifi_info: &str,
     wifi_ok: bool,
-    wifi_ssid: &str,
 ) {
-    if *using_cellular || !wifi_ok {
+    if !wifi_ok || wifi.is_up().unwrap_or(false) {
         return;
     }
 
@@ -2286,34 +2456,15 @@ fn recover_wifi_after_telegram_failure(
             false,
         ),
     );
-    if try_enable_cellular_fallback(
-        "Telegram poll failure",
-        modem,
-        creds,
-        using_cellular,
-        transport_cellular,
-    ) {
-        *wifi_info = fmt_network(*using_cellular, wifi_ok, None, wifi_ssid);
-        record_event(
-            log,
-            log_clock,
-            uptime_ms,
-            LogEvent::network(
-                "cellular",
-                "fallback enabled after Telegram poll failure",
-                true,
-            ),
-        );
-    }
 }
 
 #[cfg(feature = "esp32")]
+#[allow(clippy::too_many_arguments)] // OTA uses main-owned clients and flash state synchronously.
 fn handle_ota_document(
     caption: &str,
     document: &smsgate::im::InboundDocument,
     messenger: &mut dyn smsgate::im::MessageSink,
     bot_token: &str,
-    using_cellular: bool,
     log: &mut LogRing,
     log_clock: &LogClock,
     boot_ms: u32,
@@ -2333,12 +2484,11 @@ fn handle_ota_document(
     }
 
     log::info!(
-        "[ota] document handler entered: caption_len={} file_name={} mime={} size={:?} using_cellular={}",
+        "[ota] document handler entered: caption_len={} file_name={} mime={} size={:?}",
         caption.len(),
         document.file_name.as_deref().unwrap_or("<none>"),
         document.mime_type.as_deref().unwrap_or("<none>"),
-        document.file_size,
-        using_cellular
+        document.file_size
     );
     log::debug!("[ota] document caption raw: {}", caption);
     if !smsgate::ota::is_ota_caption(caption) {
@@ -2346,23 +2496,6 @@ fn handle_ota_document(
         return;
     }
     log::info!("[ota] caption accepted");
-    if using_cellular {
-        log::warn!("[ota] rejected because Telegram transport is cellular");
-        let _ = send_ota_message(
-            messenger,
-            "wifi_required",
-            smsgate::i18n::ota_wifi_required(),
-        );
-        drain_ota_send!();
-        record_event(
-            log,
-            log_clock,
-            elapsed_since(boot_ms, now_ms()),
-            LogEvent::ota("telegram", "OTA rejected on cellular transport", false),
-        );
-        return;
-    }
-
     let name = document.file_name.as_deref().unwrap_or("firmware image");
     let progress_message_id = send_ota_message(
         messenger,
@@ -2403,7 +2536,7 @@ fn handle_ota_document(
     log::info!("[ota] starting Telegram document update");
     let result =
         smsgate::ota::perform_telegram_update(&mut http, bot_token, document, |written, total| {
-            let complete = total.map_or(false, |total| written >= total);
+            let complete = total.is_some_and(|total| written >= total);
             if complete || written.saturating_sub(last_reported) >= OTA_PROGRESS_STEP_BYTES {
                 last_reported = written;
                 log::info!(
@@ -2510,9 +2643,9 @@ fn edit_ota_message(
 }
 
 #[cfg(feature = "esp32")]
-fn fmt_network(use_cellular: bool, wifi_ok: bool, rssi: Option<i32>, ssid: &str) -> String {
-    if use_cellular || !wifi_ok {
-        return "cellular (Telegram via modem)".to_string();
+fn fmt_network(wifi_ok: bool, rssi: Option<i32>, ssid: &str) -> String {
+    if !wifi_ok {
+        return smsgate::i18n::wifi_unavailable().to_string();
     }
     match rssi {
         Some(r) => format!("{} ({} dBm)", ssid, r),
@@ -2530,6 +2663,7 @@ const LOW_HEAP_THRESHOLD: u32 = 20 * 1024;
 
 #[cfg(feature = "esp32")]
 fn check_low_heap() -> Option<String> {
+    // SAFETY: The ESP-IDF getter returns a scalar heap statistic.
     let free = unsafe { esp_idf_sys::esp_get_free_heap_size() };
     if free < LOW_HEAP_THRESHOLD {
         Some(smsgate::i18n::low_heap(free))
@@ -2544,8 +2678,32 @@ fn setup_wifi(
     ssid: &str,
     pass: &str,
 ) -> anyhow::Result<()> {
-    use esp_idf_svc::wifi::{AuthMethod, ClientConfiguration, Configuration};
     use std::time::Duration;
+
+    configure_wifi(wifi, ssid, pass)?;
+
+    const ATTEMPTS: u32 = 5;
+    for attempt in 1..=ATTEMPTS {
+        if reconnect_wifi(wifi) {
+            log::info!("[wifi] connected (attempt {}/{})", attempt, ATTEMPTS);
+            return Ok(());
+        }
+        log::warn!("[wifi] attempt {}/{} failed", attempt, ATTEMPTS);
+        let _ = wifi.disconnect();
+        if attempt < ATTEMPTS {
+            std::thread::sleep(Duration::from_secs(3));
+        }
+    }
+    anyhow::bail!("WiFi failed after {} attempts", ATTEMPTS);
+}
+
+#[cfg(feature = "esp32")]
+fn configure_wifi(
+    wifi: &mut esp_idf_svc::wifi::BlockingWifi<esp_idf_svc::wifi::EspWifi<'static>>,
+    ssid: &str,
+    pass: &str,
+) -> anyhow::Result<()> {
+    use esp_idf_svc::wifi::{AuthMethod, ClientConfiguration, Configuration};
 
     let config = Configuration::Client(ClientConfiguration {
         ssid: ssid
@@ -2559,21 +2717,22 @@ fn setup_wifi(
     });
     wifi.set_configuration(&config)?;
     wifi.start()?;
+    Ok(())
+}
 
-    const ATTEMPTS: u32 = 5;
-    for attempt in 1..=ATTEMPTS {
-        let ok = wifi.connect().is_ok() && wifi.wait_netif_up().is_ok();
-        if ok {
-            log::info!("[wifi] connected (attempt {}/{})", attempt, ATTEMPTS);
-            return Ok(());
-        }
-        log::warn!("[wifi] attempt {}/{} failed", attempt, ATTEMPTS);
-        let _ = wifi.disconnect();
-        if attempt < ATTEMPTS {
-            std::thread::sleep(Duration::from_secs(3));
+#[cfg(feature = "esp32")]
+fn start_wifi_once(
+    wifi: &mut esp_idf_svc::wifi::BlockingWifi<esp_idf_svc::wifi::EspWifi<'static>>,
+    ssid: &str,
+    pass: &str,
+) -> bool {
+    match configure_wifi(wifi, ssid, pass) {
+        Ok(()) => reconnect_wifi(wifi),
+        Err(error) => {
+            log::warn!("[wifi] start failed: {}", error);
+            false
         }
     }
-    anyhow::bail!("WiFi failed after {} attempts", ATTEMPTS);
 }
 
 /// Reconnect an already-started BlockingWifi that has lost its AP association.
@@ -2583,6 +2742,9 @@ fn setup_wifi(
 fn reconnect_wifi(
     wifi: &mut esp_idf_svc::wifi::BlockingWifi<esp_idf_svc::wifi::EspWifi<'static>>,
 ) -> bool {
+    if wifi.is_connected().unwrap_or(false) {
+        let _ = wifi.disconnect();
+    }
     if wifi.connect().is_ok() && wifi.wait_netif_up().is_ok() {
         log::info!("[wifi] reconnect OK");
         true
@@ -2631,31 +2793,6 @@ fn serial_provision(nvs_partition: &esp_idf_svc::nvs::EspDefaultNvsPartition) ->
     if !value.is_empty() {
         creds.chat_id = value.parse().unwrap_or(0);
     }
-    println!("Attach cellular data during modem init? (true/false):");
-    let value = read();
-    if let Some(v) = parse_provision_bool(&value) {
-        creds.cellular_data = v;
-    }
-    println!("Use cellular fallback when WiFi fails? (true/false):");
-    let value = read();
-    if let Some(v) = parse_provision_bool(&value) {
-        creds.cellular_fallback = v;
-    }
-    println!("APN (leave blank if not using cellular fallback):");
-    let value = read();
-    if !value.is_empty() {
-        creds.apn = value;
-    }
-    println!("APN Username (leave blank if none):");
-    let value = read();
-    if !value.is_empty() {
-        creds.apn_user = value;
-    }
-    println!("APN Password (leave blank if none):");
-    let value = read();
-    if !value.is_empty() {
-        creds.apn_pass = value;
-    }
     println!("SIM PIN (4-8 digits, leave blank if disabled):");
     let value = read();
     if !value.is_empty() {
@@ -2679,13 +2816,4 @@ fn serial_provision(nvs_partition: &esp_idf_svc::nvs::EspDefaultNvsPartition) ->
 
     std::thread::sleep(std::time::Duration::from_millis(300));
     esp_idf_hal::reset::restart();
-}
-
-#[cfg(feature = "esp32")]
-fn parse_provision_bool(value: &str) -> Option<bool> {
-    match value.trim() {
-        "1" | "true" | "TRUE" | "True" | "yes" | "YES" | "on" | "ON" => Some(true),
-        "0" | "false" | "FALSE" | "False" | "no" | "NO" | "off" | "OFF" => Some(false),
-        _ => None,
-    }
 }

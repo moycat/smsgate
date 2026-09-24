@@ -40,6 +40,8 @@ pub enum SmsReadError {
     MalformedList,
     #[error("AT+CMGL listed more SMS slots than the bounded index buffer")]
     ListTooLarge,
+    #[error("stored SMS batch interrupted for incoming call")]
+    InterruptedForCall,
     #[error("AT+CMGD failed: {0}")]
     DeleteSlot(String),
 }
@@ -98,6 +100,12 @@ impl StoredSms {
 pub enum SmsDisposition {
     Retain,
     Delete(Vec<StorageSlot>),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum VerifiedDeletion {
+    Deleted,
+    SlotChanged,
 }
 
 /// A decoded SMS whose delivery result has not yet been confirmed.
@@ -197,7 +205,11 @@ pub fn read_stored_sms_batch(
     select_storage(mem, modem)?;
     let mut entries = Vec::with_capacity(indices.len());
     for &index in indices {
-        let entry = checked_at(modem, &format!("+CMGR={}", index))
+        let response = modem.send_at(&format!("+CMGR={}", index));
+        if matches!(response, Err(ModemError::InterruptedForCall)) {
+            return Err(SmsReadError::InterruptedForCall);
+        }
+        let entry = checked_response(response)
             .map_err(SmsReadError::ReadSlot)
             .and_then(|response| {
                 parse_cmgr_response(mem, index, &response.body).ok_or(SmsReadError::MalformedSlot)
@@ -249,6 +261,20 @@ pub fn delete_sms_slot(
     select_storage(mem, modem)?;
     checked_at(modem, &format!("+CMGD={}", index)).map_err(SmsReadError::DeleteSlot)?;
     Ok(())
+}
+
+/// Delete only the exact message previously delivered to IM. A modem slot can
+/// be reused while Telegram is slow, so its index alone is not sufficient.
+pub fn delete_verified_sms_slot(
+    expected: &StorageSlot,
+    modem: &mut dyn ModemPort,
+) -> Result<VerifiedDeletion, SmsReadError> {
+    let current = read_new_sms_pdu(&expected.mem, expected.index, modem)?;
+    if current.storage_slot() != *expected {
+        return Ok(VerifiedDeletion::SlotChanged);
+    }
+    checked_at(modem, &format!("+CMGD={}", expected.index)).map_err(SmsReadError::DeleteSlot)?;
+    Ok(VerifiedDeletion::Deleted)
 }
 
 /// Read all stored SMS PDUs from one memory bank.
@@ -352,7 +378,11 @@ fn select_storage(mem: &str, modem: &mut dyn ModemPort) -> Result<(), SmsReadErr
 }
 
 fn checked_at(modem: &mut dyn ModemPort, command: &str) -> Result<AtResponse, String> {
-    match modem.send_at(command) {
+    checked_response(modem.send_at(command))
+}
+
+fn checked_response(response: Result<AtResponse, ModemError>) -> Result<AtResponse, String> {
+    match response {
         Ok(response) if response.ok => Ok(response),
         Ok(response) => Err(safe_at_error(&response.body)),
         Err(ModemError::AtError(detail)) => Err(safe_at_error(&detail)),
@@ -814,7 +844,7 @@ fn decode_ucs2_hex(text: &str) -> Option<String> {
     }
 
     let mut units = Vec::with_capacity(hex.len() / 4);
-    for chunk in hex.as_bytes().chunks_exact(4) {
+    for chunk in hex.as_bytes().as_chunks::<4>().0 {
         let raw = std::str::from_utf8(chunk).ok()?;
         units.push(u16::from_str_radix(raw, 16).ok()?);
     }

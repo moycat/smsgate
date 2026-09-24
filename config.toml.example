@@ -22,13 +22,6 @@ uart_tx   = 26
 uart_rx   = 27
 uart_baud = 115200
 pwrkey    = 4
-# Packet-switched attachment (LTE/GPRS “data”). Default off — SMS/voice use CS / NAS; WiFi carries HTTPS.
-cellular_data = false
-# If WiFi fails after retries, attach PDP and use modem HTTPS for Telegram (same UART as SMS — use short poll timeouts).
-cellular_fallback = false
-apn       = ""
-apn_user  = ""
-apn_pass  = ""
 # Runtime SIM unlock PIN. A software-only OTA preserves the NVS value; a
 # with-config build seeds this value into NVS. Leave empty for an unlocked SIM
 # or when SIM PIN is disabled. DO NOT COMMIT.

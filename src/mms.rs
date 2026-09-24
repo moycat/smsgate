@@ -51,7 +51,7 @@ fn parse_wap_push_mms_notification(payload: &[u8]) -> Option<MmsNotification> {
         return None;
     }
 
-    let header_len = read_uintvar(payload, &mut pos)? as usize;
+    let header_len = usize::try_from(read_uintvar(payload, &mut pos)?).ok()?;
     let headers = take(payload, &mut pos, header_len)?;
     if !wsp_headers_indicate_mms(headers) {
         return None;
@@ -143,7 +143,7 @@ fn read_value_length(bytes: &[u8], pos: &mut usize) -> Option<usize> {
         return Some(first as usize);
     }
     if first == 31 {
-        return read_uintvar(bytes, pos).map(|v| v as usize);
+        return usize::try_from(read_uintvar(bytes, pos)?).ok();
     }
     None
 }

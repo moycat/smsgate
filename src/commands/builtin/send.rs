@@ -22,8 +22,16 @@ impl Command for SendCommand {
         let Some((phone_raw, body)) = args.split_once(|c: char| c.is_whitespace()) else {
             return crate::i18n::send_usage().to_string();
         };
+        // Normalization removes formatting, but must never turn an invalid
+        // address such as "123abc" into a different valid destination.
+        if !phone_raw
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'(' | b')' | b'.'))
+        {
+            return crate::i18n::send_invalid_number().to_string();
+        }
         let phone = crate::sms::codec::normalize_phone(phone_raw);
-        if phone.is_empty() {
+        if !crate::sms::codec::is_valid_sms_destination(&phone) {
             return crate::i18n::send_invalid_number().to_string();
         }
         let body = body.trim();

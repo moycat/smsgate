@@ -8,11 +8,8 @@ fn main() {
     // Instruct Cargo to rerun this script if config.toml changes.
     println!("cargo:rerun-if-changed=config.toml");
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=partitions_ota.csv");
     println!("cargo:rerun-if-env-changed=SMSGATE_APPLY_COMPILED_CONFIG");
     println!("cargo::rustc-check-cfg=cfg(locale_zh)");
-
-    copy_partition_csv_for_esp_idf();
 
     let config_path = Path::new("config.toml");
     let apply_compiled_config = apply_compiled_config_setting(config_path.exists());
@@ -50,6 +47,14 @@ fn main() {
             })
             .unwrap_or_default()
     };
+    let required = |section: &str, key: &str| -> String {
+        let value = get(section, key);
+        assert!(
+            !value.is_empty(),
+            "config.toml is missing required [{section}].{key}"
+        );
+        value
+    };
 
     println!("cargo:rustc-env=CFG_WIFI_SSID={}", get("wifi", "ssid"));
     println!(
@@ -63,43 +68,19 @@ fn main() {
     println!("cargo:rustc-env=CFG_IM_CHAT_ID={}", get("im", "chat_id"));
     println!(
         "cargo:rustc-env=CFG_MODEM_UART_TX={}",
-        get("modem", "uart_tx")
+        required("modem", "uart_tx")
     );
     println!(
         "cargo:rustc-env=CFG_MODEM_UART_RX={}",
-        get("modem", "uart_rx")
+        required("modem", "uart_rx")
     );
     println!(
         "cargo:rustc-env=CFG_MODEM_UART_BAUD={}",
-        get("modem", "uart_baud")
+        required("modem", "uart_baud")
     );
     println!(
         "cargo:rustc-env=CFG_MODEM_PWRKEY={}",
-        get("modem", "pwrkey")
-    );
-    let cellular_data = config
-        .get("modem")
-        .and_then(|m| m.get("cellular_data"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    println!("cargo:rustc-env=CFG_MODEM_CELLULAR_DATA={}", cellular_data);
-    let cellular_fallback = config
-        .get("modem")
-        .and_then(|m| m.get("cellular_fallback"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    println!(
-        "cargo:rustc-env=CFG_CELLULAR_FALLBACK={}",
-        cellular_fallback
-    );
-    println!("cargo:rustc-env=CFG_MODEM_APN={}", get("modem", "apn"));
-    println!(
-        "cargo:rustc-env=CFG_MODEM_APN_USER={}",
-        get("modem", "apn_user")
-    );
-    println!(
-        "cargo:rustc-env=CFG_MODEM_APN_PASS={}",
-        get("modem", "apn_pass")
+        required("modem", "pwrkey")
     );
     println!(
         "cargo:rustc-env=CFG_MODEM_SIM_PIN={}",
@@ -107,44 +88,17 @@ fn main() {
     );
     println!(
         "cargo:rustc-env=CFG_BRIDGE_MAX_FAILURES={}",
-        get("bridge", "max_failures_before_reboot")
+        required("bridge", "max_failures_before_reboot")
     );
     println!(
         "cargo:rustc-env=CFG_BRIDGE_POLL_INTERVAL_MS={}",
-        get("bridge", "poll_interval_ms")
+        required("bridge", "poll_interval_ms")
     );
     if get("ui", "locale") == "zh" {
         println!("cargo:rustc-cfg=locale_zh");
     }
 
     emit_git_commit();
-}
-
-fn copy_partition_csv_for_esp_idf() {
-    let Ok(out_dir) = std::env::var("OUT_DIR") else {
-        return;
-    };
-    let src = Path::new("partitions_ota.csv");
-    if !src.exists() {
-        return;
-    }
-
-    // esp-idf-sys runs CMake from its own build output directory. The custom
-    // partition filename is resolved there, so keep a copy beside its sdkconfig.
-    let Some(build_dir) = Path::new(&out_dir).parent().and_then(|p| p.parent()) else {
-        return;
-    };
-    let Ok(entries) = std::fs::read_dir(build_dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        if !name.to_string_lossy().starts_with("esp-idf-sys-") || !entry.path().is_dir() {
-            continue;
-        }
-        let dst = entry.path().join("out").join("partitions_ota.csv");
-        let _ = std::fs::copy(src, dst);
-    }
 }
 
 fn emit_git_commit() {
@@ -176,11 +130,6 @@ fn emit_empty_defaults() {
     println!("cargo:rustc-env=CFG_MODEM_UART_RX=27");
     println!("cargo:rustc-env=CFG_MODEM_UART_BAUD=115200");
     println!("cargo:rustc-env=CFG_MODEM_PWRKEY=4");
-    println!("cargo:rustc-env=CFG_MODEM_CELLULAR_DATA=false");
-    println!("cargo:rustc-env=CFG_CELLULAR_FALLBACK=false");
-    println!("cargo:rustc-env=CFG_MODEM_APN=");
-    println!("cargo:rustc-env=CFG_MODEM_APN_USER=");
-    println!("cargo:rustc-env=CFG_MODEM_APN_PASS=");
     println!("cargo:rustc-env=CFG_MODEM_SIM_PIN=");
     println!("cargo:rustc-env=CFG_BRIDGE_MAX_FAILURES=8");
     println!("cargo:rustc-env=CFG_BRIDGE_POLL_INTERVAL_MS=3000");

@@ -37,6 +37,7 @@ pub fn send_pdu<P: AtTransport + ?Sized>(
         }
         // Kick the Task Watchdog Timer — SMS send can block > 30 s on congested networks.
         unsafe {
+            // SAFETY: ESP-IDF resets only the watchdog subscription of this task.
             esp_idf_sys::esp_task_wdt_reset();
         }
         // Read using a generous timeout per line

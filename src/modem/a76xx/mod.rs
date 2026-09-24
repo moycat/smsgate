@@ -3,8 +3,6 @@
 pub mod at;
 pub mod sim;
 
-#[cfg(any(feature = "esp32", feature = "testing"))]
-pub mod qhttp;
 #[cfg(feature = "esp32")]
 pub mod sms;
 
@@ -35,14 +33,9 @@ impl A76xxModem {
         A76xxModem { port }
     }
 
-    pub(crate) fn port_mut(&mut self) -> &mut AtPort {
-        &mut self.port
-    }
-
     /// Run the initialisation sequence:
     /// - Echo off, unlock SIM if needed, PDU mode, enable CMT URCs, wait for network registration.
-    /// - Optionally attach or detach packet-switched service (`AT+CGATT`).
-    pub fn init(&mut self, cellular_data: bool, sim_pin: &str) -> Result<(), ModemError> {
+    pub fn init(&mut self, sim_pin: &str) -> Result<(), ModemError> {
         // Probe until the modem responds to AT (up to 15 s).
         // A7670G typically takes 5-10 s after power-on to become responsive.
         let probe_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -135,17 +128,6 @@ impl A76xxModem {
             std::thread::sleep(std::time::Duration::from_secs(2));
         }
 
-        // Only send AT+CGATT=1 when cellular data is explicitly requested.
-        // AT+CGATT=0 (detach) is unreliable on A7670G — the modem frequently
-        // doesn't respond within CMD_TIMEOUT, causing a 5 s stall at boot.
-        // SMS delivery works without touching CGATT.
-        if cellular_data {
-            match self.send_at("+CGATT=1") {
-                Ok(r) if r.ok => log::info!("[a76xx] cellular data enabled (AT+CGATT=1 OK)"),
-                Ok(r) => log::warn!("[a76xx] AT+CGATT=1: {}", r.body.trim()),
-                Err(e) => log::warn!("[a76xx] AT+CGATT=1 failed: {}", e),
-            }
-        }
         Ok(())
     }
 }
@@ -250,10 +232,6 @@ impl ModemPort for A76xxModem {
 
     fn hang_up(&mut self) -> Result<(), ModemError> {
         hang_up_voice_call(self)
-    }
-
-    fn post_telegram_https(&mut self, path: &str, json: &str) -> Result<String, ModemError> {
-        qhttp::post_json(self, path, json)
     }
 }
 

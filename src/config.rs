@@ -14,18 +14,11 @@ impl Config {
     };
     pub const UART_TX: u8 = parse_u8_const(env!("CFG_MODEM_UART_TX"));
     pub const UART_RX: u8 = parse_u8_const(env!("CFG_MODEM_UART_RX"));
-    pub const UART_BAUD: u32 = parse_u32_const(env!("CFG_MODEM_UART_BAUD"));
+    pub const UART_BAUD: u32 = parse_nonzero_u32_const(env!("CFG_MODEM_UART_BAUD"));
     pub const PWRKEY_PIN: u8 = parse_u8_const(env!("CFG_MODEM_PWRKEY"));
-    /// Packet-switched (cellular data) attachment: `AT+CGATT=1` vs `AT+CGATT=0`.
-    pub const MODEM_CELLULAR_DATA: bool = parse_bool_env_true(env!("CFG_MODEM_CELLULAR_DATA"));
-    /// When WiFi fails, bring up PDP and send Telegram via modem `AT+QHTTP*` (requires `apn`).
-    pub const CELLULAR_FALLBACK: bool = parse_bool_env_true(env!("CFG_CELLULAR_FALLBACK"));
-    pub const MODEM_APN: &'static str = env!("CFG_MODEM_APN");
-    pub const MODEM_APN_USER: &'static str = env!("CFG_MODEM_APN_USER");
-    pub const MODEM_APN_PASS: &'static str = env!("CFG_MODEM_APN_PASS");
     pub const MODEM_SIM_PIN: &'static str = env!("CFG_MODEM_SIM_PIN");
-    pub const MAX_FAILURES: u8 = parse_u8_const(env!("CFG_BRIDGE_MAX_FAILURES"));
-    pub const POLL_INTERVAL_MS: u32 = parse_u32_const(env!("CFG_BRIDGE_POLL_INTERVAL_MS"));
+    pub const MAX_FAILURES: u8 = parse_nonzero_u8_const(env!("CFG_BRIDGE_MAX_FAILURES"));
+    pub const POLL_INTERVAL_MS: u32 = parse_nonzero_u32_const(env!("CFG_BRIDGE_POLL_INTERVAL_MS"));
     pub const GIT_COMMIT: &'static str = env!("CFG_GIT_COMMIT");
     pub const APPLY_COMPILED_CONFIG: bool = parse_bool_env_true(env!("CFG_APPLY_COMPILED_CONFIG"));
 }
@@ -36,11 +29,35 @@ const fn parse_bool_env_true(s: &str) -> bool {
 }
 
 const fn parse_u8_const(s: &str) -> u8 {
-    parse_u64_const(s) as u8
+    let value = parse_u64_const(s);
+    if value > u8::MAX as u64 {
+        panic!("numeric config exceeds u8 range");
+    }
+    value as u8
 }
 
 const fn parse_u32_const(s: &str) -> u32 {
-    parse_u64_const(s) as u32
+    let value = parse_u64_const(s);
+    if value > u32::MAX as u64 {
+        panic!("numeric config exceeds u32 range");
+    }
+    value as u32
+}
+
+const fn parse_nonzero_u8_const(s: &str) -> u8 {
+    let value = parse_u8_const(s);
+    if value == 0 {
+        panic!("numeric config must be nonzero");
+    }
+    value
+}
+
+const fn parse_nonzero_u32_const(s: &str) -> u32 {
+    let value = parse_u32_const(s);
+    if value == 0 {
+        panic!("numeric config must be nonzero");
+    }
+    value
 }
 
 const fn parse_i64_const(s: &str) -> i64 {
@@ -53,32 +70,80 @@ const fn parse_i64_const(s: &str) -> i64 {
     } else {
         (false, 0)
     };
+    if start == bytes.len() {
+        panic!("invalid signed numeric config");
+    }
     let mut i = start;
-    let mut acc: i64 = 0;
+    let mut acc: u64 = 0;
+    let limit = if neg {
+        i64::MAX as u64 + 1
+    } else {
+        i64::MAX as u64
+    };
     while i < bytes.len() {
         let d = bytes[i];
-        if d >= b'0' && d <= b'9' {
-            acc = acc * 10 + (d - b'0') as i64;
+        if !d.is_ascii_digit() {
+            panic!("invalid signed numeric config");
         }
+        let digit = (d - b'0') as u64;
+        if acc > (limit - digit) / 10 {
+            panic!("signed numeric config out of range");
+        }
+        acc = acc * 10 + digit;
         i += 1;
     }
     if neg {
-        -acc
+        if acc == i64::MAX as u64 + 1 {
+            i64::MIN
+        } else {
+            -(acc as i64)
+        }
     } else {
-        acc
+        acc as i64
     }
 }
 
 const fn parse_u64_const(s: &str) -> u64 {
     let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        panic!("missing unsigned numeric config");
+    }
     let mut i = 0;
     let mut acc: u64 = 0;
     while i < bytes.len() {
         let d = bytes[i];
-        if d >= b'0' && d <= b'9' {
-            acc = acc * 10 + (d - b'0') as u64;
+        if !d.is_ascii_digit() {
+            panic!("invalid unsigned numeric config");
         }
+        let digit = (d - b'0') as u64;
+        if acc > (u64::MAX - digit) / 10 {
+            panic!("unsigned numeric config out of range");
+        }
+        acc = acc * 10 + digit;
         i += 1;
     }
     acc
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn numeric_config_accepts_boundaries() {
+        assert_eq!(parse_u8_const("255"), 255);
+        assert_eq!(parse_u32_const("4294967295"), u32::MAX);
+        assert_eq!(parse_i64_const("-9223372036854775808"), i64::MIN);
+    }
+
+    #[test]
+    fn numeric_config_rejects_overflow_and_junk() {
+        for invalid in ["", "256", "12x", "18446744073709551616"] {
+            assert!(std::panic::catch_unwind(|| parse_u8_const(invalid)).is_err());
+        }
+        assert!(std::panic::catch_unwind(|| parse_u32_const("4294967296")).is_err());
+        assert!(std::panic::catch_unwind(|| parse_i64_const("12x")).is_err());
+        assert!(std::panic::catch_unwind(|| parse_nonzero_u8_const("0")).is_err());
+        assert!(std::panic::catch_unwind(|| parse_nonzero_u32_const("0")).is_err());
+    }
 }

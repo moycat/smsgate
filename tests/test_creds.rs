@@ -4,15 +4,10 @@ use smsgate::creds::RuntimeConfig;
 
 fn config(token: &str, chat_id: i64) -> RuntimeConfig {
     RuntimeConfig {
-        wifi_ssid: String::new(),
+        wifi_ssid: "test-wifi".to_string(),
         wifi_pass: String::new(),
         bot_token: token.to_string(),
         chat_id,
-        cellular_data: false,
-        cellular_fallback: false,
-        apn: String::new(),
-        apn_user: String::new(),
-        apn_pass: String::new(),
         sim_pin: String::new(),
         max_failures_before_reboot: 8,
         poll_interval_ms: 3000,
@@ -20,8 +15,15 @@ fn config(token: &str, chat_id: i64) -> RuntimeConfig {
 }
 
 #[test]
-fn provisioned_requires_both_token_and_chat_id() {
+fn provisioned_requires_wifi_token_and_chat_id() {
     assert!(config("123:abc", 9999).is_provisioned());
+}
+
+#[test]
+fn empty_wifi_ssid_not_provisioned() {
+    let mut runtime = config("123:abc", 9999);
+    runtime.wifi_ssid.clear();
+    assert!(!runtime.is_provisioned());
 }
 
 #[test]
@@ -52,11 +54,6 @@ fn runtime_config_keeps_loaded_values_when_compiled_config_is_not_applied() {
         wifi_pass: "nvs-pass".to_string(),
         bot_token: "nvs-token".to_string(),
         chat_id: 42,
-        cellular_data: true,
-        cellular_fallback: true,
-        apn: "nvs-apn".to_string(),
-        apn_user: "nvs-user".to_string(),
-        apn_pass: "nvs-apn-pass".to_string(),
         sim_pin: "1234".to_string(),
         max_failures_before_reboot: 3,
         poll_interval_ms: 12_000,
@@ -68,11 +65,6 @@ fn runtime_config_keeps_loaded_values_when_compiled_config_is_not_applied() {
     assert_eq!(resolved.wifi_pass, loaded.wifi_pass);
     assert_eq!(resolved.bot_token, loaded.bot_token);
     assert_eq!(resolved.chat_id, loaded.chat_id);
-    assert_eq!(resolved.cellular_data, loaded.cellular_data);
-    assert_eq!(resolved.cellular_fallback, loaded.cellular_fallback);
-    assert_eq!(resolved.apn, loaded.apn);
-    assert_eq!(resolved.apn_user, loaded.apn_user);
-    assert_eq!(resolved.apn_pass, loaded.apn_pass);
     assert_eq!(resolved.sim_pin, loaded.sim_pin);
     assert_eq!(
         resolved.max_failures_before_reboot,
@@ -88,11 +80,6 @@ fn runtime_config_uses_compiled_defaults_when_compiled_config_is_applied() {
         wifi_pass: "nvs-pass".to_string(),
         bot_token: "nvs-token".to_string(),
         chat_id: 42,
-        cellular_data: true,
-        cellular_fallback: true,
-        apn: "nvs-apn".to_string(),
-        apn_user: "nvs-user".to_string(),
-        apn_pass: "nvs-apn-pass".to_string(),
         sim_pin: "1234".to_string(),
         max_failures_before_reboot: 3,
         poll_interval_ms: 12_000,
@@ -105,11 +92,6 @@ fn runtime_config_uses_compiled_defaults_when_compiled_config_is_applied() {
     assert_eq!(resolved.wifi_pass, compiled.wifi_pass);
     assert_eq!(resolved.bot_token, compiled.bot_token);
     assert_eq!(resolved.chat_id, compiled.chat_id);
-    assert_eq!(resolved.cellular_data, compiled.cellular_data);
-    assert_eq!(resolved.cellular_fallback, compiled.cellular_fallback);
-    assert_eq!(resolved.apn, compiled.apn);
-    assert_eq!(resolved.apn_user, compiled.apn_user);
-    assert_eq!(resolved.apn_pass, compiled.apn_pass);
     assert_eq!(resolved.sim_pin, compiled.sim_pin);
     assert_eq!(
         resolved.max_failures_before_reboot,

@@ -93,6 +93,9 @@ fn send_retry_keeps_recovering_transport_errors() {
         "tls reconnect failed".to_string()
     )));
     assert!(should_retry_send_error(&MessengerError::Disconnected));
+    assert!(!should_retry_send_error(&MessengerError::OutcomeUnknown(
+        "response lost after request write".to_string()
+    )));
 }
 
 #[test]

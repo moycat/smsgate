@@ -2,7 +2,7 @@
 
 use crate::bridge::reply_router::ReplyRouter;
 use crate::im::{MessageFormat, MessageId, MessageSink, MessengerError};
-use crate::log_ring::{LogEntry, LogEvent, LogRing};
+use crate::log_ring::{LogEntry, LogEvent, LogKind, LogRing};
 use crate::persist::{keys, load_bool, Store};
 use crate::sms::{codec::human_readable_phone, SmsMessage};
 
@@ -27,7 +27,17 @@ pub fn record_forward_success(
     store: &mut dyn Store,
     log_timestamp: &str,
 ) {
-    router.put(msg_id, &sms.sender, store);
+    if !router.put(msg_id, &sms.sender, store) {
+        log.push(
+            LogEvent::new(
+                LogKind::System,
+                "reply map",
+                "failed to persist SMS reply mapping",
+                false,
+            )
+            .at(log_timestamp),
+        );
+    }
     log.push(sms_log_entry(sms, log_timestamp, true));
     log::info!(
         "[forwarder] forwarded SMS from {} → msg_id={}",
@@ -153,16 +163,19 @@ pub fn add_to_blocklist(
 }
 
 /// Remove a phone number from the block list.
-pub fn remove_from_blocklist(phone: &str, store: &mut dyn Store) -> bool {
+pub fn remove_from_blocklist(
+    phone: &str,
+    store: &mut dyn Store,
+) -> Result<bool, crate::persist::StoreError> {
     let mut list = load_blocklist(store);
     let n = crate::sms::codec::normalize_phone(phone);
     let before = list.len();
     list.retain(|b| *b != n);
     if list.len() < before {
-        let _ = save_blocklist(&list, store);
-        true
+        save_blocklist(&list, store)?;
+        Ok(true)
     } else {
-        false
+        Ok(false)
     }
 }
 
