@@ -14,6 +14,7 @@ pub fn is_urc(line: &str) -> bool {
              line.starts_with("+CMT:")  ||
              line.starts_with("+CDSI:") ||
              line.starts_with("+CDS:")  ||
+             line.starts_with("+CGEV:") ||
              line.starts_with("+CLIP:") ||
              line.starts_with("RING")   ||
              line.starts_with("NO CARRIER") ||

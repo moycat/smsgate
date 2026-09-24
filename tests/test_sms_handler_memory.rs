@@ -19,10 +19,11 @@ fn stored_pdu_sweep_allocations_are_bounded_by_record_count() {
     }
     let mut modem = ScriptedModem::new()
         .expect("+CMGF=0", "", true)
+        .expect("+CPMS=\"ME\"", "", true)
         .expect("+CMGL=4", &body, true);
 
     let (stored, allocations) =
-        alloc_counter::count_allocations(|| read_stored_sms("ME", &mut modem));
+        alloc_counter::count_allocations(|| read_stored_sms("ME", &mut modem).unwrap());
 
     modem.check_consumed();
     assert_eq!(stored.len(), 16);

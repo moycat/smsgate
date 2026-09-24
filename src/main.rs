@@ -8,10 +8,18 @@
 use smsgate::{
     boards::{ta7670x::TA7670X, Board},
     bridge::{
-        call_handler::CallHandler,
+        at_handler::{execute_at_command, parse_hidden_at_command},
+        call_handler::{CallHandler, CallNotification},
+        forwarder::{
+            forward_sms, is_blocked, record_forward_failure, record_forward_success,
+            sms_forward_text,
+        },
         poller::poll_and_dispatch,
         reply_router::ReplyRouter,
-        sms_handler::{delete_sms_slot, process_pdu_hex, read_new_sms_pdu, read_stored_sms},
+        sms_handler::{
+            delete_sms_slots, prepare_pdu_hex_with_slot, prepare_stored_sms, read_new_sms_pdu,
+            read_stored_sms_batch, scan_stored_sms_indices, PreparedSms, SmsPreparation,
+        },
     },
     commands::{builtin::*, CommandRegistry},
     config::Config,
@@ -24,20 +32,28 @@ use smsgate::{
             worker::{TelegramSendEvent, TelegramSendWorker},
             TelegramMessenger,
         },
-        MessageSink, MessageSource,
+        MessageFormat, MessageId, MessageSink, MessageSource, MessengerError,
     },
     log_clock::LogClock,
-    log_ring::LogEvent,
     log_ring::LogRing,
+    log_ring::{LogEvent, LogKind},
     modem::{
         a76xx::qhttp,
+        cnmi_store_notifications_enabled,
         urc::{parse_urc, Urc},
+        AtResponse, ModemDiagnostics, ModemError, ModemPort,
     },
-    persist::nvs::NvsStore,
-    sms::concat::ConcatReassembler,
+    persist::{keys, load_bool, nvs::NvsStore, Store},
+    sms::concat::{ConcatReassembler, StorageSlot},
     sms::sender::{DrainOutcome, SmsSender},
     timer::elapsed_since,
 };
+
+#[cfg(feature = "esp32")]
+use std::collections::VecDeque;
+
+#[cfg(feature = "esp32")]
+use std::sync::mpsc::{Receiver, TryRecvError};
 
 #[cfg(not(feature = "esp32"))]
 fn main() {
@@ -58,6 +74,28 @@ enum TgPollEvent {
     Log(LogEvent),
     RecoverTransport { reason: String },
 }
+
+#[cfg(feature = "esp32")]
+enum DeferredNotification {
+    Sms(PreparedSms),
+    Call(CallNotification),
+    Plain { text: String, context: &'static str },
+}
+
+#[cfg(feature = "esp32")]
+struct PendingNotification {
+    item: DeferredNotification,
+    receipt: Receiver<Result<MessageId, MessengerError>>,
+}
+
+#[cfg(feature = "esp32")]
+const MAX_READY_NOTIFICATIONS: usize = 8;
+
+#[cfg(feature = "esp32")]
+const MAX_PENDING_NOTIFICATIONS: usize = 4;
+
+#[cfg(feature = "esp32")]
+const MAX_PENDING_DELETIONS: usize = 32;
 
 #[cfg(feature = "esp32")]
 fn main() {
@@ -92,14 +130,50 @@ fn main() {
         serial_provision(&nvs_partition);
     }
 
+    // Mount before modem bring-up so a fatal init error survives the reboot.
+    let mut log = build_log_ring();
+    let mut log_clock = LogClock::new();
+    let mut sms_delete_error_logs: Vec<(StorageSlot, u32)> = Vec::new();
+    record_event(
+        &mut log,
+        &log_clock,
+        elapsed_since(boot_ms, now_ms()),
+        LogEvent::system("boot", &starting_message),
+    );
+
     // ---- Board init ----
     let mut peripherals = esp_idf_hal::peripherals::Peripherals::take().unwrap();
     let board = TA7670X;
-    board.init(&mut peripherals).expect("board init failed");
+    if let Err(e) = board.init(&mut peripherals) {
+        log::error!("[main] board init failed: {e}");
+        record_event(
+            &mut log,
+            &log_clock,
+            elapsed_since(boot_ms, now_ms()),
+            LogEvent::new(
+                LogKind::System,
+                "board",
+                &format!("init failed: {e}"),
+                false,
+            ),
+        );
+        esp_idf_hal::reset::restart();
+    }
     let modem = match board.build_modem_port(&mut peripherals, &creds) {
         Ok(modem) => modem,
         Err(e) => {
             log::error!("[main] modem init failed after retry: {e}; rebooting");
+            record_event(
+                &mut log,
+                &log_clock,
+                elapsed_since(boot_ms, now_ms()),
+                LogEvent::new(
+                    LogKind::System,
+                    "modem",
+                    &format!("init failed: {e}"),
+                    false,
+                ),
+            );
             std::thread::sleep(std::time::Duration::from_secs(2));
             esp_idf_hal::reset::restart();
         }
@@ -115,19 +189,30 @@ fn main() {
         Err(e) => {
             nvs_failed = true;
             log::error!("[main] NVS init failed: {} — using volatile MemStore", e);
+            record_event(
+                &mut log,
+                &log_clock,
+                elapsed_since(boot_ms, now_ms()),
+                LogEvent::new(
+                    LogKind::System,
+                    "NVS",
+                    &format!("init failed; volatile fallback: {e}"),
+                    false,
+                ),
+            );
             Box::new(smsgate::persist::mem::MemStore::default())
         }
     };
 
-    let mut log = build_log_ring();
-    let mut log_clock = LogClock::new();
-    record_event(
-        &mut log,
-        &log_clock,
-        elapsed_since(boot_ms, now_ms()),
-        LogEvent::system("boot", &starting_message),
-    );
     sync_log_clock_from_modem(&modem, &mut log_clock, &mut log, boot_ms, true);
+    for event in refresh_modem_notifications(&modem) {
+        record_event(
+            &mut log,
+            &log_clock,
+            elapsed_since(boot_ms, now_ms()),
+            event,
+        );
+    }
 
     // ---- WiFi ----
     let sysloop = esp_idf_svc::eventloop::EspSystemEventLoop::take().unwrap();
@@ -209,6 +294,7 @@ fn main() {
         transport_cellular.clone(),
         tg_send_event_tx,
     );
+    let mut ready_notifications: VecDeque<DeferredNotification> = VecDeque::new();
 
     // ---- Subsystems ----
     let mut sender = SmsSender::new();
@@ -236,30 +322,31 @@ fn main() {
     let registry = build_registry(&help_text);
 
     // Register bot commands with Telegram
-    if let Err(e) = messenger.register_commands(&registry.command_list()) {
-        log::warn!("[main] register_commands failed: {} — continuing", e);
-        record_event(
-            &mut log,
-            &log_clock,
-            elapsed_since(boot_ms, now_ms()),
-            LogEvent::network(
-                "telegram",
-                &format!("register commands failed: {}", e),
-                false,
-            ),
-        );
-    }
-    drain_tg_send!();
+    let mut command_registration = match messenger.try_register_commands(&registry.command_list()) {
+        Ok(receipt) => Some(receipt),
+        Err(error) => {
+            record_event(
+                &mut log,
+                &log_clock,
+                elapsed_since(boot_ms, now_ms()),
+                LogEvent::network(
+                    "telegram",
+                    &format!("register commands enqueue failed: {}", error),
+                    false,
+                ),
+            );
+            None
+        }
+    };
 
     // Alert if NVS init failed (now that we have a messenger to send the notification)
     if nvs_failed {
-        let _ = messenger.send_message(smsgate::i18n::nvs_fail());
-        drain_tg_send!();
-        record_event(
+        queue_plain_notification(
+            &mut ready_notifications,
+            smsgate::i18n::nvs_fail(),
+            "NVS failure",
             &mut log,
-            &log_clock,
-            elapsed_since(boot_ms, now_ms()),
-            LogEvent::system("nvs", "init failed; using volatile MemStore"),
+            &log_clock.timestamp(elapsed_since(boot_ms, now_ms())),
         );
     }
 
@@ -274,36 +361,60 @@ fn main() {
     // buffer with CMTI notifications for every stored SIM message, which
     // corrupts the subsequent AT+CMGL=4 response for both SM and ME.
     // Normal operation stores all SMS in ME anyway (+CMTI always says "ME").
+    let mut pending_sweep_indices = VecDeque::new();
     {
-        let stored = {
+        let (storage_result, stored_result) = {
             let mut md = lock!(modem);
-            let _ = md.send_at("+CPMS=\"ME\",\"ME\",\"ME\"");
+            let storage = md.send_at("+CPMS=\"ME\",\"ME\",\"ME\"");
             log::info!("[main] sweeping ME storage…");
-            read_stored_sms("ME", &mut *md)
+            (storage, scan_stored_sms_indices("ME", &mut *md))
         };
-        for sms in stored {
-            let uptime_ms = elapsed_since(boot_ms, now_ms());
-            let log_timestamp = log_clock.timestamp(uptime_ms);
-            let index = sms.index;
-            let mem = sms.mem.clone();
-            let delete = smsgate::bridge::sms_handler::process_stored_sms(
-                sms,
-                &mut router,
+        if let Some(detail) = at_command_failure(&storage_result) {
+            record_event(
                 &mut log,
-                &mut concat,
-                &mut messenger,
-                &mut *store,
-                &log_timestamp,
+                &log_clock,
+                elapsed_since(boot_ms, now_ms()),
+                LogEvent::new(
+                    LogKind::Sms,
+                    "ME",
+                    &format!("preferred storage selection failed: {detail}"),
+                    false,
+                ),
             );
-            drain_tg_send!();
-            if delete {
-                let mut md = lock!(modem);
-                delete_sms_slot(index, &mut *md);
-            } else {
-                log::warn!(
-                    "[main] sweep forward failed — SMS stays at {} slot {}",
-                    mem,
-                    index
+        }
+        match stored_result {
+            Ok(scan) => {
+                if scan.malformed_entries > 0 {
+                    record_event(
+                        &mut log,
+                        &log_clock,
+                        elapsed_since(boot_ms, now_ms()),
+                        LogEvent::new(
+                            LogKind::Sms,
+                            "ME",
+                            &format!(
+                                "boot sweep skipped {} malformed entries",
+                                scan.malformed_entries
+                            ),
+                            false,
+                        ),
+                    );
+                }
+                log::info!("[main] boot SMS sweep queued {} slots", scan.indices.len());
+                pending_sweep_indices.extend(scan.indices);
+            }
+            Err(e) => {
+                log::error!("[main] boot SMS sweep failed: {}", e);
+                record_event(
+                    &mut log,
+                    &log_clock,
+                    elapsed_since(boot_ms, now_ms()),
+                    LogEvent::new(
+                        LogKind::Sms,
+                        "ME",
+                        &format!("boot sweep failed: {}", e),
+                        false,
+                    ),
                 );
             }
         }
@@ -316,8 +427,13 @@ fn main() {
         elapsed_since(boot_ms, now_ms()),
         LogEvent::system("ready", "smsgate ready"),
     );
-    let _ = messenger.send_message(smsgate::i18n::started());
-    drain_tg_send!();
+    queue_plain_notification(
+        &mut ready_notifications,
+        smsgate::i18n::started(),
+        "startup",
+        &mut log,
+        &log_clock.timestamp(elapsed_since(boot_ms, now_ms())),
+    );
     match smsgate::ota::confirm_running() {
         Ok(()) => log::info!("[main] OTA running slot marked valid"),
         Err(e) => log::warn!("[main] OTA confirm skipped: {}", e),
@@ -526,7 +642,29 @@ fn main() {
     let mut wifi_info = fmt_network(using_cellular, wifi_ok, None, &creds.wifi_ssid);
     let mut last_tg_activity = std::time::Instant::now();
     let mut low_signal_alerted = false;
+    let mut low_heap_alerted = false;
     let mut last_operator = String::new();
+    let mut last_signal_state: Option<(bool, bool)> = None;
+    let mut last_registered: Option<bool> = None;
+    let mut registration_query_failed = false;
+    let mut last_wifi_reconnect_attempt: Option<std::time::Instant> = None;
+    const SMS_SWEEP_INTERVAL_MS: u32 = 5 * 60 * 1000;
+    const NOTIFICATION_CHECK_INTERVAL_MS: u32 = 10 * 60 * 1000;
+    const FAULT_LOG_INTERVAL_MS: u32 = 5 * 60 * 1000;
+    const PDN_EVENT_LOG_INTERVAL_MS: u32 = 60 * 60 * 1000;
+    const SWEEP_ERROR_LOG_INTERVAL_MS: u32 = 60 * 60 * 1000;
+    let mut last_sms_sweep = now_ms();
+    let mut last_notification_check = now_ms();
+    let mut last_sms_sweep_error: Option<String> = None;
+    let mut last_sms_sweep_error_log: Option<u32> = None;
+    let mut last_sms_malformed_count = 0;
+    let mut last_sms_malformed_log: Option<u32> = None;
+    let mut last_sms_batch_failure: Option<u32> = None;
+    let mut pending_notifications: Vec<PendingNotification> = Vec::new();
+    let mut pending_deletions: VecDeque<StorageSlot> = VecDeque::new();
+    let mut pending_modem_diagnostics = ModemDiagnostics::default();
+    let mut last_modem_diagnostics_log: Option<u32> = None;
+    let mut last_pdn_event_log: Option<u32> = None;
     // +CMT direct delivery is two lines: header then raw PDU hex.
     // This flag is set when the header arrives so the next poll_urc() line
     // is treated as the PDU rather than a new URC.
@@ -536,6 +674,7 @@ fn main() {
         let now = now_ms();
         let uptime_ms = elapsed_since(boot_ms, now);
         let log_timestamp = log_clock.timestamp(uptime_ms);
+        let mut consumed_slots = Vec::new();
 
         // Kick the hardware watchdog
         unsafe {
@@ -544,6 +683,97 @@ fn main() {
 
         if drain_telegram_send_events(&tg_send_event_rx, &mut log, &log_clock, uptime_ms) {
             esp_idf_hal::reset::restart();
+        }
+        if let Some(receipt) = command_registration.as_ref() {
+            match receipt.try_recv() {
+                Ok(Ok(())) => command_registration = None,
+                Ok(Err(error)) => {
+                    record_event(
+                        &mut log,
+                        &log_clock,
+                        uptime_ms,
+                        LogEvent::network(
+                            "telegram",
+                            &format!("register commands failed: {}", error),
+                            false,
+                        ),
+                    );
+                    command_registration = None;
+                }
+                Err(TryRecvError::Disconnected) => command_registration = None,
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+
+        let mut index = 0;
+        while index < pending_notifications.len() {
+            let result = match pending_notifications[index].receipt.try_recv() {
+                Ok(result) => result,
+                Err(TryRecvError::Empty) => {
+                    index += 1;
+                    continue;
+                }
+                Err(TryRecvError::Disconnected) => Err(MessengerError::Disconnected),
+            };
+            let completed = pending_notifications.swap_remove(index);
+            match (completed.item, result) {
+                (DeferredNotification::Sms(prepared), Ok(message_id)) => {
+                    record_forward_success(
+                        &prepared.sms,
+                        message_id,
+                        &mut router,
+                        &mut log,
+                        &mut *store,
+                        &log_timestamp,
+                    );
+                    pending_deletions.extend(prepared.slots);
+                }
+                (DeferredNotification::Sms(prepared), Err(error)) => {
+                    record_forward_failure(&prepared.sms, &error, &mut log, &log_timestamp);
+                }
+                (DeferredNotification::Call(notification), result) => {
+                    let mut event = notification.log_event();
+                    if let Err(error) = result {
+                        event.forwarded = false;
+                        event.body_preview = "incoming call; Telegram notification failed".into();
+                        record_event(
+                            &mut log,
+                            &log_clock,
+                            uptime_ms,
+                            LogEvent::network(
+                                "telegram",
+                                &format!("call notification send failed: {}", error),
+                                false,
+                            ),
+                        );
+                    }
+                    record_event(&mut log, &log_clock, uptime_ms, event);
+                }
+                (DeferredNotification::Plain { context, .. }, Err(error)) => {
+                    record_event(
+                        &mut log,
+                        &log_clock,
+                        uptime_ms,
+                        LogEvent::network(
+                            "telegram",
+                            &format!("{} notification failed: {}", context, error),
+                            false,
+                        ),
+                    );
+                }
+                (DeferredNotification::Plain { .. }, Ok(_)) => {}
+            }
+        }
+
+        if let Some(slot) = pending_deletions.pop_front() {
+            delete_consumed_slots(
+                vec![slot],
+                &modem,
+                &mut consumed_slots,
+                &mut sms_delete_error_logs,
+                &mut log,
+                &log_timestamp,
+            );
         }
 
         // Auto-resume after timed /pause
@@ -555,8 +785,13 @@ fn main() {
                     smsgate::persist::keys::FWD_ENABLED,
                     true,
                 );
-                let _ = messenger.send_message(smsgate::i18n::resume_ok());
-                drain_tg_send!();
+                queue_plain_notification(
+                    &mut ready_notifications,
+                    smsgate::i18n::resume_ok(),
+                    "pause resume",
+                    &mut log,
+                    &log_timestamp,
+                );
                 log::info!("[main] pause expired — forwarding re-enabled");
                 record_event(
                     &mut log,
@@ -573,6 +808,81 @@ fn main() {
         if elapsed_since(last_status_update, now) > 30_000 && !cmt_pdu_pending {
             modem_status = lock!(modem).update_status();
             last_status_update = now;
+            let signal_state = (
+                modem_status.csq == smsgate::modem::CSQ_UNKNOWN,
+                modem_status.csq_error.is_some(),
+            );
+            if last_signal_state != Some(signal_state) {
+                if signal_state.0 {
+                    let detail = modem_status
+                        .csq_error
+                        .as_deref()
+                        .map(|error| format!("CSQ unavailable: {}", error))
+                        .unwrap_or_else(|| "modem reported CSQ=99".into());
+                    record_event(
+                        &mut log,
+                        &log_clock,
+                        uptime_ms,
+                        LogEvent::network("signal", &detail, false),
+                    );
+                } else if last_signal_state.is_some() {
+                    record_event(
+                        &mut log,
+                        &log_clock,
+                        uptime_ms,
+                        LogEvent::network(
+                            "signal",
+                            &format!("CSQ available: {}", modem_status.csq),
+                            true,
+                        ),
+                    );
+                }
+                last_signal_state = Some(signal_state);
+            }
+            if let Some(error) = modem_status.registration_error.as_deref() {
+                if !registration_query_failed {
+                    record_event(
+                        &mut log,
+                        &log_clock,
+                        uptime_ms,
+                        LogEvent::network(
+                            "registration",
+                            &format!("registration query unavailable: {}", error),
+                            false,
+                        ),
+                    );
+                }
+                registration_query_failed = true;
+            } else {
+                if registration_query_failed {
+                    record_event(
+                        &mut log,
+                        &log_clock,
+                        uptime_ms,
+                        LogEvent::network("registration", "registration query recovered", true),
+                    );
+                    registration_query_failed = false;
+                }
+                if last_registered != Some(modem_status.registered) {
+                    if !modem_status.registered || last_registered.is_some() {
+                        record_event(
+                            &mut log,
+                            &log_clock,
+                            uptime_ms,
+                            LogEvent::network(
+                                "registration",
+                                if modem_status.registered {
+                                    "network registration restored"
+                                } else {
+                                    "network registration unavailable"
+                                },
+                                modem_status.registered,
+                            ),
+                        );
+                    }
+                    last_registered = Some(modem_status.registered);
+                }
+            }
             if !log_clock.is_synced() {
                 sync_log_clock_from_modem(&modem, &mut log_clock, &mut log, boot_ms, false);
             }
@@ -593,16 +903,34 @@ fn main() {
             wifi_info = fmt_network(using_cellular, wifi_ok, rssi, &creds.wifi_ssid);
 
             // Low-heap alert
-            check_low_heap(&mut messenger);
-            drain_tg_send!();
+            if let Some(alert) = check_low_heap() {
+                if !low_heap_alerted {
+                    log::warn!("[main] low heap alert");
+                    queue_plain_notification(
+                        &mut ready_notifications,
+                        alert,
+                        "low heap",
+                        &mut log,
+                        &log_timestamp,
+                    );
+                    low_heap_alerted = true;
+                }
+            } else {
+                low_heap_alerted = false;
+            }
 
             // CSQ low-signal alert (threshold: CSQ ≤ 5, roughly < −103 dBm)
             const CSQ_WEAK: u8 = 5;
             if modem_status.csq != smsgate::modem::CSQ_UNKNOWN {
                 if modem_status.csq <= CSQ_WEAK && !low_signal_alerted {
                     low_signal_alerted = true;
-                    let _ = messenger.send_message(&smsgate::i18n::low_signal(modem_status.csq));
-                    drain_tg_send!();
+                    queue_plain_notification(
+                        &mut ready_notifications,
+                        smsgate::i18n::low_signal(modem_status.csq),
+                        "low signal",
+                        &mut log,
+                        &log_timestamp,
+                    );
                     record_event(
                         &mut log,
                         &log_clock,
@@ -615,9 +943,13 @@ fn main() {
                     );
                 } else if modem_status.csq > CSQ_WEAK && low_signal_alerted {
                     low_signal_alerted = false;
-                    let _ =
-                        messenger.send_message(&smsgate::i18n::signal_restored(modem_status.csq));
-                    drain_tg_send!();
+                    queue_plain_notification(
+                        &mut ready_notifications,
+                        smsgate::i18n::signal_restored(modem_status.csq),
+                        "signal restored",
+                        &mut log,
+                        &log_timestamp,
+                    );
                     record_event(
                         &mut log,
                         &log_clock,
@@ -636,11 +968,13 @@ fn main() {
                 && !last_operator.is_empty()
                 && modem_status.operator != last_operator
             {
-                let _ = messenger.send_message(&smsgate::i18n::operator_changed(
-                    &last_operator,
-                    &modem_status.operator,
-                ));
-                drain_tg_send!();
+                queue_plain_notification(
+                    &mut ready_notifications,
+                    smsgate::i18n::operator_changed(&last_operator, &modem_status.operator),
+                    "operator changed",
+                    &mut log,
+                    &log_timestamp,
+                );
                 record_event(
                     &mut log,
                     &log_clock,
@@ -660,7 +994,13 @@ fn main() {
             // This is the primary recovery path for "device alive but Telegram dead"
             // after a router reboot or DHCP expiry.  Only attempted in WiFi mode;
             // in cellular fallback mode wifi_ok is false and wifi is not used.
-            if !using_cellular && wifi_ok && !wifi.is_connected().unwrap_or(false) {
+            if !using_cellular
+                && wifi_ok
+                && !wifi.is_connected().unwrap_or(false)
+                && last_wifi_reconnect_attempt
+                    .is_none_or(|attempt| attempt.elapsed() >= std::time::Duration::from_secs(60))
+            {
+                last_wifi_reconnect_attempt = Some(std::time::Instant::now());
                 log::warn!("[wifi] disconnected — reconnecting");
                 record_event(
                     &mut log,
@@ -670,6 +1010,7 @@ fn main() {
                 );
                 let reconnected = reconnect_wifi(&mut wifi);
                 if reconnected {
+                    last_wifi_reconnect_attempt = None;
                     log::info!("[wifi] reconnected OK");
                     record_event(
                         &mut log,
@@ -727,14 +1068,24 @@ fn main() {
         }
 
         let mut pending_sms = Vec::new();
+        let mut pending_sms_errors = Vec::new();
         let mut direct_pdus = Vec::new();
         let mut call_notifications = Vec::new();
 
         // Poll URCs (non-blocking); hold one lock only for modem operations.
-        {
+        let modem_diagnostics = {
             let mut md = lock!(modem);
-            while let Some(urc) = md.poll_urc() {
-                log::info!("[main] URC: {:?}", urc);
+            // Bound one pass so a noisy modem cannot starve SMS forwarding,
+            // Telegram event handling, or the main-task watchdog.
+            for _ in 0..64 {
+                let Some(urc) = md.poll_urc() else {
+                    break;
+                };
+                if urc.starts_with("+CGEV:") {
+                    log::debug!("[main] URC: {:?}", urc);
+                } else {
+                    log::info!("[main] URC: {:?}", urc);
+                }
 
                 // +CMT two-line protocol: header sets the flag, next line is the PDU.
                 // Direct delivery has no modem slot — nothing to delete afterwards.
@@ -745,11 +1096,10 @@ fn main() {
                 }
 
                 match parse_urc(&urc) {
-                    Urc::NewSms { mem, index } => {
-                        if let Some(stored) = read_new_sms_pdu(&mem, index, &mut *md) {
-                            pending_sms.push(stored);
-                        }
-                    }
+                    Urc::NewSms { mem, index } => match read_new_sms_pdu(&mem, index, &mut *md) {
+                        Ok(stored) => pending_sms.push(stored),
+                        Err(e) => pending_sms_errors.push((mem, index, e.to_string())),
+                    },
                     Urc::SmsDelivery => {
                         cmt_pdu_pending = true; // next poll_urc() line is the raw PDU
                     }
@@ -764,61 +1114,333 @@ fn main() {
             if let Some(notification) = call_handler.tick_deferred(&mut *md) {
                 call_notifications.push(notification);
             }
+            md.take_diagnostics()
+        };
+
+        pending_modem_diagnostics.accumulate(modem_diagnostics);
+        if !pending_modem_diagnostics.receive_faults_empty()
+            && last_modem_diagnostics_log
+                .is_none_or(|previous| elapsed_since(previous, now) >= FAULT_LOG_INTERVAL_MS)
+        {
+            let faults = pending_modem_diagnostics;
+            pending_modem_diagnostics.dropped_urcs = 0;
+            pending_modem_diagnostics.dropped_response_lines = 0;
+            pending_modem_diagnostics.overlong_lines = 0;
+            last_modem_diagnostics_log = Some(now);
+            record_event(
+                &mut log,
+                &log_clock,
+                uptime_ms,
+                LogEvent::network(
+                    "modem UART",
+                    &format!(
+                        "receive faults: URCs dropped={}, response lines dropped={}, overlong lines={}",
+                        faults.dropped_urcs,
+                        faults.dropped_response_lines,
+                        faults.overlong_lines
+                    ),
+                    false,
+                ),
+            );
+        }
+        if !pending_modem_diagnostics.pdn_events_empty()
+            && last_pdn_event_log
+                .is_none_or(|previous| elapsed_since(previous, now) >= PDN_EVENT_LOG_INTERVAL_MS)
+        {
+            let activations = pending_modem_diagnostics.pdn_activations;
+            let deactivations = pending_modem_diagnostics.pdn_deactivations;
+            pending_modem_diagnostics.pdn_activations = 0;
+            pending_modem_diagnostics.pdn_deactivations = 0;
+            last_pdn_event_log = Some(now);
+            record_event(
+                &mut log,
+                &log_clock,
+                uptime_ms,
+                LogEvent::network(
+                    "modem PDN",
+                    &format!(
+                        "context events: activated={}, deactivated={}",
+                        activations, deactivations
+                    ),
+                    deactivations == 0,
+                ),
+            );
+        }
+
+        for (mem, index, error) in pending_sms_errors {
+            log::error!(
+                "[main] SMS read failed at {} slot {}: {}",
+                mem,
+                index,
+                error
+            );
+            record_event(
+                &mut log,
+                &log_clock,
+                uptime_ms,
+                LogEvent::new(
+                    LogKind::Sms,
+                    &format!("{}:{}", mem, index),
+                    &format!("read failed; slot retained: {}", error),
+                    false,
+                ),
+            );
         }
 
         for notification in call_notifications {
-            if let Err(e) = messenger.send_message(&notification.text) {
+            if let Some(error) = notification.hang_up_error() {
                 record_event(
                     &mut log,
                     &log_clock,
                     uptime_ms,
-                    LogEvent::network(
-                        "telegram",
-                        &format!("call notification send failed: {}", e),
+                    LogEvent::new(
+                        LogKind::Call,
+                        "modem",
+                        &format!("hang-up failed: {}", error),
                         false,
                     ),
                 );
             }
-            drain_tg_send!();
-            record_event(&mut log, &log_clock, uptime_ms, notification.log_event());
+            if reserve_critical_notification_slot(&mut ready_notifications) {
+                ready_notifications.push_front(DeferredNotification::Call(notification));
+            } else {
+                record_event(
+                    &mut log,
+                    &log_clock,
+                    uptime_ms,
+                    LogEvent::network("telegram", "call notification queue full", false),
+                );
+            }
         }
 
         for pdu in direct_pdus {
-            process_pdu_hex(
-                &pdu,
-                0,
+            if !reserve_critical_notification_slot(&mut ready_notifications) {
+                record_event(
+                    &mut log,
+                    &log_clock,
+                    uptime_ms,
+                    LogEvent::new(
+                        LogKind::Sms,
+                        "direct",
+                        "notification queue full; direct SMS not retained",
+                        false,
+                    ),
+                );
+                continue;
+            }
+            let preparation =
+                prepare_pdu_hex_with_slot(&pdu, 0, None, &mut log, &mut concat, &log_timestamp);
+            queue_sms_preparation(
+                preparation,
+                &mut ready_notifications,
+                &mut pending_deletions,
                 &mut router,
                 &mut log,
-                &mut concat,
                 &mut messenger,
                 &mut *store,
                 &log_timestamp,
             );
-            drain_tg_send!();
         }
 
         for sms in pending_sms {
-            let index = sms.index;
-            let mem = sms.mem.clone();
-            let delete = smsgate::bridge::sms_handler::process_stored_sms(
-                sms,
+            if notification_slot_in_flight(
+                &sms.storage_slot(),
+                &ready_notifications,
+                &pending_notifications,
+            ) || deletion_slot_pending(&sms.storage_slot(), &pending_deletions)
+                || !reserve_critical_notification_slot(&mut ready_notifications)
+            {
+                continue;
+            }
+            let preparation = prepare_stored_sms(sms, &mut log, &mut concat, &log_timestamp);
+            queue_sms_preparation(
+                preparation,
+                &mut ready_notifications,
+                &mut pending_deletions,
                 &mut router,
                 &mut log,
-                &mut concat,
                 &mut messenger,
                 &mut *store,
                 &log_timestamp,
             );
-            drain_tg_send!();
-            if delete {
+        }
+
+        // Recover stored messages whose +CMTI was lost or whose first read
+        // failed. Never hold the modem lock while forwarding to Telegram.
+        if pending_sweep_indices.is_empty()
+            && elapsed_since(last_sms_sweep, now) >= SMS_SWEEP_INTERVAL_MS
+        {
+            last_sms_sweep = now;
+            let sweep_result = {
                 let mut md = lock!(modem);
-                delete_sms_slot(index, &mut *md);
-            } else {
-                log::warn!(
-                    "[main] forward failed — SMS stays at mem={} slot={}",
-                    mem,
-                    index
-                );
+                scan_stored_sms_indices("ME", &mut *md)
+            };
+            match sweep_result {
+                Ok(scan) => {
+                    if last_sms_sweep_error.take().is_some() {
+                        record_event(
+                            &mut log,
+                            &log_clock,
+                            uptime_ms,
+                            LogEvent::new(LogKind::Sms, "ME", "storage sweep recovered", true),
+                        );
+                    }
+                    if scan.malformed_entries > 0
+                        && (scan.malformed_entries != last_sms_malformed_count
+                            || last_sms_malformed_log.is_none_or(|previous| {
+                                elapsed_since(previous, now) >= SWEEP_ERROR_LOG_INTERVAL_MS
+                            }))
+                    {
+                        record_event(
+                            &mut log,
+                            &log_clock,
+                            uptime_ms,
+                            LogEvent::new(
+                                LogKind::Sms,
+                                "ME",
+                                &format!(
+                                    "storage sweep skipped {} malformed entries",
+                                    scan.malformed_entries
+                                ),
+                                false,
+                            ),
+                        );
+                        last_sms_malformed_log = Some(now);
+                    }
+                    if scan.malformed_entries == 0 && last_sms_malformed_count > 0 {
+                        record_event(
+                            &mut log,
+                            &log_clock,
+                            uptime_ms,
+                            LogEvent::new(LogKind::Sms, "ME", "storage list recovered", true),
+                        );
+                    }
+                    last_sms_malformed_count = scan.malformed_entries;
+                    pending_sweep_indices.extend(scan.indices);
+                }
+                Err(e) => {
+                    let detail = e.to_string();
+                    let should_log = last_sms_sweep_error.as_deref() != Some(detail.as_str())
+                        || last_sms_sweep_error_log.is_none_or(|previous| {
+                            elapsed_since(previous, now) >= SWEEP_ERROR_LOG_INTERVAL_MS
+                        });
+                    if should_log {
+                        log::error!("[main] periodic SMS sweep failed: {}", detail);
+                        record_event(
+                            &mut log,
+                            &log_clock,
+                            uptime_ms,
+                            LogEvent::new(
+                                LogKind::Sms,
+                                "ME",
+                                &format!("periodic sweep failed: {}", detail),
+                                false,
+                            ),
+                        );
+                        last_sms_sweep_error_log = Some(now);
+                    }
+                    last_sms_sweep_error = Some(detail);
+                }
+            }
+        }
+
+        // Drain at most four stored slots per pass so call URCs and Telegram
+        // commands get a turn between backlog batches. No network operation
+        // runs while the modem mutex is held.
+        const SMS_SWEEP_BATCH_SIZE: usize = 4;
+        const SMS_SWEEP_BATCH_RETRY_MS: u32 = 30_000;
+        if !pending_sweep_indices.is_empty()
+            && (ready_notifications.len() < MAX_READY_NOTIFICATIONS
+                || ready_notifications
+                    .iter()
+                    .any(|item| matches!(item, DeferredNotification::Plain { .. })))
+            && last_sms_batch_failure
+                .is_none_or(|previous| elapsed_since(previous, now) >= SMS_SWEEP_BATCH_RETRY_MS)
+        {
+            let indices: Vec<u16> = pending_sweep_indices
+                .drain(..pending_sweep_indices.len().min(SMS_SWEEP_BATCH_SIZE))
+                .collect();
+            let batch = {
+                let mut md = lock!(modem);
+                read_stored_sms_batch("ME", &indices, &mut *md)
+            };
+            match batch {
+                Ok(batch) => {
+                    last_sms_batch_failure = None;
+                    for (index, result) in batch.entries {
+                        match result {
+                            Ok(sms)
+                                if !consumed_slots.contains(&sms.storage_slot())
+                                    && !deletion_slot_pending(
+                                        &sms.storage_slot(),
+                                        &pending_deletions,
+                                    )
+                                    && !notification_slot_in_flight(
+                                        &sms.storage_slot(),
+                                        &ready_notifications,
+                                        &pending_notifications,
+                                    ) =>
+                            {
+                                if !reserve_critical_notification_slot(&mut ready_notifications) {
+                                    pending_sweep_indices.push_front(index);
+                                    continue;
+                                }
+                                let timestamp =
+                                    log_clock.timestamp(elapsed_since(boot_ms, now_ms()));
+                                let preparation =
+                                    prepare_stored_sms(sms, &mut log, &mut concat, &timestamp);
+                                queue_sms_preparation(
+                                    preparation,
+                                    &mut ready_notifications,
+                                    &mut pending_deletions,
+                                    &mut router,
+                                    &mut log,
+                                    &mut messenger,
+                                    &mut *store,
+                                    &timestamp,
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                record_event(
+                                    &mut log,
+                                    &log_clock,
+                                    elapsed_since(boot_ms, now_ms()),
+                                    LogEvent::new(
+                                        LogKind::Sms,
+                                        &format!("ME:{}", index),
+                                        &format!("sweep read failed; slot retained: {}", error),
+                                        false,
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    for index in indices.into_iter().rev() {
+                        pending_sweep_indices.push_front(index);
+                    }
+                    last_sms_batch_failure = Some(now);
+                    record_event(
+                        &mut log,
+                        &log_clock,
+                        elapsed_since(boot_ms, now_ms()),
+                        LogEvent::new(
+                            LogKind::Sms,
+                            "ME",
+                            &format!("sweep batch delayed; slots retained: {}", error),
+                            false,
+                        ),
+                    );
+                }
+            }
+        }
+
+        if elapsed_since(last_notification_check, now) >= NOTIFICATION_CHECK_INTERVAL_MS {
+            last_notification_check = now;
+            for event in refresh_modem_notifications(&modem) {
+                record_event(&mut log, &log_clock, uptime_ms, event);
             }
         }
 
@@ -941,11 +1563,48 @@ fn main() {
                     drain_tg_send!();
                 }
             }
-            if tg_messages.iter().any(|m| m.document.is_none()) {
+            let mut dispatch_messages = Vec::new();
+            for msg in tg_messages {
+                if msg.document.is_none() && msg.callback.is_none() {
+                    if let Some(request) = parse_hidden_at_command(&msg.text) {
+                        let (reply, succeeded, detail) = match request {
+                            Ok(suffix) => {
+                                let reply = {
+                                    let mut md = lock!(modem);
+                                    execute_at_command(suffix, &mut *md)
+                                };
+                                let detail = if reply.succeeded {
+                                    "manual AT command completed"
+                                } else {
+                                    "manual AT command failed"
+                                };
+                                (reply.text, reply.succeeded, detail)
+                            }
+                            Err(error) => (error.reply().to_string(), false, "AT command rejected"),
+                        };
+                        record_event(
+                            &mut log,
+                            &log_clock,
+                            elapsed_since(boot_ms, now_ms()),
+                            LogEvent::user("/at", detail, succeeded),
+                        );
+                        queue_plain_notification(
+                            &mut ready_notifications,
+                            reply,
+                            "AT reply",
+                            &mut log,
+                            &log_timestamp,
+                        );
+                        continue;
+                    }
+                }
+                dispatch_messages.push(msg);
+            }
+            if dispatch_messages.iter().any(|m| m.document.is_none()) {
                 let free_heap = unsafe { esp_idf_sys::esp_get_free_heap_size() };
                 let min_free_heap = unsafe { esp_idf_sys::esp_get_minimum_free_heap_size() };
                 match poll_and_dispatch(
-                    &tg_messages,
+                    &dispatch_messages,
                     &mut messenger,
                     &mut sender,
                     &router,
@@ -1009,8 +1668,13 @@ fn main() {
 
         match &drain {
             DrainOutcome::Sent { phone } => {
-                let _ = messenger.send_message(&smsgate::i18n::sms_sent_ok(phone));
-                drain_tg_send!();
+                queue_plain_notification(
+                    &mut ready_notifications,
+                    smsgate::i18n::sms_sent_ok(phone),
+                    "outbound SMS success",
+                    &mut log,
+                    &log_timestamp,
+                );
                 record_event(
                     &mut log,
                     &log_clock,
@@ -1019,8 +1683,13 @@ fn main() {
                 );
             }
             DrainOutcome::Dropped { phone } => {
-                let _ = messenger.send_message(&smsgate::i18n::sms_failed(phone));
-                drain_tg_send!();
+                queue_plain_notification(
+                    &mut ready_notifications,
+                    smsgate::i18n::sms_failed(phone),
+                    "outbound SMS failure",
+                    &mut log,
+                    &log_timestamp,
+                );
                 record_event(
                     &mut log,
                     &log_clock,
@@ -1031,12 +1700,146 @@ fn main() {
             _ => {}
         }
 
+        while pending_notifications.len() < MAX_PENDING_NOTIFICATIONS
+            && pending_deletions.len() < MAX_PENDING_DELETIONS
+        {
+            let Some(next) = ready_notifications.front() else {
+                break;
+            };
+            let (text, format) = match next {
+                DeferredNotification::Sms(prepared) => {
+                    (sms_forward_text(&prepared.sms), MessageFormat::Html)
+                }
+                DeferredNotification::Call(notification) => {
+                    (notification.text.clone(), MessageFormat::Plain)
+                }
+                DeferredNotification::Plain { text, .. } => (text.clone(), MessageFormat::Plain),
+            };
+            match messenger.try_send_message_with_format_owned(text, format) {
+                Ok(receipt) => {
+                    let item = ready_notifications
+                        .pop_front()
+                        .expect("checked queue front");
+                    pending_notifications.push(PendingNotification { item, receipt });
+                }
+                Err(MessengerError::Timeout(_)) => break,
+                Err(error) => {
+                    record_event(
+                        &mut log,
+                        &log_clock,
+                        uptime_ms,
+                        LogEvent::network(
+                            "telegram",
+                            &format!("outbound worker unavailable: {}", error),
+                            false,
+                        ),
+                    );
+                    esp_idf_hal::reset::restart();
+                }
+            }
+        }
+
         // Skip sleep when drain_once did real work (AT exchange already took ~200ms);
         // otherwise yield to keep URC latency under 100 ms without busy-looping.
         if !drain.attempted() {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
     }
+}
+
+#[cfg(feature = "esp32")]
+#[allow(clippy::too_many_arguments)]
+fn queue_sms_preparation(
+    preparation: SmsPreparation,
+    ready: &mut VecDeque<DeferredNotification>,
+    deletions: &mut VecDeque<StorageSlot>,
+    router: &mut ReplyRouter,
+    log: &mut LogRing,
+    messenger: &mut dyn MessageSink,
+    store: &mut dyn Store,
+    timestamp: &str,
+) {
+    match preparation {
+        SmsPreparation::Retain => {}
+        SmsPreparation::Consumed(slots) => deletions.extend(slots),
+        SmsPreparation::Ready(prepared) => {
+            if load_bool(store, keys::FWD_ENABLED) == Some(false)
+                || is_blocked(&prepared.sms.sender, store)
+            {
+                // forward_sms records the intentional drop without issuing an IM request.
+                let _ = forward_sms(&prepared.sms, messenger, router, log, store, timestamp);
+                deletions.extend(prepared.slots);
+            } else {
+                let priority_end = ready
+                    .iter()
+                    .position(|item| matches!(item, DeferredNotification::Plain { .. }))
+                    .unwrap_or(ready.len());
+                ready.insert(priority_end, DeferredNotification::Sms(prepared));
+            }
+        }
+    }
+}
+
+#[cfg(feature = "esp32")]
+fn queue_plain_notification(
+    ready: &mut VecDeque<DeferredNotification>,
+    text: impl Into<String>,
+    context: &'static str,
+    log: &mut LogRing,
+    timestamp: &str,
+) {
+    if ready.len() >= MAX_READY_NOTIFICATIONS {
+        log.push(
+            LogEvent::network(
+                "telegram",
+                &format!("{} notification queue full", context),
+                false,
+            )
+            .at(timestamp),
+        );
+    } else {
+        ready.push_back(DeferredNotification::Plain {
+            text: text.into(),
+            context,
+        });
+    }
+}
+
+#[cfg(feature = "esp32")]
+fn reserve_critical_notification_slot(ready: &mut VecDeque<DeferredNotification>) -> bool {
+    if ready.len() >= MAX_READY_NOTIFICATIONS {
+        if let Some(index) = ready
+            .iter()
+            .rposition(|item| matches!(item, DeferredNotification::Plain { .. }))
+        {
+            ready.remove(index);
+        }
+    }
+    ready.len() < MAX_READY_NOTIFICATIONS
+}
+
+#[cfg(feature = "esp32")]
+fn notification_slot_in_flight(
+    slot: &StorageSlot,
+    ready: &VecDeque<DeferredNotification>,
+    pending: &[PendingNotification],
+) -> bool {
+    let includes_slot = |item: &DeferredNotification| match item {
+        DeferredNotification::Sms(prepared) => prepared
+            .slots
+            .iter()
+            .any(|candidate| candidate.mem == slot.mem && candidate.index == slot.index),
+        DeferredNotification::Call(_) => false,
+        DeferredNotification::Plain { .. } => false,
+    };
+    ready.iter().any(&includes_slot) || pending.iter().any(|item| includes_slot(&item.item))
+}
+
+#[cfg(feature = "esp32")]
+fn deletion_slot_pending(slot: &StorageSlot, pending: &VecDeque<StorageSlot>) -> bool {
+    pending
+        .iter()
+        .any(|candidate| candidate.mem == slot.mem && candidate.index == slot.index)
 }
 
 #[cfg(feature = "esp32")]
@@ -1130,6 +1933,181 @@ fn build_log_ring() -> LogRing {
 fn record_event(log: &mut LogRing, clock: &LogClock, uptime_ms: u32, event: LogEvent) {
     let timestamp = clock.timestamp(uptime_ms);
     log.push(event.at(&timestamp));
+}
+
+#[cfg(feature = "esp32")]
+fn refresh_modem_notifications(
+    modem: &std::sync::Arc<std::sync::Mutex<dyn ModemPort + Send>>,
+) -> Vec<LogEvent> {
+    let (cnmi_query, cnmi_restore, cnmi_verify, clip_set) = {
+        let mut md = lock!(modem);
+        let query = md.send_at("+CNMI?");
+        let configured = matches!(&query, Ok(response) if response.ok && cnmi_store_notifications_enabled(&response.body));
+        let restore = (!configured).then(|| md.send_at("+CNMI=2,1,0,0,0"));
+        let verify = restore
+            .as_ref()
+            .filter(|result| at_command_failure(result).is_none())
+            .map(|_| md.send_at("+CNMI?"));
+        let clip = md.send_at("+CLIP=1");
+        (query, restore, verify, clip)
+    };
+
+    let mut events = Vec::new();
+    if let Some(result) = cnmi_restore {
+        match at_command_failure(&result) {
+            Some(detail) => {
+                log::error!("[main] CNMI reassert failed: {}", detail);
+                events.push(LogEvent::network(
+                    "modem SMS",
+                    &format!("CNMI reassert failed: {}", detail),
+                    false,
+                ));
+            }
+            None => match cnmi_verify.as_ref() {
+                Some(Ok(response))
+                    if response.ok && cnmi_store_notifications_enabled(&response.body) =>
+                {
+                    let reason = at_command_failure(&cnmi_query)
+                        .map(|detail| format!(" after query error: {}", detail))
+                        .unwrap_or_else(|| " after setting drift".into());
+                    log::warn!("[main] CNMI restored{}", reason);
+                    events.push(LogEvent::network(
+                        "modem SMS",
+                        &format!("CNMI restored{}", reason),
+                        true,
+                    ));
+                }
+                Some(result) => {
+                    let detail = at_command_failure(result)
+                        .unwrap_or_else(|| "unexpected notification configuration".into());
+                    log::error!("[main] CNMI verification failed: {}", detail);
+                    events.push(LogEvent::network(
+                        "modem SMS",
+                        &format!("CNMI verification failed: {}", detail),
+                        false,
+                    ));
+                }
+                None => {}
+            },
+        }
+    }
+    if let Some(detail) = at_command_failure(&clip_set) {
+        log::error!("[main] CLIP reassert failed: {}", detail);
+        events.push(LogEvent::network(
+            "modem call",
+            &format!("CLIP reassert failed: {}", detail),
+            false,
+        ));
+    }
+    events
+}
+
+#[cfg(feature = "esp32")]
+fn at_command_failure(result: &Result<AtResponse, ModemError>) -> Option<String> {
+    match result {
+        Ok(response) if response.ok => None,
+        Ok(response) => Some(
+            response
+                .body
+                .lines()
+                .find(|line| {
+                    *line == "ERROR"
+                        || line.starts_with("+CME ERROR:")
+                        || line.starts_with("+CMS ERROR:")
+                })
+                .unwrap_or("modem rejected command")
+                .chars()
+                .take(80)
+                .collect(),
+        ),
+        Err(error) => Some(error.to_string()),
+    }
+}
+
+#[cfg(feature = "esp32")]
+fn delete_consumed_slots(
+    slots: Vec<StorageSlot>,
+    modem: &std::sync::Arc<std::sync::Mutex<dyn ModemPort + Send>>,
+    consumed_slots: &mut Vec<StorageSlot>,
+    delete_error_logs: &mut Vec<(StorageSlot, u32)>,
+    log: &mut LogRing,
+    log_timestamp: &str,
+) {
+    const MAX_DELETE_ERROR_LOGS: usize = 64;
+    const DELETE_ERROR_LOG_INTERVAL_MS: u32 = 60 * 60 * 1000;
+    const DELETE_BATCH_SIZE: usize = 4;
+    let mut banks: Vec<(String, Vec<StorageSlot>)> = Vec::new();
+    for slot in slots {
+        if consumed_slots.contains(&slot) {
+            continue;
+        }
+        consumed_slots.push(slot.clone());
+        if let Some((_, bank_slots)) = banks.iter_mut().find(|(mem, _)| mem == &slot.mem) {
+            bank_slots.push(slot);
+        } else {
+            banks.push((slot.mem.clone(), vec![slot]));
+        }
+    }
+
+    for (mem, bank_slots) in banks {
+        for chunk in bank_slots.chunks(DELETE_BATCH_SIZE) {
+            let indices: Vec<u16> = chunk.iter().map(|slot| slot.index).collect();
+            let results = {
+                let mut md = lock!(modem);
+                delete_sms_slots(&mem, &indices, &mut *md)
+            };
+            let errors: Vec<Option<String>> = match results {
+                Ok(results) => results
+                    .into_iter()
+                    .map(|result| result.err().map(|error| error.to_string()))
+                    .collect(),
+                Err(error) => vec![Some(error.to_string()); chunk.len()],
+            };
+            for (slot, error) in chunk.iter().zip(errors) {
+                let Some(error) = error else {
+                    delete_error_logs.retain(|(logged_slot, _)| logged_slot != slot);
+                    continue;
+                };
+                let now = now_ms();
+                let logged = delete_error_logs
+                    .iter_mut()
+                    .find(|(logged_slot, _)| logged_slot == slot);
+                let should_log = logged.as_ref().is_none_or(|(_, previous)| {
+                    elapsed_since(*previous, now) >= DELETE_ERROR_LOG_INTERVAL_MS
+                });
+                if should_log {
+                    log::error!(
+                        "[main] SMS delete failed at {} slot {}: {}",
+                        slot.mem,
+                        slot.index,
+                        error
+                    );
+                    log.push(
+                        LogEvent::new(
+                            LogKind::Sms,
+                            &format!("{}:{}", slot.mem, slot.index),
+                            &format!("delete failed; slot retained: {}", error),
+                            false,
+                        )
+                        .at(log_timestamp),
+                    );
+                    if let Some((_, previous)) = logged {
+                        *previous = now;
+                    } else {
+                        if delete_error_logs.len() >= MAX_DELETE_ERROR_LOGS {
+                            delete_error_logs.remove(0);
+                        }
+                        delete_error_logs.push((slot.clone(), now));
+                    }
+                }
+            }
+            // A large multipart cleanup can span many AT commands.
+            unsafe {
+                // SAFETY: This resets only the current registered main task's watchdog.
+                esp_idf_sys::esp_task_wdt_reset();
+            }
+        }
+    }
 }
 
 #[cfg(feature = "esp32")]
@@ -1551,11 +2529,12 @@ fn now_ms() -> u32 {
 const LOW_HEAP_THRESHOLD: u32 = 20 * 1024;
 
 #[cfg(feature = "esp32")]
-fn check_low_heap(messenger: &mut dyn smsgate::im::MessageSink) {
+fn check_low_heap() -> Option<String> {
     let free = unsafe { esp_idf_sys::esp_get_free_heap_size() };
     if free < LOW_HEAP_THRESHOLD {
-        log::warn!("[main] low heap: {} bytes", free);
-        let _ = messenger.send_message(&smsgate::i18n::low_heap(free));
+        Some(smsgate::i18n::low_heap(free))
+    } else {
+        None
     }
 }
 
@@ -1604,21 +2583,13 @@ fn setup_wifi(
 fn reconnect_wifi(
     wifi: &mut esp_idf_svc::wifi::BlockingWifi<esp_idf_svc::wifi::EspWifi<'static>>,
 ) -> bool {
-    use std::time::Duration;
-    let _ = wifi.disconnect();
-    std::thread::sleep(Duration::from_secs(1));
-    for attempt in 1u32..=5 {
-        if wifi.connect().is_ok() && wifi.wait_netif_up().is_ok() {
-            log::info!("[wifi] reconnect OK (attempt {})", attempt);
-            return true;
-        }
-        log::warn!("[wifi] reconnect attempt {}/5 failed", attempt);
-        let _ = wifi.disconnect();
-        if attempt < 5 {
-            std::thread::sleep(Duration::from_secs(3));
-        }
+    if wifi.connect().is_ok() && wifi.wait_netif_up().is_ok() {
+        log::info!("[wifi] reconnect OK");
+        true
+    } else {
+        log::warn!("[wifi] reconnect attempt failed");
+        false
     }
-    false
 }
 
 /// Interactive serial setup on first boot (or after NVS erase).

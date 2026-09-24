@@ -23,7 +23,8 @@ use types::Update;
 #[cfg(feature = "esp32")]
 use types::{ApiResult, SendMessageResult};
 
-const GET_UPDATES_LIMIT: u8 = 10;
+// One update keeps the bounded HTTP response independent of burst size.
+const GET_UPDATES_LIMIT: u8 = 1;
 const MIN_POLL_TIMEOUT_SEC: u32 = 1;
 const MAX_POLL_TIMEOUT_SEC: u32 = 30;
 const POLL_ERROR_LOG_EVERY: u16 = 12;

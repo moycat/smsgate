@@ -58,6 +58,24 @@ pub fn ota_failed(error: &str) -> String {
 pub fn ota_ignored_stale(name: &str) -> String {
     format!("已忽略较旧的 OTA 文件：{name}。本批次将使用最新的 OTA 文件。")
 }
+pub fn at_usage() -> &'static str {
+    "用法：/at AT+CSQ"
+}
+pub fn at_invalid_command() -> &'static str {
+    "AT 指令无效：只能发送一条以 AT 开头的 ASCII 指令，不能包含换行或分号。"
+}
+pub fn at_command_too_long() -> &'static str {
+    "AT 指令过长（最多 128 字节）。"
+}
+pub fn at_interactive_unsupported() -> &'static str {
+    "/at 不支持需要继续输入数据的交互式 AT 指令。"
+}
+pub fn at_transport_error(error: &str) -> String {
+    format!("AT 通信错误：{error}")
+}
+pub fn at_response_truncated() -> &'static str {
+    "\n[响应已截断]"
+}
 
 fn format_bytes(bytes: u64) -> String {
     let mut out = String::with_capacity(16);
@@ -139,6 +157,9 @@ pub fn status_reg_ok() -> &'static str {
 pub fn status_reg_no() -> &'static str {
     "未注册"
 }
+pub fn status_reg_unknown() -> &'static str {
+    "无法查询"
+}
 pub fn status_fwd_on() -> &'static str {
     "已启用"
 }
@@ -156,7 +177,7 @@ pub fn format_status(
     s: u32,
     signal: &str,
     operator: &str,
-    registered: bool,
+    registered: Option<bool>,
     free_heap_kb: u32,
     min_free_heap_kb: u32,
     queue_n: usize,
@@ -166,10 +187,10 @@ pub fn format_status(
     last_sms: Option<(&str, &str)>,
     wifi_info: &str,
 ) -> String {
-    let reg = if registered {
-        status_reg_ok()
-    } else {
-        status_reg_no()
+    let reg = match registered {
+        Some(true) => status_reg_ok(),
+        Some(false) => status_reg_no(),
+        None => status_reg_unknown(),
     };
     let fwd = if fwd_on {
         status_fwd_on()

@@ -1,6 +1,17 @@
 //! Concatenated SMS reassembly tests.
 
-use smsgate::sms::{codec::SmsPdu, concat::ConcatReassembler};
+use smsgate::sms::{
+    codec::SmsPdu,
+    concat::{ConcatReassembler, FeedOutcome, StorageSlot},
+};
+
+fn slot(mem: &str, index: u16) -> StorageSlot {
+    StorageSlot {
+        mem: mem.to_string(),
+        index,
+        fingerprint: u64::from(index),
+    }
+}
 
 fn make_part(sender: &str, ref_num: u16, total: u8, part: u8, content: &str) -> SmsPdu {
     SmsPdu {
@@ -120,4 +131,89 @@ fn max_groups_evicts_oldest() {
     // Adding a 9th group should evict the oldest
     r.feed(&make_part("sender", 100, 2, 1, "new"));
     assert_eq!(r.group_count(), 8);
+}
+
+#[test]
+fn completed_message_returns_all_stored_slots_across_banks() {
+    let mut r = ConcatReassembler::new();
+    assert!(matches!(
+        r.feed_with_slot(&make_part("A", 1, 2, 1, "Hello "), Some(slot("SM", 3))),
+        FeedOutcome::Incomplete
+    ));
+    let done = r.feed_with_slot(&make_part("A", 1, 2, 2, "World"), Some(slot("ME", 4)));
+    let FeedOutcome::Complete(done) = done else {
+        panic!("second part should complete the message");
+    };
+    assert_eq!(done.content, "Hello World");
+    assert_eq!(done.slots, vec![slot("SM", 3), slot("ME", 4)]);
+}
+
+#[test]
+fn duplicate_parts_track_each_distinct_slot_once() {
+    let mut r = ConcatReassembler::new();
+    let first = make_part("A", 1, 2, 1, "first");
+    assert!(matches!(
+        r.feed_with_slot(&first, Some(slot("ME", 1))),
+        FeedOutcome::Incomplete
+    ));
+    assert!(matches!(
+        r.feed_with_slot(&first, Some(slot("ME", 1))),
+        FeedOutcome::Incomplete
+    ));
+    assert!(matches!(
+        r.feed_with_slot(&first, Some(slot("ME", 2))),
+        FeedOutcome::Incomplete
+    ));
+    let done = r.feed_with_slot(&make_part("A", 1, 2, 2, " second"), None);
+    let FeedOutcome::Complete(done) = done else {
+        panic!("second part should complete the message");
+    };
+    assert_eq!(done.content, "first second");
+    assert_eq!(done.slots, vec![slot("ME", 1), slot("ME", 2)]);
+}
+
+#[test]
+fn conflicting_duplicate_part_does_not_consume_its_slot() {
+    let mut r = ConcatReassembler::new();
+    assert!(matches!(
+        r.feed_with_slot(&make_part("A", 1, 2, 1, "first"), Some(slot("ME", 1))),
+        FeedOutcome::Incomplete
+    ));
+    assert!(matches!(
+        r.feed_with_slot(&make_part("A", 1, 2, 1, "other"), Some(slot("ME", 2))),
+        FeedOutcome::Invalid
+    ));
+    let done = r.feed_with_slot(&make_part("A", 1, 2, 2, " second"), None);
+    let FeedOutcome::Complete(done) = done else {
+        panic!("second part should complete the original message");
+    };
+    assert_eq!(done.content, "first second");
+    assert_eq!(done.slots, vec![slot("ME", 1)]);
+}
+
+#[test]
+fn invalid_headers_and_slot_overflow_do_not_complete_a_group() {
+    let mut r = ConcatReassembler::new();
+    assert!(matches!(
+        r.feed_with_slot(&make_part("A", 1, 0, 1, "bad"), Some(slot("ME", 1))),
+        FeedOutcome::Invalid
+    ));
+    assert_eq!(r.group_count(), 0);
+
+    let first = make_part("A", 1, 2, 1, "first");
+    for index in 0..64 {
+        assert!(matches!(
+            r.feed_with_slot(&first, Some(slot("ME", index))),
+            FeedOutcome::Incomplete
+        ));
+    }
+    assert!(matches!(
+        r.feed_with_slot(&first, Some(slot("ME", 64))),
+        FeedOutcome::Invalid
+    ));
+    let done = r.feed_with_slot(&make_part("A", 1, 2, 2, " second"), None);
+    let FeedOutcome::Complete(done) = done else {
+        panic!("overflow should leave existing group intact");
+    };
+    assert_eq!(done.slots.len(), 64);
 }

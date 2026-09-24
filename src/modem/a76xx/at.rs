@@ -1,6 +1,6 @@
 //! Raw AT send/receive over a UART-like byte port.
 
-use crate::modem::{AtResponse, ModemError};
+use crate::modem::{AtResponse, ModemDiagnostics, ModemError};
 use std::time::{Duration, Instant};
 
 /// FreeRTOS ticks to block waiting for a byte.
@@ -9,13 +9,36 @@ use std::time::{Duration, Instant};
 const UART_READ_TICKS: u32 = 10;
 
 const CMD_TIMEOUT: Duration = Duration::from_secs(5);
+const SMS_STORAGE_TIMEOUT: Duration = Duration::from_secs(20);
+const SMS_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 const READLINE_TIMEOUT: Duration = Duration::from_millis(500);
+const CMGS_PROMPT_TIMEOUT: Duration = Duration::from_secs(10);
+const CMGS_RESULT_TIMEOUT: Duration = Duration::from_secs(60);
+const RESYNC_TERMINAL_WAIT: Duration = Duration::from_secs(2);
+const RESYNC_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Maximum buffered URC lines. Prevents unbounded queue growth on UART noise flood.
 const MAX_URC_BUF: usize = 32;
 /// Maximum response body lines collected per AT command.
 /// A well-formed modem never sends more; caps UART garbage.
 const MAX_BODY_LINES: usize = 64;
 const INITIAL_LINE_CAPACITY: usize = 64;
+/// SMS PDUs are far smaller; 16 KiB also admits typical modem HTTP JSON replies
+/// without allowing an unterminated UART line to exhaust the ESP32 heap.
+const MAX_LINE_LEN: usize = 16 * 1024;
+const CMT_BODY_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn command_timeout(cmd: &str) -> Duration {
+    if ["+CPMS", "+CMGR=", "+CMGD="]
+        .iter()
+        .any(|prefix| cmd.starts_with(prefix))
+    {
+        SMS_STORAGE_TIMEOUT
+    } else if cmd == "+CMGF=0" || cmd.starts_with("+CNMI") {
+        SMS_SETUP_TIMEOUT
+    } else {
+        CMD_TIMEOUT
+    }
+}
 
 /// Byte-level UART abstraction — `UartDriver` on hardware, `MockUart` in tests.
 pub trait UartPort {
@@ -29,6 +52,12 @@ pub trait UartPort {
 pub struct AtPort<U: UartPort> {
     uart: U,
     urc_buf: std::collections::VecDeque<String>,
+    partial_line: String,
+    discarding_overlong_line: bool,
+    pending_cmt_header: Option<(String, Instant)>,
+    diagnostics: ModemDiagnostics,
+    response_pending: bool,
+    timed_out_cmgf_query: bool,
 }
 
 impl<U: UartPort> AtPort<U> {
@@ -36,7 +65,18 @@ impl<U: UartPort> AtPort<U> {
         AtPort {
             uart,
             urc_buf: std::collections::VecDeque::new(),
+            partial_line: String::with_capacity(INITIAL_LINE_CAPACITY),
+            discarding_overlong_line: false,
+            pending_cmt_header: None,
+            diagnostics: ModemDiagnostics::default(),
+            response_pending: false,
+            timed_out_cmgf_query: false,
         }
+    }
+
+    /// Return and clear receive-fault counts since the previous read.
+    pub fn take_diagnostics(&mut self) -> ModemDiagnostics {
+        std::mem::take(&mut self.diagnostics)
     }
 
     /// Access the underlying UART (useful in tests to inspect sent bytes).
@@ -47,7 +87,7 @@ impl<U: UartPort> AtPort<U> {
 
     /// Send "AT<cmd>\r" and collect lines until OK/ERROR/timeout.
     pub fn send_at(&mut self, cmd: &str) -> Result<AtResponse, ModemError> {
-        self.send_at_with_timeout(cmd, CMD_TIMEOUT)
+        self.send_at_with_timeout(cmd, command_timeout(cmd))
     }
 
     /// Send "AT<cmd>\r" with a caller-provided timeout.
@@ -56,15 +96,22 @@ impl<U: UartPort> AtPort<U> {
         cmd: &str,
         timeout: Duration,
     ) -> Result<AtResponse, ModemError> {
-        self.drain_urcs();
+        self.prepare_command()?;
 
         let command = format!("AT{}\r", cmd);
         self.uart.write_all(command.as_bytes())?;
 
         let deadline = Instant::now() + timeout;
         let mut body = ResponseBody::new();
-        if let Some(err) = self.collect_until_ok(deadline, &mut body)? {
+        let terminal = self.collect_until_ok(deadline, &mut body, true);
+        if matches!(terminal, Err(ModemError::Timeout)) {
+            self.mark_timed_out(cmd);
+        }
+        if let Some(err) = terminal? {
             return Ok(err);
+        }
+        if body.truncated {
+            return Err(ModemError::ResponseTooLong);
         }
         Ok(AtResponse {
             body: body.into_string(),
@@ -72,30 +119,169 @@ impl<U: UartPort> AtPort<U> {
         })
     }
 
+    /// Stream a large AT response without accumulating its body in RAM.
+    /// The idle timer resets only on command response lines, not on URC noise.
+    pub fn send_at_streaming(
+        &mut self,
+        cmd: &str,
+        idle_timeout: Duration,
+        hard_timeout: Duration,
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<(), ModemError> {
+        self.prepare_command()?;
+        self.uart.write_all(format!("AT{}\r", cmd).as_bytes())?;
+
+        let hard_deadline = Instant::now() + hard_timeout;
+        let mut idle_deadline = Instant::now() + idle_timeout;
+        loop {
+            reset_task_watchdog();
+            let now = Instant::now();
+            let Some(remaining) = hard_deadline
+                .checked_duration_since(now)
+                .zip(idle_deadline.checked_duration_since(now))
+                .map(|(hard, idle)| hard.min(idle).min(READLINE_TIMEOUT))
+            else {
+                self.mark_timed_out(cmd);
+                return Err(ModemError::Timeout);
+            };
+            let Some(line) = self.read_line(remaining).and_then(normalize_line) else {
+                continue;
+            };
+            if self.route_cmt_line(&line) {
+                continue;
+            }
+            if line == "OK" {
+                return Ok(());
+            }
+            if is_at_error(&line) {
+                return Err(ModemError::AtError(line));
+            }
+            if urc::is_urc(&line) {
+                self.queue_urc(line);
+                continue;
+            }
+            on_line(&line);
+            idle_deadline = Instant::now() + idle_timeout;
+        }
+    }
+
     /// Non-blocking: drain one URC line if available.
     pub fn poll_urc(&mut self) -> Option<String> {
+        self.expire_pending_cmt_header();
         if let Some(urc) = self.urc_buf.pop_front() {
             return Some(urc);
         }
-        let line = self.read_line(Duration::from_millis(10))?;
-        let line = line.trim().to_string();
-        if line.is_empty() {
-            return None;
+        if self.response_pending {
+            if let Some(line) = self
+                .read_line(Duration::from_millis(10))
+                .and_then(normalize_line)
+            {
+                self.discard_stale_response_line(line);
+            }
+            return self.urc_buf.pop_front();
         }
-        Some(line)
+        let deadline = Instant::now() + Duration::from_millis(10);
+        loop {
+            let remaining = deadline.checked_duration_since(Instant::now())?;
+            let line = normalize_line(self.read_line(remaining)?)?;
+            if self.route_cmt_line(&line) {
+                if let Some(urc) = self.urc_buf.pop_front() {
+                    return Some(urc);
+                }
+                continue;
+            }
+            self.note_pdn_event(&line);
+            return Some(line);
+        }
     }
 
     // ---- private ----
 
+    fn mark_timed_out(&mut self, cmd: &str) {
+        self.response_pending = true;
+        self.timed_out_cmgf_query = cmd == "+CMGF?";
+    }
+
+    fn prepare_command(&mut self) -> Result<(), ModemError> {
+        if self.response_pending {
+            self.resynchronize()?;
+        }
+        self.drain_urcs();
+        Ok(())
+    }
+
+    fn discard_stale_response_line(&mut self, line: String) {
+        if self.route_cmt_line(&line) {
+            return;
+        }
+        if line == "OK" || is_at_error(&line) {
+            self.response_pending = false;
+        } else if urc::is_urc(&line) {
+            self.queue_urc(line);
+        }
+    }
+
+    /// A timed-out command can still emit a late OK. Consume its terminal
+    /// before another command, or require a distinctive probe response so a
+    /// stale OK cannot be mistaken for the next command's completion.
+    fn resynchronize(&mut self) -> Result<(), ModemError> {
+        let terminal_deadline = Instant::now() + RESYNC_TERMINAL_WAIT;
+        while self.response_pending {
+            reset_task_watchdog();
+            let Some(remaining) = terminal_deadline.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            if let Some(line) = self
+                .read_line(remaining.min(READLINE_TIMEOUT))
+                .and_then(normalize_line)
+            {
+                self.discard_stale_response_line(line);
+            }
+        }
+        if !self.response_pending {
+            return Ok(());
+        }
+
+        let (probe, marker) = if self.timed_out_cmgf_query {
+            ("+CSQ", "+CSQ:")
+        } else {
+            ("+CMGF?", "+CMGF:")
+        };
+        self.uart.write_all(format!("AT{}\r", probe).as_bytes())?;
+        self.timed_out_cmgf_query = probe == "+CMGF?";
+        let deadline = Instant::now() + RESYNC_PROBE_TIMEOUT;
+        let mut saw_marker = false;
+        loop {
+            reset_task_watchdog();
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return Err(ModemError::NotReady);
+            };
+            let Some(line) = self
+                .read_line(remaining.min(READLINE_TIMEOUT))
+                .and_then(normalize_line)
+            else {
+                continue;
+            };
+            if self.route_cmt_line(&line) {
+                continue;
+            }
+            if line.starts_with(marker) {
+                saw_marker = true;
+            } else if line == "OK" && saw_marker {
+                self.response_pending = false;
+                return Ok(());
+            } else if urc::is_urc(&line) {
+                self.queue_urc(line);
+            }
+        }
+    }
+
     fn drain_urcs(&mut self) {
         // Short window collects bytes already waiting in the UART FIFO.
         while let Some(line) = self.read_line(Duration::from_millis(20)) {
-            let line = line.trim().to_string();
-            if !line.is_empty() {
-                if self.urc_buf.len() < MAX_URC_BUF {
-                    self.urc_buf.push_back(line);
-                } else {
-                    log::warn!("[at] urc_buf full — discarding: {}", line);
+            if let Some(line) = normalize_line(line) {
+                if !self.route_cmt_line(&line) {
+                    self.queue_urc(line);
                 }
             }
         }
@@ -107,8 +293,12 @@ impl<U: UartPort> AtPort<U> {
         &mut self,
         deadline: Instant,
         body: &mut ResponseBody,
+        kick_wdt: bool,
     ) -> Result<Option<AtResponse>, ModemError> {
         loop {
+            if kick_wdt {
+                reset_task_watchdog();
+            }
             let Some(read_timeout) = deadline
                 .checked_duration_since(Instant::now())
                 .map(|remaining| remaining.min(READLINE_TIMEOUT))
@@ -122,13 +312,13 @@ impl<U: UartPort> AtPort<U> {
                 if line.is_empty() {
                     continue;
                 }
+                if self.route_cmt_line(&line) {
+                    continue;
+                }
                 if line == "OK" {
                     return Ok(None);
                 }
-                if line.starts_with("ERROR")
-                    || line.starts_with("+CME ERROR")
-                    || line.starts_with("+CMS ERROR")
-                {
+                if is_at_error(&line) {
                     return Ok(Some(AtResponse {
                         body: line,
                         ok: false,
@@ -141,43 +331,229 @@ impl<U: UartPort> AtPort<U> {
 
     fn read_line(&mut self, timeout: Duration) -> Option<String> {
         let deadline = Instant::now() + timeout;
-        let mut line = String::with_capacity(INITIAL_LINE_CAPACITY);
         loop {
-            if Instant::now() > deadline {
-                if !line.is_empty() {
-                    return Some(line);
-                }
+            if Instant::now() >= deadline {
                 return None;
             }
             let Some(c) = self.uart.read_byte(UART_READ_TICKS) else {
                 continue;
             };
-            if c == b'\n' {
+            if let Some(line) = self.consume_line_byte(c) {
                 return Some(line);
             }
-            if c != b'\r' {
-                line.push(c as char);
-            }
         }
+    }
+
+    fn consume_line_byte(&mut self, c: u8) -> Option<String> {
+        if c == b'\n' {
+            if self.discarding_overlong_line {
+                self.discarding_overlong_line = false;
+                return None;
+            }
+            return Some(std::mem::replace(
+                &mut self.partial_line,
+                String::with_capacity(INITIAL_LINE_CAPACITY),
+            ));
+        }
+        if c == b'\r' || self.discarding_overlong_line {
+            return None;
+        }
+        if self.partial_line.len() + (c as char).len_utf8() > MAX_LINE_LEN {
+            self.partial_line = String::with_capacity(INITIAL_LINE_CAPACITY);
+            self.discarding_overlong_line = true;
+            self.diagnostics.overlong_lines = self.diagnostics.overlong_lines.saturating_add(1);
+            self.drop_pending_cmt_header();
+            log::warn!("[at] overlong UART line discarded");
+        } else {
+            self.partial_line.push(c as char);
+        }
+        None
     }
 
     /// Route a non-terminal response line into either the URC buffer or the
     /// command body accumulator, respecting both caps.
     fn buffer_line(&mut self, line: String, body: &mut ResponseBody) {
         if urc::is_urc(&line) {
-            if self.urc_buf.len() < MAX_URC_BUF {
-                self.urc_buf.push_back(line);
-            }
+            self.queue_urc(line);
         } else if body.line_count() < MAX_BODY_LINES {
             body.push(line);
         } else {
+            self.diagnostics.dropped_response_lines =
+                self.diagnostics.dropped_response_lines.saturating_add(1);
+            body.truncated = true;
             log::warn!("[at] body cap exceeded — discarding: {}", line);
         }
+    }
+
+    /// Hold a +CMT header until its PDU arrives so the pair cannot be split by
+    /// a command response or by the bounded URC queue.
+    fn route_cmt_line(&mut self, line: &str) -> bool {
+        self.expire_pending_cmt_header();
+
+        if line.starts_with("+CMT:") {
+            self.drop_pending_cmt_header();
+            self.pending_cmt_header = Some((line.to_string(), Instant::now()));
+            return true;
+        }
+
+        if self.pending_cmt_header.is_some() && is_pdu_hex_line(line) {
+            let (header, _) = self.pending_cmt_header.take().unwrap();
+            if self.reserve_urc_slots(2) {
+                self.urc_buf.push_back(header);
+                self.urc_buf.push_back(line.to_string());
+            } else {
+                self.diagnostics.dropped_urcs = self.diagnostics.dropped_urcs.saturating_add(1);
+                log::warn!("[at] URC queue full — discarding +CMT delivery");
+            }
+            return true;
+        }
+
+        false
+    }
+
+    fn expire_pending_cmt_header(&mut self) {
+        if self
+            .pending_cmt_header
+            .as_ref()
+            .is_some_and(|(_, since)| since.elapsed() > CMT_BODY_TIMEOUT)
+        {
+            self.drop_pending_cmt_header();
+        }
+    }
+
+    fn drop_pending_cmt_header(&mut self) {
+        if self.pending_cmt_header.take().is_some() {
+            self.diagnostics.dropped_urcs = self.diagnostics.dropped_urcs.saturating_add(1);
+            log::warn!("[at] incomplete +CMT delivery discarded");
+        }
+    }
+
+    fn queue_urc(&mut self, line: String) {
+        self.note_pdn_event(&line);
+        // +CGEV can flap rapidly. Keep only its newest value and reserve queue
+        // space for SMS and call notifications, which cannot be reconstructed.
+        if line.starts_with("+CGEV:") {
+            if let Some(existing) = self.urc_buf.iter_mut().find(|s| s.starts_with("+CGEV:")) {
+                *existing = line;
+            } else if self.urc_buf.len() < MAX_URC_BUF - 1 {
+                self.urc_buf.push_back(line);
+            }
+            return;
+        }
+
+        if self.reserve_urc_slots(1) {
+            self.urc_buf.push_back(line);
+        } else {
+            self.diagnostics.dropped_urcs = self.diagnostics.dropped_urcs.saturating_add(1);
+            log::warn!("[at] URC queue full — discarding: {}", line);
+        }
+    }
+
+    fn note_pdn_event(&mut self, line: &str) {
+        if line.starts_with("+CGEV:") && line.contains("PDN DEACT") {
+            self.diagnostics.pdn_deactivations =
+                self.diagnostics.pdn_deactivations.saturating_add(1);
+        } else if line.starts_with("+CGEV:") && line.contains("PDN ACT") {
+            self.diagnostics.pdn_activations = self.diagnostics.pdn_activations.saturating_add(1);
+        }
+    }
+
+    fn reserve_urc_slots(&mut self, slots: usize) -> bool {
+        while self.urc_buf.len() + slots > MAX_URC_BUF {
+            if let Some(index) = self.urc_buf.iter().position(|s| s.starts_with("+CGEV:")) {
+                self.urc_buf.remove(index);
+                continue;
+            }
+            // Stored SMS can be recovered by the periodic storage sweep;
+            // ringing calls and direct deliveries cannot. Prefer the latter.
+            if let Some(index) = self.urc_buf.iter().position(|s| s.starts_with("+CMTI:")) {
+                self.urc_buf.remove(index);
+                self.diagnostics.dropped_urcs = self.diagnostics.dropped_urcs.saturating_add(1);
+                log::warn!("[at] URC queue full — evicting recoverable +CMTI");
+                continue;
+            }
+            return false;
+        }
+        true
     }
 
     /// Write raw bytes to UART (used for AT+CMGS PDU send).
     pub fn write_raw(&mut self, data: &[u8]) -> Result<(), ModemError> {
         self.uart.write_all(data)
+    }
+
+    /// Send an SMS PDU without consuming concurrent SMS/call URCs as CMGS output.
+    pub fn send_cmgs_pdu(&mut self, hex: &str, tpdu_len: u8) -> Result<u8, ModemError> {
+        self.prepare_command()?;
+        self.uart
+            .write_all(format!("AT+CMGS={}\r", tpdu_len).as_bytes())?;
+
+        let prompt_deadline = Instant::now() + CMGS_PROMPT_TIMEOUT;
+        loop {
+            reset_task_watchdog();
+            if Instant::now() >= prompt_deadline {
+                self.abort_cmgs_input();
+                self.mark_timed_out("+CMGS");
+                return Err(ModemError::Timeout);
+            }
+            let Some(c) = self.uart.read_byte(UART_READ_TICKS) else {
+                continue;
+            };
+            if c == b'>' {
+                break;
+            }
+            if let Some(line) = self.consume_line_byte(c).and_then(normalize_line) {
+                if is_at_error(&line) {
+                    self.abort_cmgs_input();
+                    return Err(ModemError::AtError(line));
+                }
+                if line == "OK" {
+                    self.abort_cmgs_input();
+                    return Err(ModemError::AtError("CMGS prompt not received".into()));
+                }
+                if !self.route_cmt_line(&line) {
+                    self.queue_urc(line);
+                }
+            }
+        }
+
+        let mut payload = Vec::with_capacity(hex.len() + 1);
+        payload.extend_from_slice(hex.as_bytes());
+        payload.push(0x1A);
+        if let Err(e) = self.uart.write_all(&payload) {
+            self.abort_cmgs_input();
+            return Err(e);
+        }
+
+        let mut body = ResponseBody::new();
+        let result_deadline = Instant::now() + CMGS_RESULT_TIMEOUT;
+        let terminal = match self.collect_until_ok(result_deadline, &mut body, true) {
+            Err(ModemError::Timeout) => {
+                log::warn!("[at] CMGS final result timed out");
+                self.mark_timed_out("+CMGS");
+                return Err(ModemError::Timeout);
+            }
+            other => other?,
+        };
+        if let Some(error) = terminal {
+            return Err(ModemError::AtError(error.body));
+        }
+        if body.truncated {
+            return Err(ModemError::ResponseTooLong);
+        }
+        let mr = body
+            .into_string()
+            .lines()
+            .find_map(|line| line.strip_prefix("+CMGS:"))
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(0);
+        Ok(mr)
+    }
+
+    fn abort_cmgs_input(&mut self) {
+        if let Err(e) = self.uart.write_all(&[0x1B]) {
+            log::warn!("[at] failed to abort CMGS input: {}", e);
+        }
     }
 
     /// Send a CONNECT-style command with a caller-provided timeout.
@@ -187,7 +563,7 @@ impl<U: UartPort> AtPort<U> {
         payload: &str,
         timeout: Duration,
     ) -> Result<AtResponse, ModemError> {
-        self.drain_urcs();
+        self.prepare_command()?;
         let command = format!("AT{}\r", cmd);
         self.uart.write_all(command.as_bytes())?;
 
@@ -199,6 +575,7 @@ impl<U: UartPort> AtPort<U> {
                 .checked_duration_since(Instant::now())
                 .map(|remaining| remaining.min(READLINE_TIMEOUT))
             else {
+                self.mark_timed_out(cmd);
                 return Err(ModemError::Timeout);
             };
             if let Some(line) = self.read_line(read_timeout) {
@@ -206,6 +583,9 @@ impl<U: UartPort> AtPort<U> {
                     continue;
                 };
                 if line.is_empty() {
+                    continue;
+                }
+                if self.route_cmt_line(&line) {
                     continue;
                 }
                 if line.contains("CONNECT") {
@@ -228,8 +608,15 @@ impl<U: UartPort> AtPort<U> {
         self.uart.write_all(pl.as_bytes())?;
 
         body.clear();
-        if let Some(err) = self.collect_until_ok(deadline, &mut body)? {
+        let terminal = self.collect_until_ok(deadline, &mut body, false);
+        if matches!(terminal, Err(ModemError::Timeout)) {
+            self.mark_timed_out(cmd);
+        }
+        if let Some(err) = terminal? {
             return Ok(err);
+        }
+        if body.truncated {
+            return Err(ModemError::ResponseTooLong);
         }
         Ok(AtResponse {
             body: body.into_string(),
@@ -256,6 +643,7 @@ impl<U: UartPort> AtPort<U> {
 struct ResponseBody {
     text: String,
     lines: usize,
+    truncated: bool,
 }
 
 impl ResponseBody {
@@ -263,6 +651,7 @@ impl ResponseBody {
         Self {
             text: String::new(),
             lines: 0,
+            truncated: false,
         }
     }
 
@@ -277,6 +666,7 @@ impl ResponseBody {
     fn clear(&mut self) {
         self.text.clear();
         self.lines = 0;
+        self.truncated = false;
     }
 
     fn line_count(&self) -> usize {
@@ -291,6 +681,23 @@ impl ResponseBody {
 fn normalize_line(mut line: String) -> Option<String> {
     trim_ascii_in_place(&mut line);
     (!line.is_empty()).then_some(line)
+}
+
+fn is_at_error(line: &str) -> bool {
+    line.starts_with("ERROR") || line.starts_with("+CME ERROR") || line.starts_with("+CMS ERROR")
+}
+
+fn reset_task_watchdog() {
+    #[cfg(feature = "esp32")]
+    unsafe {
+        // SAFETY: This only resets the watchdog timer for the current task.
+        // An unregistered task receives an ESP-IDF error without changing state.
+        esp_idf_sys::esp_task_wdt_reset();
+    }
+}
+
+fn is_pdu_hex_line(line: &str) -> bool {
+    !line.is_empty() && line.len().is_multiple_of(2) && line.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 fn trim_ascii_in_place(value: &mut String) {
@@ -335,3 +742,19 @@ impl UartPort for esp_idf_hal::uart::UartDriver<'static> {
 pub type HardwareAtPort = AtPort<esp_idf_hal::uart::UartDriver<'static>>;
 
 use crate::modem::urc;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slow_sms_storage_commands_have_separate_timeouts() {
+        for command in ["+CPMS=\"ME\"", "+CPMS?", "+CMGR=1", "+CMGD=1"] {
+            assert_eq!(command_timeout(command), SMS_STORAGE_TIMEOUT);
+        }
+        assert_eq!(command_timeout("+CNMI?"), SMS_SETUP_TIMEOUT);
+        assert_eq!(command_timeout("+CMGF=0"), SMS_SETUP_TIMEOUT);
+        assert_eq!(command_timeout("+CSQ"), CMD_TIMEOUT);
+        assert_eq!(command_timeout("+CREG?"), CMD_TIMEOUT);
+    }
+}

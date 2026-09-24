@@ -49,7 +49,10 @@ impl Command for StatusCommand {
             s,
             &signal,
             &operator,
-            ctx.modem_status.registered,
+            ctx.modem_status
+                .registration_error
+                .is_none()
+                .then_some(ctx.modem_status.registered),
             free_heap_kb,
             min_free_heap_kb,
             queue_n,

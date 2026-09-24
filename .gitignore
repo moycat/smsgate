@@ -1,6 +1,7 @@
 # Rust build artifacts
 /target/
 fuzz/target/
+/fuzz/corpus/
 /.embuild/
 
 # User configuration — contains secrets, never commit
@@ -9,9 +10,7 @@ fuzz/target/
 !/config.toml.example
 
 # Generated OTA firmware image — regenerate from the release build, do not commit
-/smsgate-ota.bin
-/smsgate-ota-software-only.bin
-/smsgate-ota-with-config.bin
+/smsgate-ota*.bin
 
 # PlatformIO artifacts (C++ sibling branches leak into working tree)
 .pio/

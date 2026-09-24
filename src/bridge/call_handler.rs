@@ -30,16 +30,17 @@ pub struct CallHandler {
 pub struct CallNotification {
     pub text: String,
     caller_display: String,
+    detail: &'static str,
+    hang_up_error: Option<String>,
 }
 
 impl CallNotification {
     pub fn log_event(&self) -> LogEvent {
-        LogEvent::new(
-            LogKind::Call,
-            &self.caller_display,
-            "incoming call; hung up",
-            true,
-        )
+        LogEvent::new(LogKind::Call, &self.caller_display, self.detail, true)
+    }
+
+    pub fn hang_up_error(&self) -> Option<&str> {
+        self.hang_up_error.as_deref()
     }
 }
 
@@ -65,7 +66,11 @@ impl CallHandler {
             return None;
         }
         if line == "NO CARRIER" && matches!(self.state, State::Ringing { .. }) {
+            // A short call can end before +CLIP or the 1.5 s deadline. It still
+            // reached the modem and must produce a missed-call notification.
+            let notification = self.commit_call(None, modem, false);
             self.state = State::Idle;
+            return Some(notification);
         }
         None
     }
@@ -81,7 +86,7 @@ impl CallHandler {
                 let num = number.clone();
                 if Instant::now() >= deadline {
                     // CLIP not received in time — commit with unknown number
-                    return Some(self.commit_call(num, modem));
+                    return Some(self.commit_call(num, modem, true));
                 }
             }
             State::Cooldown { until } => {
@@ -113,7 +118,7 @@ impl CallHandler {
             } else {
                 Some(number)
             };
-            return Some(self.commit_call(n, modem));
+            return Some(self.commit_call(n, modem, true));
         }
         None
     }
@@ -122,11 +127,16 @@ impl CallHandler {
         &mut self,
         number: Option<String>,
         modem: &mut dyn ModemPort,
+        hang_up: bool,
     ) -> CallNotification {
-        // Auto-hang-up
-        if let Err(e) = modem.hang_up() {
-            log::warn!("[call] hang_up failed: {}", e);
-        }
+        let hang_up_error = if hang_up {
+            modem.hang_up().err().map(|e| {
+                log::warn!("[call] hang_up failed: {}", e);
+                e.to_string()
+            })
+        } else {
+            None
+        };
 
         // Notify via IM
         let display = match &number {
@@ -135,13 +145,21 @@ impl CallHandler {
         };
         let text = crate::i18n::incoming_call(&display);
 
-        log::info!("[call] call from {} — hung up and notified", display);
+        log::info!("[call] call detected from {}", display);
         self.state = State::Cooldown {
             until: Instant::now() + COOLDOWN,
         };
         CallNotification {
             text,
             caller_display: display,
+            detail: if !hang_up {
+                "incoming call; ended before caller ID"
+            } else if hang_up_error.is_some() {
+                "incoming call; hang-up failed"
+            } else {
+                "incoming call; hung up"
+            },
+            hang_up_error,
         }
     }
 }

@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 
 /// Maximum in-flight concatenation groups at once.
 const MAX_GROUPS: usize = 8;
+/// Maximum distinct stored slots tracked for one concatenated message.
+const MAX_SLOTS_PER_GROUP: usize = 64;
 /// How long to keep an incomplete group before discarding it.
 const GROUP_TTL: Duration = Duration::from_secs(24 * 3600);
 
@@ -21,6 +23,7 @@ struct Group {
     received: usize,
     first_seen: Instant,
     timestamp: String, // from first part
+    slots: Vec<StorageSlot>,
 }
 
 impl Group {
@@ -33,7 +36,23 @@ impl Group {
             received: 0,
             first_seen: Instant::now(),
             timestamp: timestamp.to_string(),
+            slots: Vec::new(),
         }
+    }
+
+    fn track_slot(&mut self, slot: StorageSlot) -> bool {
+        if let Some(existing) = self
+            .slots
+            .iter()
+            .find(|existing| existing.mem == slot.mem && existing.index == slot.index)
+        {
+            return existing.fingerprint == slot.fingerprint;
+        }
+        if self.slots.len() >= MAX_SLOTS_PER_GROUP {
+            return false;
+        }
+        self.slots.push(slot);
+        true
     }
 
     fn insert(&mut self, part_num: u8, content: String) -> bool {
@@ -73,6 +92,24 @@ pub struct CompletedSms {
     pub sender: String,
     pub content: String,
     pub timestamp: String,
+    /// Modem storage slots containing this message's parts.
+    pub slots: Vec<StorageSlot>,
+}
+
+/// Modem storage location and in-memory content identity of an SMS part.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageSlot {
+    pub mem: String,
+    pub index: u16,
+    pub fingerprint: u64,
+}
+
+/// Result of feeding a concatenated SMS part to the reassembler.
+#[derive(Debug)]
+pub enum FeedOutcome {
+    Incomplete,
+    Complete(CompletedSms),
+    Invalid,
 }
 
 /// Manages in-flight concatenated SMS groups.
@@ -89,9 +126,17 @@ impl ConcatReassembler {
 
     /// Feed a parsed PDU. Returns `Some(CompletedSms)` when all parts have arrived.
     pub fn feed(&mut self, pdu: &SmsPdu) -> Option<CompletedSms> {
+        match self.feed_with_slot(pdu, None) {
+            FeedOutcome::Complete(completed) => Some(completed),
+            FeedOutcome::Incomplete | FeedOutcome::Invalid => None,
+        }
+    }
+
+    /// Feed a parsed PDU and optionally retain its modem storage location.
+    pub fn feed_with_slot(&mut self, pdu: &SmsPdu, slot: Option<StorageSlot>) -> FeedOutcome {
         if !pdu.is_concatenated {
-            // Single-part — return immediately as-is (caller handles it).
-            return None;
+            // Single-part messages are handled by the caller.
+            return FeedOutcome::Invalid;
         }
 
         // Reject before touching the group table: a never-completing group
@@ -103,7 +148,7 @@ impl ConcatReassembler {
                 pdu.concat_part,
                 pdu.concat_total
             );
-            return None;
+            return FeedOutcome::Invalid;
         }
 
         // Evict expired groups first
@@ -141,17 +186,34 @@ impl ConcatReassembler {
             }
         };
 
+        let part_index = usize::from(pdu.concat_part - 1);
+        if self.groups[idx].parts[part_index]
+            .as_ref()
+            .is_some_and(|existing| existing != &pdu.content)
+        {
+            log::warn!("[concat] conflicting content for the same part number");
+            return FeedOutcome::Invalid;
+        }
+
+        if let Some(slot) = slot {
+            if !self.groups[idx].track_slot(slot) {
+                log::warn!("[concat] too many stored slots in one group");
+                return FeedOutcome::Invalid;
+            }
+        }
+
         let complete = self.groups[idx].insert(pdu.concat_part, pdu.content.clone());
         if complete {
             let g = self.groups.remove(idx);
             let content = g.assemble();
-            Some(CompletedSms {
+            FeedOutcome::Complete(CompletedSms {
                 sender: g.sender,
                 content,
                 timestamp: g.timestamp,
+                slots: g.slots,
             })
         } else {
-            None
+            FeedOutcome::Incomplete
         }
     }
 

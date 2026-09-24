@@ -2,7 +2,7 @@
 
 use smsgate::bridge::forwarder::*;
 use smsgate::bridge::reply_router::ReplyRouter;
-use smsgate::im::MessageFormat;
+use smsgate::im::{MessageFormat, MessengerError};
 use smsgate::log_ring::{LogKind, LogRing};
 use smsgate::persist::{keys, mem::MemStore, save_bool};
 use smsgate::sms::SmsMessage;
@@ -17,6 +17,38 @@ fn make_sms(sender: &str, body: &str) -> SmsMessage {
         timestamp: "26/04/10,12:00:00+00".to_string(),
         slot: 0,
     }
+}
+
+#[test]
+fn deferred_forward_success_records_delivery_after_ack() {
+    let sms = make_sms("+8613800138000", "Hello test");
+    let text = sms_forward_text(&sms);
+    assert!(text.contains("Hello test"));
+
+    let mut store = MemStore::new();
+    let mut router = ReplyRouter::new();
+    let mut log = LogRing::new();
+    assert_eq!(log.len(), 0);
+    assert_eq!(router.lookup(1234), None);
+
+    record_forward_success(&sms, 1234, &mut router, &mut log, &mut store, TEST_LOG_TS);
+    assert_eq!(router.lookup(1234), Some("+8613800138000"));
+    assert_eq!(log.len(), 1);
+    assert!(log.last_n(1)[0].forwarded);
+}
+
+#[test]
+fn deferred_forward_failure_keeps_router_empty_and_logs_error() {
+    let sms = make_sms("+8613800138000", "Hello test");
+    let router = ReplyRouter::new();
+    let mut log = LogRing::new();
+    let error = MessengerError::Http("network unavailable".into());
+
+    record_forward_failure(&sms, &error, &mut log, TEST_LOG_TS);
+    assert_eq!(router.lookup(1234), None);
+    assert_eq!(log.len(), 2);
+    assert!(!log.last_n(2)[0].forwarded);
+    assert_eq!(log.last_n(2)[1].kind, LogKind::Network);
 }
 
 #[test]

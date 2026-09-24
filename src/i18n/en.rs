@@ -58,6 +58,24 @@ pub fn ota_failed(error: &str) -> String {
 pub fn ota_ignored_stale(name: &str) -> String {
     format!("Ignored older OTA file: {name}. The newest OTA file in this batch will be used.")
 }
+pub fn at_usage() -> &'static str {
+    "Usage: /at AT+CSQ"
+}
+pub fn at_invalid_command() -> &'static str {
+    "Invalid AT command. Send one ASCII command starting with AT; no newlines or semicolons."
+}
+pub fn at_command_too_long() -> &'static str {
+    "AT command is too long (maximum 128 bytes)."
+}
+pub fn at_interactive_unsupported() -> &'static str {
+    "Interactive/data-mode AT commands are not supported by /at."
+}
+pub fn at_transport_error(error: &str) -> String {
+    format!("AT transport error: {error}")
+}
+pub fn at_response_truncated() -> &'static str {
+    "\n[response truncated]"
+}
 
 fn format_bytes(bytes: u64) -> String {
     let mut out = String::with_capacity(16);
@@ -139,6 +157,9 @@ pub fn status_reg_ok() -> &'static str {
 pub fn status_reg_no() -> &'static str {
     "not registered"
 }
+pub fn status_reg_unknown() -> &'static str {
+    "unavailable"
+}
 pub fn status_fwd_on() -> &'static str {
     "enabled"
 }
@@ -156,7 +177,7 @@ pub fn format_status(
     s: u32,
     signal: &str,
     operator: &str,
-    registered: bool,
+    registered: Option<bool>,
     free_heap_kb: u32,
     min_free_heap_kb: u32,
     queue_n: usize,
@@ -166,10 +187,10 @@ pub fn format_status(
     last_sms: Option<(&str, &str)>,
     wifi_info: &str,
 ) -> String {
-    let reg = if registered {
-        status_reg_ok()
-    } else {
-        status_reg_no()
+    let reg = match registered {
+        Some(true) => status_reg_ok(),
+        Some(false) => status_reg_no(),
+        None => status_reg_unknown(),
     };
     let fwd = if fwd_on {
         status_fwd_on()

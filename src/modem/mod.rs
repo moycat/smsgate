@@ -3,7 +3,7 @@
 //! Two-tier design:
 //!
 //! - `AtTransport` — the wire protocol seam.  Implement this for each new modem
-//!   (four methods: `send_at`, `poll_urc`, `write_raw`, `wait_for_prompt`).
+//!   (`send_at`, streaming responses, `poll_urc`, `write_raw`, and `wait_for_prompt`).
 //!
 //! - `ModemPort: AtTransport` — SMS and voice operations built on top.
 //!   `send_pdu_sms` and `hang_up` have standard AT default implementations,
@@ -42,8 +42,46 @@ pub enum ModemError {
     Io,
     #[error("modem not ready")]
     NotReady,
+    #[error("AT response exceeded the bounded body buffer")]
+    ResponseTooLong,
     #[error("feature not supported on this modem")]
     NotSupported,
+}
+
+/// Bounded AT receive faults collected between main-loop iterations.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ModemDiagnostics {
+    pub dropped_urcs: u32,
+    pub dropped_response_lines: u32,
+    pub overlong_lines: u32,
+    pub pdn_activations: u32,
+    pub pdn_deactivations: u32,
+}
+
+impl ModemDiagnostics {
+    pub fn is_empty(self) -> bool {
+        self.receive_faults_empty() && self.pdn_events_empty()
+    }
+
+    pub fn receive_faults_empty(self) -> bool {
+        self.dropped_urcs == 0 && self.dropped_response_lines == 0 && self.overlong_lines == 0
+    }
+
+    pub fn pdn_events_empty(self) -> bool {
+        self.pdn_activations == 0 && self.pdn_deactivations == 0
+    }
+
+    pub fn accumulate(&mut self, other: Self) {
+        self.dropped_urcs = self.dropped_urcs.saturating_add(other.dropped_urcs);
+        self.dropped_response_lines = self
+            .dropped_response_lines
+            .saturating_add(other.dropped_response_lines);
+        self.overlong_lines = self.overlong_lines.saturating_add(other.overlong_lines);
+        self.pdn_activations = self.pdn_activations.saturating_add(other.pdn_activations);
+        self.pdn_deactivations = self
+            .pdn_deactivations
+            .saturating_add(other.pdn_deactivations);
+    }
 }
 
 /// Signal strength snapshot.
@@ -51,10 +89,14 @@ pub enum ModemError {
 pub struct ModemStatus {
     /// CSQ value (0–31), 99 = unknown.
     pub csq: u8,
+    /// Why CSQ is unavailable, if the query failed instead of returning 99.
+    pub csq_error: Option<String>,
     /// Operator name.
     pub operator: String,
     /// Registration status: true = registered.
     pub registered: bool,
+    /// A failed or malformed registration query is not proof of deregistration.
+    pub registration_error: Option<String>,
 }
 
 /// CSQ value representing "unknown signal".
@@ -64,8 +106,10 @@ impl Default for ModemStatus {
     fn default() -> Self {
         ModemStatus {
             csq: CSQ_UNKNOWN,
+            csq_error: None,
             operator: String::new(),
             registered: false,
+            registration_error: Some("not queried".into()),
         }
     }
 }
@@ -73,7 +117,31 @@ impl Default for ModemStatus {
 /// Parse a +CREG? response body for registration status.
 /// Returns true when stat is 1 (home) or 5 (roaming).
 pub fn creg_registered(body: &str) -> bool {
-    body.contains(",1") || body.contains(",5")
+    creg_registration_status(body).unwrap_or(false)
+}
+
+/// Return a registration state only when the modem supplied a numeric status.
+pub fn creg_registration_status(body: &str) -> Option<bool> {
+    body.lines()
+        .find_map(|line| line.trim().strip_prefix("+CREG:"))
+        .and_then(|fields| fields.split(',').nth(1))
+        .and_then(|stat| stat.trim().parse::<u8>().ok())
+        .map(|stat| matches!(stat, 1 | 5))
+}
+
+/// Whether the modem still routes stored SMS notifications to the UART.
+pub fn cnmi_store_notifications_enabled(body: &str) -> bool {
+    let Some(fields) = body
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("+CNMI:"))
+    else {
+        return false;
+    };
+    fields
+        .split(',')
+        .map(str::trim)
+        .take(5)
+        .eq(["2", "1", "0", "0", "0"])
 }
 
 // ── Tier 1: wire protocol ─────────────────────────────────────────────────────
@@ -88,6 +156,26 @@ pub trait AtTransport {
     /// Send `AT<cmd>\r` and collect the response lines until OK/ERROR/timeout.
     fn send_at(&mut self, cmd: &str) -> Result<AtResponse, ModemError>;
 
+    /// Consume a potentially large response line by line without retaining it.
+    /// Concrete UART implementations should override this bounded-memory
+    /// fallback when the response can contain many SMS entries.
+    fn send_at_streaming(
+        &mut self,
+        cmd: &str,
+        _idle_timeout: Duration,
+        _hard_timeout: Duration,
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<(), ModemError> {
+        let response = self.send_at(cmd)?;
+        if !response.ok {
+            return Err(ModemError::AtError(response.body));
+        }
+        for line in response.body.lines() {
+            on_line(line);
+        }
+        Ok(())
+    }
+
     /// Non-blocking poll: return a URC line if one is available.
     fn poll_urc(&mut self) -> Option<String>;
 
@@ -97,6 +185,12 @@ pub trait AtTransport {
     /// Block until `prompt` byte is received or `timeout` elapses.
     /// Used for the `>` prompt in the `AT+CMGS` PDU send sequence.
     fn wait_for_prompt(&mut self, prompt: u8, timeout: Duration) -> bool;
+
+    /// Return and clear receive fault counters. Implementations without a
+    /// diagnostic buffer can use the empty default.
+    fn take_diagnostics(&mut self) -> ModemDiagnostics {
+        ModemDiagnostics::default()
+    }
 }
 
 // ── Tier 2: SMS + voice + optional HTTP ──────────────────────────────────────
@@ -141,24 +235,47 @@ pub trait ModemPort: AtTransport {
     /// Query CSQ, operator name, and registration status from the modem.
     fn update_status(&mut self) -> ModemStatus {
         let mut s = ModemStatus::default();
-        if let Ok(r) = self.send_at("+CSQ") {
-            if let Some(v) = r.body.strip_prefix("+CSQ: ") {
-                s.csq = v
-                    .split(',')
-                    .next()
-                    .and_then(|x| x.trim().parse().ok())
-                    .unwrap_or(CSQ_UNKNOWN);
+        match self.send_at("+CSQ") {
+            Ok(r) if r.ok => {
+                match r
+                    .body
+                    .lines()
+                    .find_map(|line| line.trim().strip_prefix("+CSQ:"))
+                    .and_then(|fields| fields.split(',').next())
+                    .and_then(|value| value.trim().parse::<u8>().ok())
+                {
+                    Some(csq) if csq <= 31 || csq == CSQ_UNKNOWN => s.csq = csq,
+                    _ => s.csq_error = Some("invalid +CSQ response".into()),
+                }
             }
+            Ok(r) => {
+                s.csq_error = Some(format!("AT+CSQ rejected: {}", r.body.trim()));
+            }
+            Err(e) => s.csq_error = Some(e.to_string()),
         }
         if let Ok(r) = self.send_at("+COPS?") {
-            if let Some(start) = r.body.find('"') {
-                if let Some(end) = r.body[start + 1..].find('"') {
-                    s.operator = r.body[start + 1..start + 1 + end].to_string();
+            if let Some(line) = r
+                .body
+                .lines()
+                .find(|line| line.trim().starts_with("+COPS:"))
+            {
+                if let Some(start) = line.find('"') {
+                    if let Some(end) = line[start + 1..].find('"') {
+                        s.operator = line[start + 1..start + 1 + end].to_string();
+                    }
                 }
             }
         }
-        if let Ok(r) = self.send_at("+CREG?") {
-            s.registered = creg_registered(&r.body);
+        match self.send_at("+CREG?") {
+            Ok(r) if r.ok => match creg_registration_status(&r.body) {
+                Some(registered) => {
+                    s.registered = registered;
+                    s.registration_error = None;
+                }
+                None => s.registration_error = Some("invalid +CREG response".into()),
+            },
+            Ok(r) => s.registration_error = Some(format!("AT+CREG? rejected: {}", r.body.trim())),
+            Err(error) => s.registration_error = Some(error.to_string()),
         }
         s
     }

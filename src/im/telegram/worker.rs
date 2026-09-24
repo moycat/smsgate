@@ -13,7 +13,7 @@ use crate::log_ring::LogEvent;
 use crate::modem::ModemPort;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    mpsc::{sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender},
+    mpsc::{sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError},
     Arc, Mutex,
 };
 use std::time::Instant;
@@ -278,24 +278,22 @@ impl TelegramSendWorker {
                             let _ = reply.send(result);
                         }
                         Request::RegisterCommands { body, reply } => {
-                            let result =
-                                run_with_retries("setMyCommands", &worker_event_tx, || {
-                                    ensure_worker_messenger(
-                                        &mut messenger,
-                                        current_cellular,
-                                        &modem,
-                                        &token,
-                                        chat_id,
-                                    );
-                                    let result = match messenger.as_mut() {
-                                        Some(m) => m.register_commands_body(&body),
-                                        None => Err(MessengerError::Disconnected),
-                                    };
-                                    if result.as_ref().err().is_some_and(should_retry_send_error) {
-                                        messenger = None;
-                                    }
-                                    result
-                                });
+                            // Menu registration is best-effort; it must not hold up SMS
+                            // notifications for the full message retry window.
+                            ensure_worker_messenger(
+                                &mut messenger,
+                                current_cellular,
+                                &modem,
+                                &token,
+                                chat_id,
+                            );
+                            let result = match messenger.as_mut() {
+                                Some(m) => m.register_commands_body(&body),
+                                None => Err(MessengerError::Disconnected),
+                            };
+                            if result.as_ref().err().is_some_and(should_retry_send_error) {
+                                messenger = None;
+                            }
                             let _ = reply.send(result);
                         }
                     }
@@ -304,6 +302,51 @@ impl TelegramSendWorker {
             .expect("failed to spawn tg-send thread");
 
         TelegramSendWorker { tx, event_tx }
+    }
+
+    /// Queue a text message without waiting for Telegram or for queue capacity.
+    ///
+    /// A successful enqueue is not delivery: the caller must receive `Ok(id)`
+    /// before treating the message as sent. If the queue is full, the request
+    /// was not accepted and can be retried later.
+    pub fn try_send_message_with_format_owned(
+        &self,
+        text: String,
+        format: MessageFormat,
+    ) -> Result<Receiver<Result<MessageId, MessengerError>>, MessengerError> {
+        let (reply, rx) = sync_channel(1);
+        self.tx
+            .try_send(Request::Send {
+                text,
+                keyboard: None,
+                format,
+                reply,
+            })
+            .map_err(|error| match error {
+                TrySendError::Full(_) => {
+                    MessengerError::Timeout("Telegram outbound queue is full".into())
+                }
+                TrySendError::Disconnected(_) => MessengerError::Disconnected,
+            })?;
+        Ok(rx)
+    }
+
+    /// Register the command menu without delaying modem startup on a slow API.
+    pub fn try_register_commands(
+        &self,
+        commands: &[(&str, &str)],
+    ) -> Result<Receiver<Result<(), MessengerError>>, MessengerError> {
+        let (reply, rx) = sync_channel(1);
+        let body = build_set_my_commands_body(commands);
+        self.tx
+            .try_send(Request::RegisterCommands { body, reply })
+            .map_err(|error| match error {
+                TrySendError::Full(_) => {
+                    MessengerError::Timeout("Telegram outbound queue is full".into())
+                }
+                TrySendError::Disconnected(_) => MessengerError::Disconnected,
+            })?;
+        Ok(rx)
     }
 
     pub fn register_commands(&mut self, commands: &[(&str, &str)]) -> Result<(), MessengerError> {

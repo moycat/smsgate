@@ -92,8 +92,10 @@ fn status_command_shows_uptime() {
     let store = MemStore::new();
     let status = ModemStatus {
         csq: 20,
+        csq_error: None,
         operator: "China Mobile".to_string(),
         registered: true,
+        registration_error: None,
     };
     let log = LogRing::new();
     let queue = SmsSender::new();
@@ -466,7 +468,7 @@ fn send_command_empty_body() {
 #[test]
 fn status_command_unknown_signal_and_operator() {
     let store = MemStore::new();
-    let status = ModemStatus::default(); // csq=99, empty operator, not registered
+    let status = ModemStatus::default(); // csq=99, empty operator, registration not queried
     let log = LogRing::new();
     let queue = SmsSender::new();
     let ctx = CommandContext {
@@ -487,8 +489,8 @@ fn status_command_unknown_signal_and_operator() {
         result
     );
     assert!(
-        result.contains(i18n::status_reg_no()),
-        "not registered: {}",
+        result.contains(i18n::status_reg_unknown()),
+        "registration not queried: {}",
         result
     );
 }

@@ -134,6 +134,8 @@ fn no_carrier_resets_to_idle() {
     let (mut h, mut modem, mut messenger) = make_handler();
     handle_urc(&mut h, "RING", &mut modem, &mut messenger);
     handle_urc(&mut h, "NO CARRIER", &mut modem, &mut messenger);
+    assert_eq!(messenger.sent_count(), 1, "short call must be reported");
+    assert_eq!(modem.hang_up_count, 0, "ended call needs no hang-up");
     // A new RING after NO CARRIER should be handled normally
     handle_urc(&mut h, "RING", &mut modem, &mut messenger);
     handle_urc(
@@ -143,7 +145,7 @@ fn no_carrier_resets_to_idle() {
         &mut messenger,
     );
     assert_eq!(modem.hang_up_count, 1);
-    assert_eq!(messenger.sent_count(), 1);
+    assert_eq!(messenger.sent_count(), 2);
 }
 
 #[test]

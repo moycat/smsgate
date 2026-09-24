@@ -52,6 +52,12 @@ fn cusd_is_urc() {
 }
 
 #[test]
+fn cgev_is_urc() {
+    assert!(is_urc("+CGEV: ME PDN ACT 8,0"));
+    assert!(is_urc("+CGEV: ME PDN DEACT 8"));
+}
+
+#[test]
 fn ok_response_is_not_urc() {
     assert!(!is_urc("OK"));
 }

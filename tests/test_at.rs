@@ -2,8 +2,38 @@
 //!
 //! Run with: cargo test --no-default-features --features testing --test test_at
 
-use smsgate::modem::a76xx::at::AtPort;
+use smsgate::modem::a76xx::at::{AtPort, UartPort};
 use smsgate::testing::mocks::MockUart;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+
+struct SharedUart {
+    rx: Arc<Mutex<VecDeque<u8>>>,
+}
+
+struct ControlledUart {
+    inner: Arc<Mutex<MockUart>>,
+}
+
+impl UartPort for SharedUart {
+    fn read_byte(&mut self, _ticks: u32) -> Option<u8> {
+        self.rx.lock().unwrap().pop_front()
+    }
+
+    fn write_all(&mut self, _data: &[u8]) -> Result<(), smsgate::modem::ModemError> {
+        Ok(())
+    }
+}
+
+impl UartPort for ControlledUart {
+    fn read_byte(&mut self, ticks: u32) -> Option<u8> {
+        self.inner.lock().unwrap().read_byte(ticks)
+    }
+
+    fn write_all(&mut self, data: &[u8]) -> Result<(), smsgate::modem::ModemError> {
+        self.inner.lock().unwrap().write_all(data)
+    }
+}
 
 fn port(uart: MockUart) -> AtPort<MockUart> {
     AtPort::new(uart)
@@ -87,6 +117,38 @@ fn send_at_with_timeout_returns_quick_timeout() {
     assert!(started.elapsed() < std::time::Duration::from_millis(250));
 }
 
+#[test]
+fn timed_out_command_requires_probe_marker_before_next_response() {
+    let uart = Arc::new(Mutex::new(MockUart::new()));
+    let mut p = AtPort::new(ControlledUart {
+        inner: uart.clone(),
+    });
+    assert!(matches!(
+        p.send_at_with_timeout("+CMGL=4", std::time::Duration::from_millis(10)),
+        Err(smsgate::modem::ModemError::Timeout)
+    ));
+
+    // The old command's late OK arrives after the probe write. It must not
+    // complete the probe without the distinctive +CMGF marker.
+    {
+        let mut source = uart.lock().unwrap();
+        source.queue_response_line("OK");
+        source.queue_response_line("+CMTI: \"ME\",7");
+        source.queue_response_line("+CMGF: 0");
+        source.queue_response_line("OK");
+        source.finish_response();
+        source.queue_response_line("+CSQ: 19,0");
+        source.queue_response_line("OK");
+    }
+    let response = p
+        .send_at_with_timeout("+CSQ", std::time::Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(response.body, "+CSQ: 19,0");
+    assert_eq!(p.poll_urc().as_deref(), Some("+CMTI: \"ME\",7"));
+    let sent = uart.lock().unwrap().sent_str().to_owned();
+    assert!(sent.contains("AT+CMGL=4\rAT+CMGF?\rAT+CSQ\r"));
+}
+
 // ── URC handling ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -119,6 +181,60 @@ fn poll_urc_empty_returns_none() {
     let uart = MockUart::new();
     let mut p = port(uart);
     assert!(p.poll_urc().is_none());
+}
+
+#[test]
+fn poll_urc_keeps_fragment_until_lf() {
+    let rx = Arc::new(Mutex::new(VecDeque::from(b"+CMT".to_vec())));
+    let mut p = AtPort::new(SharedUart { rx: rx.clone() });
+    assert!(
+        p.poll_urc().is_none(),
+        "unterminated URC must not be returned"
+    );
+    rx.lock().unwrap().extend(b"I: \"ME\",3\r\n");
+    assert_eq!(p.poll_urc().as_deref(), Some("+CMTI: \"ME\",3"));
+}
+
+#[test]
+fn cgev_interleaved_with_cmgr_is_not_sms_body() {
+    let mut uart = MockUart::new();
+    uart.queue_response_line("+CMGR: 0,,3");
+    uart.queue_response_line("+CGEV: ME PDN DEACT 8");
+    uart.queue_response_line("001122");
+    uart.queue_response_line("OK");
+    let mut p = port(uart);
+    let r = p.send_at("+CMGR=1").unwrap();
+    assert_eq!(r.body, "+CMGR: 0,,3\n001122");
+    assert_eq!(p.poll_urc().as_deref(), Some("+CGEV: ME PDN DEACT 8"));
+}
+
+#[test]
+fn cmt_pdu_interleaved_with_command_stays_with_header() {
+    let mut uart = MockUart::new();
+    uart.queue_response_line("+CMT: ,3");
+    uart.queue_response_line("001122");
+    uart.queue_response_line("+CSQ: 20,0");
+    uart.queue_response_line("OK");
+    let mut p = port(uart);
+    let r = p.send_at("+CSQ").unwrap();
+    assert_eq!(r.body, "+CSQ: 20,0");
+    assert_eq!(p.poll_urc().as_deref(), Some("+CMT: ,3"));
+    assert_eq!(p.poll_urc().as_deref(), Some("001122"));
+}
+
+#[test]
+fn cmt_header_survives_command_completion_before_pdu() {
+    let mut uart = MockUart::new();
+    uart.queue_response_line("+CMT: ,3");
+    uart.queue_response_line("OK");
+    uart.finish_response();
+    uart.queue_response_line("001122");
+    uart.queue_response_line("OK");
+    let mut p = port(uart);
+    assert!(p.send_at("+CSQ").unwrap().ok);
+    assert!(p.send_at("+COPS?").unwrap().ok);
+    assert_eq!(p.poll_urc().as_deref(), Some("+CMT: ,3"));
+    assert_eq!(p.poll_urc().as_deref(), Some("001122"));
 }
 
 // ── wait_for_prompt ───────────────────────────────────────────────────────────
@@ -194,21 +310,101 @@ fn send_at_connect_payload_with_timeout_returns_quick_timeout() {
     assert!(started.elapsed() < std::time::Duration::from_millis(250));
 }
 
+// ── CMGS with concurrent URCs ──────────────────────────────────────────────
+
+#[test]
+fn cmgs_preserves_urcs_before_prompt_and_after_payload() {
+    let mut uart = MockUart::new();
+    uart.queue_response_line("+CMTI: \"ME\",7");
+    uart.queue_response_line("RING");
+    uart.queue_response(b"> ");
+    uart.finish_response();
+    uart.queue_response_line("+CGEV: ME PDN DEACT 8");
+    uart.queue_response_line("+CMGS: 17");
+    uart.queue_response_line("OK");
+
+    let mut p = port(uart);
+    assert_eq!(p.send_cmgs_pdu("001122", 3).unwrap(), 17);
+    assert_eq!(p.poll_urc().as_deref(), Some("+CMTI: \"ME\",7"));
+    assert_eq!(p.poll_urc().as_deref(), Some("RING"));
+    assert_eq!(p.poll_urc().as_deref(), Some("+CGEV: ME PDN DEACT 8"));
+    assert!(p.inner().sent_str().contains("AT+CMGS=3\r001122\u{1a}"));
+}
+
+#[test]
+fn cmgs_keeps_interleaved_cmt_pair_during_final_result() {
+    let mut uart = MockUart::new();
+    uart.queue_response(b"> ");
+    uart.finish_response();
+    uart.queue_response_line("+CMT: ,3");
+    uart.queue_response_line("001122");
+    uart.queue_response_line("+CMGS: 4");
+    uart.queue_response_line("OK");
+
+    let mut p = port(uart);
+    assert_eq!(p.send_cmgs_pdu("AABBCC", 3).unwrap(), 4);
+    assert_eq!(p.poll_urc().as_deref(), Some("+CMT: ,3"));
+    assert_eq!(p.poll_urc().as_deref(), Some("001122"));
+}
+
+#[test]
+fn cmgs_error_before_prompt_aborts_input() {
+    let mut uart = MockUart::new();
+    uart.queue_response_line("+CMS ERROR: 500");
+    let mut p = port(uart);
+    let result = p.send_cmgs_pdu("001122", 3);
+    assert!(matches!(
+        result,
+        Err(smsgate::modem::ModemError::AtError(message)) if message == "+CMS ERROR: 500"
+    ));
+    assert_eq!(p.inner().sent_str(), "AT+CMGS=3\r\u{1b}");
+}
+
 // ── buffer caps ───────────────────────────────────────────────────────────────
 
 #[test]
 fn body_lines_capped() {
-    // Feed 70 body lines + OK; only MAX_BODY_LINES (64) should survive.
+    // A truncated response must fail rather than masquerade as a full reply.
     let mut uart = MockUart::new();
     for i in 0..70u32 {
         uart.queue_response_line(&format!("line{}", i));
     }
     uart.queue_response_line("OK");
     let mut p = port(uart);
-    let r = p.send_at("+TEST").unwrap();
-    assert!(r.ok);
-    let count = r.body.lines().count();
-    assert!(count <= 64, "expected at most 64 body lines, got {}", count);
+    assert!(matches!(
+        p.send_at("+TEST"),
+        Err(smsgate::modem::ModemError::ResponseTooLong)
+    ));
+    assert_eq!(p.take_diagnostics().dropped_response_lines, 6);
+}
+
+#[test]
+fn streaming_at_response_reads_past_body_cap_and_preserves_urcs() {
+    let mut uart = MockUart::new();
+    for index in 1..=100 {
+        uart.queue_response_line(&format!("+CMGL: {index},0,,18"));
+        uart.queue_response_line("001122");
+        if index == 50 {
+            uart.queue_response_line("+CMTI: \"ME\",101");
+        }
+    }
+    uart.queue_response_line("OK");
+    let mut p = port(uart);
+    let mut headers = Vec::new();
+    p.send_at_streaming(
+        "+CMGL=4",
+        std::time::Duration::from_millis(100),
+        std::time::Duration::from_secs(1),
+        &mut |line| {
+            if line.starts_with("+CMGL:") {
+                headers.push(line.to_owned());
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(headers.len(), 100);
+    assert_eq!(p.poll_urc().as_deref(), Some("+CMTI: \"ME\",101"));
+    assert_eq!(p.take_diagnostics().dropped_response_lines, 0);
 }
 
 #[test]
@@ -230,4 +426,91 @@ fn urc_buf_capped() {
         "expected at most 32 buffered URCs, got {}",
         count
     );
+    assert_eq!(p.take_diagnostics().dropped_urcs, 8);
+}
+
+#[test]
+fn overlong_line_is_discarded_without_splitting_next_line() {
+    let mut uart = MockUart::new();
+    uart.queue_response(&vec![b'A'; 16 * 1024 + 1]);
+    uart.queue_response(b"\r\n");
+    uart.queue_response_line("+CSQ: 18,0");
+    uart.queue_response_line("OK");
+    let mut p = port(uart);
+    let r = p.send_at("+CSQ").unwrap();
+    assert_eq!(r.body, "+CSQ: 18,0");
+    assert_eq!(p.take_diagnostics().overlong_lines, 1);
+}
+
+#[test]
+fn cgev_coalescing_preserves_critical_urcs() {
+    let mut uart = MockUart::new();
+    for i in 0..40 {
+        uart.queue_response_line(&format!("+CGEV: ME PDN DEACT {i}"));
+    }
+    uart.queue_response_line("+CMTI: \"ME\",3");
+    uart.queue_response_line("OK");
+    let mut p = port(uart);
+    assert!(p.send_at("+TEST").unwrap().ok);
+    assert_eq!(p.poll_urc().as_deref(), Some("+CGEV: ME PDN DEACT 39"));
+    assert_eq!(p.poll_urc().as_deref(), Some("+CMTI: \"ME\",3"));
+    let diagnostics = p.take_diagnostics();
+    assert_eq!(diagnostics.dropped_urcs, 0);
+    assert_eq!(diagnostics.pdn_deactivations, 40);
+}
+
+#[test]
+fn critical_urc_evicts_cgev_when_queue_is_full() {
+    let mut uart = MockUart::new();
+    for i in 0..31 {
+        uart.queue_response_line(&format!("+CMTI: \"ME\",{i}"));
+    }
+    uart.queue_response_line("+CGEV: ME PDN DEACT 8");
+    uart.queue_response_line("RING");
+    uart.queue_response_line("OK");
+    let mut p = port(uart);
+    assert!(p.send_at("+TEST").unwrap().ok);
+    for _ in 0..31 {
+        assert!(p.poll_urc().unwrap().starts_with("+CMTI:"));
+    }
+    assert_eq!(p.poll_urc().as_deref(), Some("RING"));
+    assert_eq!(p.take_diagnostics().dropped_urcs, 0);
+}
+
+#[test]
+fn call_evicts_recoverable_cmti_when_queue_is_full() {
+    let mut uart = MockUart::new();
+    for i in 0..32 {
+        uart.queue_response_line(&format!("+CMTI: \"ME\",{i}"));
+    }
+    uart.queue_response_line("RING");
+    uart.queue_response_line("OK");
+    let mut p = port(uart);
+    assert!(p.send_at("+TEST").unwrap().ok);
+    assert_eq!(p.poll_urc().as_deref(), Some("+CMTI: \"ME\",1"));
+    for _ in 1..31 {
+        assert!(p.poll_urc().unwrap().starts_with("+CMTI:"));
+    }
+    assert_eq!(p.poll_urc().as_deref(), Some("RING"));
+    assert_eq!(p.take_diagnostics().dropped_urcs, 1);
+}
+
+#[test]
+fn full_urc_queue_preserves_cmt_by_evicting_recoverable_cmti() {
+    let mut uart = MockUart::new();
+    for i in 0..31 {
+        uart.queue_response_line(&format!("+CMTI: \"ME\",{i}"));
+    }
+    uart.queue_response_line("+CMT: ,3");
+    uart.queue_response_line("001122");
+    uart.queue_response_line("OK");
+    let mut p = port(uart);
+    assert!(p.send_at("+TEST").unwrap().ok);
+    for _ in 0..30 {
+        assert!(p.poll_urc().unwrap().starts_with("+CMTI:"));
+    }
+    assert_eq!(p.poll_urc().as_deref(), Some("+CMT: ,3"));
+    assert_eq!(p.poll_urc().as_deref(), Some("001122"));
+    assert!(p.poll_urc().is_none());
+    assert_eq!(p.take_diagnostics().dropped_urcs, 1);
 }

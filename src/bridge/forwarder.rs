@@ -1,12 +1,63 @@
 //! SMS → IM forwarding core logic.
 
 use crate::bridge::reply_router::ReplyRouter;
-use crate::im::{MessageFormat, MessageId, MessageSink};
+use crate::im::{MessageFormat, MessageId, MessageSink, MessengerError};
 use crate::log_ring::{LogEntry, LogEvent, LogRing};
 use crate::persist::{keys, load_bool, Store};
 use crate::sms::{codec::human_readable_phone, SmsMessage};
 
 const SMS_LOG_PREVIEW_CHARS: usize = 160;
+
+/// Format an inbound SMS for Telegram without sending it.
+pub fn sms_forward_text(sms: &SmsMessage) -> String {
+    let display = human_readable_phone(&sms.sender);
+    crate::i18n::sms_received(
+        &display,
+        &crate::sms::codec::timestamp_to_rfc3339(&sms.timestamp, 480),
+        &sms.body,
+    )
+}
+
+/// Finalize a confirmed IM delivery before its modem slots are deleted.
+pub fn record_forward_success(
+    sms: &SmsMessage,
+    msg_id: MessageId,
+    router: &mut ReplyRouter,
+    log: &mut LogRing,
+    store: &mut dyn Store,
+    log_timestamp: &str,
+) {
+    router.put(msg_id, &sms.sender, store);
+    log.push(sms_log_entry(sms, log_timestamp, true));
+    log::info!(
+        "[forwarder] forwarded SMS from {} → msg_id={}",
+        sms.sender,
+        msg_id
+    );
+}
+
+/// Record a failed IM delivery while retaining any modem storage slots.
+pub fn record_forward_failure(
+    sms: &SmsMessage,
+    error: &MessengerError,
+    log: &mut LogRing,
+    log_timestamp: &str,
+) {
+    log::error!("[forwarder] send failed: {}", error);
+    log.push(sms_log_entry(sms, log_timestamp, false));
+    log.push(
+        LogEvent::network("telegram", &format!("send failed: {}", error), false).at(log_timestamp),
+    );
+}
+
+fn sms_log_entry(sms: &SmsMessage, log_timestamp: &str, forwarded: bool) -> LogEntry {
+    LogEntry::sms(
+        sms.sender.clone(),
+        sms_log_preview(sms),
+        log_timestamp.to_string(),
+        forwarded,
+    )
+}
 
 /// Process and forward one SMS. Returns the IM MessageId on success.
 pub fn forward_sms(
@@ -17,55 +68,30 @@ pub fn forward_sms(
     store: &mut dyn Store,
     log_timestamp: &str,
 ) -> Option<MessageId> {
-    let log_entry = |forwarded| {
-        LogEntry::sms(
-            sms.sender.clone(),
-            sms_log_preview(sms),
-            log_timestamp.to_string(),
-            forwarded,
-        )
-    };
-
     if load_bool(store, keys::FWD_ENABLED) == Some(false) {
         log::info!(
             "[forwarder] forwarding paused — dropping SMS from {}",
             sms.sender
         );
-        log.push(log_entry(false));
+        log.push(sms_log_entry(sms, log_timestamp, false));
         return None;
     }
 
     if is_blocked(&sms.sender, store) {
         log::info!("[forwarder] {} is blocked — dropped", sms.sender);
-        log.push(log_entry(false));
+        log.push(sms_log_entry(sms, log_timestamp, false));
         return None;
     }
 
-    let display = human_readable_phone(&sms.sender);
-    let text = crate::i18n::sms_received(
-        &display,
-        &crate::sms::codec::timestamp_to_rfc3339(&sms.timestamp, 480),
-        &sms.body,
-    );
+    let text = sms_forward_text(sms);
 
     match messenger.send_message_with_format(&text, MessageFormat::Html) {
         Ok(msg_id) => {
-            router.put(msg_id, &sms.sender, store);
-            log.push(log_entry(true));
-            log::info!(
-                "[forwarder] forwarded SMS from {} → msg_id={}",
-                sms.sender,
-                msg_id
-            );
+            record_forward_success(sms, msg_id, router, log, store, log_timestamp);
             Some(msg_id)
         }
         Err(e) => {
-            log::error!("[forwarder] send failed: {}", e);
-            log.push(log_entry(false));
-            log.push(
-                LogEvent::network("telegram", &format!("send failed: {}", e), false)
-                    .at(log_timestamp),
-            );
+            record_forward_failure(sms, &e, log, log_timestamp);
             None
         }
     }

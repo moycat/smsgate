@@ -1,6 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use smsgate::bridge::at_handler::parse_hidden_at_command;
 use smsgate::commands::{builtin::*, CommandContext, CommandRegistry};
 use smsgate::log_ring::LogRing;
 use smsgate::modem::ModemStatus;
@@ -11,6 +12,7 @@ fuzz_target!(|data: &[u8]| {
     let Ok(s) = std::str::from_utf8(data) else {
         return;
     };
+    let _ = parse_hidden_at_command(s);
 
     let mut reg = CommandRegistry::new();
     reg.register(Box::new(HelpCommand {
@@ -36,6 +38,7 @@ fuzz_target!(|data: &[u8]| {
         send_queue: &queue,
         uptime_ms: 0,
         free_heap_bytes: 0,
+        min_free_heap_bytes: 0,
         wifi_info: "",
     };
 

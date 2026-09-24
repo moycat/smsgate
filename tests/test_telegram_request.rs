@@ -15,7 +15,7 @@ fn get_updates_body_uses_embedded_update_limit() {
 
     assert!(body.contains(r#""offset":42"#));
     assert!(body.contains(r#""timeout":30"#));
-    assert!(body.contains(r#""limit":10"#));
+    assert!(body.contains(r#""limit":1"#));
     assert!(body.contains(r#""allowed_updates":["message","callback_query"]"#));
 }
 

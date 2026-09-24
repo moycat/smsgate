@@ -11,7 +11,7 @@ pub mod sms;
 #[cfg(feature = "esp32")]
 use super::creg_registered;
 #[cfg(any(feature = "esp32", feature = "testing"))]
-use super::{AtResponse, AtTransport, ModemError, ModemPort};
+use super::{AtResponse, AtTransport, ModemDiagnostics, ModemError, ModemPort};
 #[cfg(feature = "esp32")]
 use at::HardwareAtPort as AtPort;
 #[cfg(any(feature = "esp32", feature = "testing"))]
@@ -180,6 +180,17 @@ impl AtTransport for A76xxModem {
         self.port.send_at(cmd)
     }
 
+    fn send_at_streaming(
+        &mut self,
+        cmd: &str,
+        idle_timeout: Duration,
+        hard_timeout: Duration,
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<(), ModemError> {
+        self.port
+            .send_at_streaming(cmd, idle_timeout, hard_timeout, on_line)
+    }
+
     fn poll_urc(&mut self) -> Option<String> {
         self.port.poll_urc()
     }
@@ -190,6 +201,10 @@ impl AtTransport for A76xxModem {
 
     fn wait_for_prompt(&mut self, prompt: u8, timeout: Duration) -> bool {
         self.port.wait_for_prompt(prompt, timeout)
+    }
+
+    fn take_diagnostics(&mut self) -> ModemDiagnostics {
+        self.port.take_diagnostics()
     }
 }
 
@@ -199,6 +214,17 @@ impl<U: at::UartPort> AtTransport for A76xxModem<U> {
         self.port.send_at(cmd)
     }
 
+    fn send_at_streaming(
+        &mut self,
+        cmd: &str,
+        idle_timeout: Duration,
+        hard_timeout: Duration,
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<(), ModemError> {
+        self.port
+            .send_at_streaming(cmd, idle_timeout, hard_timeout, on_line)
+    }
+
     fn poll_urc(&mut self) -> Option<String> {
         self.port.poll_urc()
     }
@@ -210,11 +236,18 @@ impl<U: at::UartPort> AtTransport for A76xxModem<U> {
     fn wait_for_prompt(&mut self, prompt: u8, timeout: Duration) -> bool {
         self.port.wait_for_prompt(prompt, timeout)
     }
+
+    fn take_diagnostics(&mut self) -> ModemDiagnostics {
+        self.port.take_diagnostics()
+    }
 }
 
 #[cfg(feature = "esp32")]
 impl ModemPort for A76xxModem {
-    // send_pdu_sms: default (standard AT+CMGS handshake via AtTransport)
+    fn send_pdu_sms(&mut self, hex: &str, tpdu_len: u8) -> Result<u8, ModemError> {
+        self.port.send_cmgs_pdu(hex, tpdu_len)
+    }
+
     fn hang_up(&mut self) -> Result<(), ModemError> {
         hang_up_voice_call(self)
     }
@@ -226,8 +259,8 @@ impl ModemPort for A76xxModem {
 
 #[cfg(all(feature = "testing", not(feature = "esp32")))]
 impl<U: at::UartPort> ModemPort for A76xxModem<U> {
-    fn send_pdu_sms(&mut self, _hex: &str, _tpdu_len: u8) -> Result<u8, ModemError> {
-        Err(ModemError::NotSupported)
+    fn send_pdu_sms(&mut self, hex: &str, tpdu_len: u8) -> Result<u8, ModemError> {
+        self.port.send_cmgs_pdu(hex, tpdu_len)
     }
 
     fn hang_up(&mut self) -> Result<(), ModemError> {
