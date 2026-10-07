@@ -135,6 +135,56 @@ fn send_at_body_lines() {
 }
 
 #[test]
+fn status_reply_after_five_seconds_does_not_trigger_resynchronization() {
+    struct DelayedStatusUart {
+        inner: MockUart,
+        ready_at: Option<Instant>,
+    }
+
+    impl UartPort for DelayedStatusUart {
+        fn read_byte(&mut self, ticks: u32) -> Option<u8> {
+            if let Some(remaining) = self
+                .ready_at
+                .and_then(|ready_at| ready_at.checked_duration_since(Instant::now()))
+            {
+                std::thread::sleep(remaining.min(Duration::from_millis(10)));
+                return None;
+            }
+            self.inner.read_byte(ticks)
+        }
+
+        fn write_all(&mut self, data: &[u8]) -> Result<(), smsgate::modem::ModemError> {
+            self.inner.write_all(data)?;
+            if self.ready_at.is_none() {
+                self.ready_at = Some(Instant::now() + Duration::from_millis(5200));
+            }
+            Ok(())
+        }
+    }
+
+    let mut uart = MockUart::new();
+    uart.queue_response_line("+CSQ: 13,0");
+    uart.queue_response_line("+CMTI: \"ME\",7");
+    uart.queue_response_line("OK");
+    uart.finish_response();
+    uart.queue_response_line("+CREG: 0,5");
+    uart.queue_response_line("OK");
+    let mut p = AtPort::new(DelayedStatusUart {
+        inner: uart,
+        ready_at: None,
+    });
+
+    let signal = p.send_at("+CSQ").unwrap();
+    assert!(signal.ok);
+    assert_eq!(signal.body, "+CSQ: 13,0");
+    assert_eq!(p.poll_urc().as_deref(), Some("+CMTI: \"ME\",7"));
+    let registration = p.send_at("+CREG?").unwrap();
+    assert!(registration.ok);
+    assert_eq!(registration.body, "+CREG: 0,5");
+    assert_eq!(p.inner().inner.sent_str(), "AT+CSQ\rAT+CREG?\r");
+}
+
+#[test]
 fn send_at_multiline_body() {
     let mut uart = MockUart::new();
     uart.queue_response_line("+COPS: 0,0,\"Operator\",7");
@@ -496,6 +546,79 @@ fn cgev_coalescing_preserves_critical_urcs() {
     let diagnostics = p.take_diagnostics();
     assert_eq!(diagnostics.dropped_urcs, 0);
     assert_eq!(diagnostics.pdn_deactivations, 40);
+}
+
+#[test]
+fn pdn_diagnostics_preserve_latest_context_per_event_type() {
+    let mut uart = MockUart::new();
+    uart.queue_response_line("+CGEV: ME PDN ACT 1,0");
+    uart.queue_response_line("+CGEV: ME PDN DEACT 1");
+    uart.queue_response_line("+CGEV: NW PDN ACT 8,1");
+    uart.queue_response_line("+CGEV: NW PDN DEACT 8,1");
+    uart.queue_response_line("OK");
+    let mut p = port(uart);
+    assert!(p.send_at("+CSQ").unwrap().ok);
+
+    let diagnostics = p.take_diagnostics();
+    assert_eq!(diagnostics.pdn_activations, 2);
+    assert_eq!(diagnostics.pdn_deactivations, 2);
+    let activation = diagnostics.last_pdn_activation.unwrap();
+    assert_eq!(activation.cid, 8);
+    assert_eq!(activation.reason, None);
+    assert!(activation.network_initiated);
+    let deactivation = diagnostics.last_pdn_deactivation.unwrap();
+    assert_eq!(deactivation.cid, 8);
+    assert_eq!(deactivation.reason, None);
+    assert!(deactivation.network_initiated);
+
+    // Reading an already-counted, coalesced URC must not count it again.
+    assert_eq!(p.poll_urc().as_deref(), Some("+CGEV: NW PDN DEACT 8,1"));
+    let cleared = p.take_diagnostics();
+    assert_eq!(cleared.pdn_activations, 0);
+    assert_eq!(cleared.pdn_deactivations, 0);
+    assert_eq!(cleared.last_pdn_activation, None);
+    assert_eq!(cleared.last_pdn_deactivation, None);
+}
+
+#[test]
+fn pdn_diagnostics_only_label_me_activation_reason() {
+    let mut uart = MockUart::new();
+    uart.queue_response_line("+CGEV: ME PDN ACT 8,1");
+    uart.queue_response_line("+CGEV: ME PDN DEACT 8,1");
+    uart.queue_response_line("OK");
+    let mut p = port(uart);
+    assert!(p.send_at("+CSQ").unwrap().ok);
+
+    let diagnostics = p.take_diagnostics();
+    assert_eq!(diagnostics.pdn_activations, 1);
+    assert_eq!(diagnostics.pdn_deactivations, 1);
+    let activation = diagnostics.last_pdn_activation.unwrap();
+    assert_eq!(activation.cid, 8);
+    assert_eq!(activation.reason, Some(1));
+    assert!(!activation.network_initiated);
+    let deactivation = diagnostics.last_pdn_deactivation.unwrap();
+    assert_eq!(deactivation.cid, 8);
+    assert_eq!(deactivation.reason, None);
+    assert!(!deactivation.network_initiated);
+}
+
+#[test]
+fn malformed_latest_pdn_event_does_not_reuse_an_older_context() {
+    let mut uart = MockUart::new();
+    uart.feed_line("+CGEV: ME PDN ACT 8,0");
+    uart.feed_line("+CGEV: ME PDN ACT invalid");
+    uart.feed_line("+CGEV: ME PDN DEACT 8");
+    uart.feed_line("+CGEV: ME PDN DEACT invalid");
+    let mut p = port(uart);
+    for _ in 0..4 {
+        assert!(p.poll_urc().is_some());
+    }
+
+    let diagnostics = p.take_diagnostics();
+    assert_eq!(diagnostics.pdn_activations, 2);
+    assert_eq!(diagnostics.pdn_deactivations, 2);
+    assert_eq!(diagnostics.last_pdn_activation, None);
+    assert_eq!(diagnostics.last_pdn_deactivation, None);
 }
 
 #[test]

@@ -3,7 +3,7 @@
 use smsgate::commands::{builtin::*, Command, CommandContext, CommandRegistry};
 use smsgate::i18n;
 use smsgate::log_ring::{LogEntry, LogRing, LOG_PAGE_SIZE};
-use smsgate::modem::ModemStatus;
+use smsgate::modem::{AtResponse, ModemStatus, RegistrationDomain, RegistrationQuery};
 use smsgate::persist::{keys, mem::MemStore, save_bool};
 use smsgate::sms::sender::SmsSender;
 
@@ -94,8 +94,15 @@ fn status_command_shows_uptime() {
         csq: 20,
         csq_error: None,
         operator: "China Mobile".to_string(),
-        registered: true,
-        registration_error: None,
+        registration: RegistrationQuery::from_response(
+            RegistrationDomain::Circuit,
+            Ok(AtResponse {
+                body: "+CREG: 0,1".into(),
+                ok: true,
+            }),
+            std::time::Duration::ZERO,
+        ),
+        ..ModemStatus::default()
     };
     let log = LogRing::new();
     let queue = SmsSender::new();
@@ -130,6 +137,39 @@ fn status_command_paused_shown() {
     let ctx = ctx(&store, &status, &log, &queue);
     let result = StatusCommand.handle("", &ctx);
     assert!(result.contains(i18n::status_fwd_off()));
+}
+
+#[test]
+fn status_command_distinguishes_sms_only_from_unknown_registration() {
+    let store = MemStore::new();
+    let log = LogRing::new();
+    let queue = SmsSender::new();
+    for stat in [1, 4, 6, 7] {
+        let status = ModemStatus {
+            registration: RegistrationQuery::from_response(
+                RegistrationDomain::Circuit,
+                Ok(AtResponse {
+                    body: format!("+CREG: 0,{stat}"),
+                    ok: true,
+                }),
+                std::time::Duration::ZERO,
+            ),
+            ..ModemStatus::default()
+        };
+        let result = StatusCommand.handle("", &ctx(&store, &status, &log, &queue));
+        assert_eq!(
+            result.contains(i18n::status_sms_only_notice()),
+            matches!(stat, 6 | 7),
+            "stat={stat}: {result}"
+        );
+        let expected = if stat == 4 {
+            i18n::status_reg_unknown()
+        } else {
+            i18n::status_reg_ok()
+        };
+        assert!(result.contains(expected), "stat={stat}: {result}");
+        assert!(!result.contains(i18n::status_reg_no()), "{result}");
+    }
 }
 
 #[test]

@@ -158,7 +158,10 @@ pub fn status_reg_no() -> &'static str {
     "not registered"
 }
 pub fn status_reg_unknown() -> &'static str {
-    "unavailable"
+    "unknown"
+}
+pub fn status_sms_only_notice() -> &'static str {
+    "📩 Registration allows SMS only\n"
 }
 pub fn status_fwd_on() -> &'static str {
     "enabled"

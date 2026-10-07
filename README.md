@@ -78,6 +78,16 @@ and the firmware periodically retries WiFi.
 
 Telegram and OTA are WiFi-only. The hidden `/at` command accepts a fixed set
 of read-only modem diagnostics, such as `AT+SIMCOMATI` and `AT+CSQ`.
+It also allows `AT+CGDCONT?` to inspect context definitions and `AT+CIREG?`
+to inspect IMS registration; configuration writes remain rejected.
+
+Registration logs distinguish a failed query, an unknown state, and confirmed
+deregistration. CREG states 6 and 7 mean SMS-only registration and count as
+registered for this SMS bridge. Transitions include the CREG reply and an LTE
+CEREG sample with query timings. State queries allow 10 seconds for SIMCom's
+documented response window. Hourly PDN summaries count context events across
+all CIDs, not network registrations; they include the latest activation and
+deactivation context IDs and the observed reporting interval.
 
 When flashing over USB, keep the `--partition-table partitions_ota.csv` and
 `--target-app-partition ota_0` flags, and erase `otadata`. The firmware uses a

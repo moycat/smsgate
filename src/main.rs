@@ -632,7 +632,7 @@ fn main() {
     let mut low_heap_alerted = false;
     let mut last_operator = String::new();
     let mut last_signal_state: Option<(bool, bool)> = None;
-    let mut last_registered: Option<bool> = None;
+    let mut last_registration_stat: Option<u8> = None;
     let mut registration_query_failed = false;
     let mut last_wifi_reconnect_attempt: Option<std::time::Instant> = None;
     const SMS_SWEEP_INTERVAL_MS: u32 = 5 * 60 * 1000;
@@ -863,7 +863,6 @@ fn main() {
         // consume the PDU line that belongs to the pending +CMT delivery.
         if elapsed_since(last_status_update, now) > 30_000 && !cmt_pdu_pending {
             modem_status = lock!(modem).update_status();
-            last_status_update = now;
             let signal_state = (
                 modem_status.csq == smsgate::modem::CSQ_UNKNOWN,
                 modem_status.csq_error.is_some(),
@@ -873,19 +872,24 @@ fn main() {
                     let detail = modem_status
                         .csq_error
                         .as_deref()
-                        .map(|error| format!("CSQ unavailable: {}", error))
+                        .map(|error| {
+                            format!(
+                                "CSQ unavailable after {}ms: {}",
+                                modem_status.csq_elapsed_ms, error
+                            )
+                        })
                         .unwrap_or_else(|| "modem reported CSQ=99".into());
                     record_event(
                         &mut log,
                         &log_clock,
-                        uptime_ms,
+                        elapsed_since(boot_ms, now_ms()),
                         LogEvent::network("signal", &detail, false),
                     );
                 } else if last_signal_state.is_some() {
                     record_event(
                         &mut log,
                         &log_clock,
-                        uptime_ms,
+                        elapsed_since(boot_ms, now_ms()),
                         LogEvent::network(
                             "signal",
                             &format!("CSQ available: {}", modem_status.csq),
@@ -895,53 +899,54 @@ fn main() {
                 }
                 last_signal_state = Some(signal_state);
             }
-            if let Some(error) = modem_status.registration_error.as_deref() {
-                if !registration_query_failed {
-                    record_event(
-                        &mut log,
-                        &log_clock,
-                        uptime_ms,
-                        LogEvent::network(
-                            "registration",
-                            &format!("registration query unavailable: {}", error),
-                            false,
-                        ),
-                    );
-                }
-                registration_query_failed = true;
-            } else {
-                if registration_query_failed {
-                    record_event(
-                        &mut log,
-                        &log_clock,
-                        uptime_ms,
-                        LogEvent::network("registration", "registration query recovered", true),
-                    );
-                    registration_query_failed = false;
-                }
-                if last_registered != Some(modem_status.registered) {
-                    if !modem_status.registered || last_registered.is_some() {
-                        record_event(
-                            &mut log,
-                            &log_clock,
-                            uptime_ms,
-                            LogEvent::network(
-                                "registration",
-                                if modem_status.registered {
-                                    "network registration restored"
-                                } else {
-                                    "network registration unavailable"
-                                },
-                                modem_status.registered,
-                            ),
-                        );
+            let registration = &modem_status.registration;
+            let query_failed = registration.error.is_some();
+            let registration_changed = query_failed != registration_query_failed
+                || (!query_failed && last_registration_stat != registration.stat);
+            if registration_changed {
+                use smsgate::modem::RegistrationDomain;
+                // Sample LTE registration only on a CREG transition or query
+                // failure/recovery, not as another request on every status poll.
+                // Release the modem lock between the normal poll and this query.
+                let eps = lock!(modem).query_registration(RegistrationDomain::Eps);
+                let summary = if query_failed {
+                    "registration query unavailable"
+                } else if registration.sms_only() {
+                    "SMS-only registration"
+                } else {
+                    match registration.registered() {
+                        Some(true) if registration_query_failed => "registration query recovered",
+                        Some(true) => "network registration available",
+                        Some(false) => "network registration unavailable",
+                        None => "registration state unknown",
                     }
-                    last_registered = Some(modem_status.registered);
-                }
+                };
+                record_event(
+                    &mut log,
+                    &log_clock,
+                    elapsed_since(boot_ms, now_ms()),
+                    LogEvent::network(
+                        "registration",
+                        &format!(
+                            "{}; {}; {}",
+                            summary,
+                            registration.diagnostic(),
+                            eps.diagnostic()
+                        ),
+                        registration.registered() == Some(true),
+                    ),
+                );
+            }
+            registration_query_failed = query_failed;
+            if !query_failed {
+                last_registration_stat = registration.stat;
             }
             if !log_clock.is_synced() {
                 sync_log_clock_from_modem(&modem, &mut log_clock, &mut log, boot_ms, false);
             }
+            // A slow query batch must leave time for SMS/call handling before
+            // the next status poll, even if this batch took more than 30 s.
+            last_status_update = now_ms();
 
             // Association alone is not enough: Telegram also needs a usable
             // network interface (for example, after a DHCP lease is lost).
@@ -1227,8 +1232,13 @@ fn main() {
         {
             let activations = pending_modem_diagnostics.pdn_activations;
             let deactivations = pending_modem_diagnostics.pdn_deactivations;
+            let last_activation = pending_modem_diagnostics.last_pdn_activation;
+            let last_deactivation = pending_modem_diagnostics.last_pdn_deactivation;
+            let interval_secs = elapsed_since(last_pdn_event_log.unwrap_or(boot_ms), now) / 1000;
             pending_modem_diagnostics.pdn_activations = 0;
             pending_modem_diagnostics.pdn_deactivations = 0;
+            pending_modem_diagnostics.last_pdn_activation = None;
+            pending_modem_diagnostics.last_pdn_deactivation = None;
             last_pdn_event_log = Some(now);
             record_event(
                 &mut log,
@@ -1237,8 +1247,12 @@ fn main() {
                 LogEvent::network(
                     "modem PDN",
                     &format!(
-                        "context events: activated={}, deactivated={}",
-                        activations, deactivations
+                        "context events over {}s: activated={}, deactivated={}; last ACT: {}; last DEACT: {}",
+                        interval_secs,
+                        activations,
+                        deactivations,
+                        last_activation.map(|event| event.to_string()).unwrap_or_else(|| "none/unknown".into()),
+                        last_deactivation.map(|event| event.to_string()).unwrap_or_else(|| "none/unknown".into())
                     ),
                     deactivations == 0,
                 ),

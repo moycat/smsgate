@@ -49,10 +49,7 @@ impl Command for StatusCommand {
             s,
             &signal,
             &operator,
-            ctx.modem_status
-                .registration_error
-                .is_none()
-                .then_some(ctx.modem_status.registered),
+            ctx.modem_status.registration.registered(),
             free_heap_kb,
             min_free_heap_kb,
             queue_n,
@@ -62,6 +59,9 @@ impl Command for StatusCommand {
             last_sms,
             ctx.wifi_info,
         );
+        if ctx.modem_status.registration.sms_only() {
+            out.push_str(crate::i18n::status_sms_only_notice());
+        }
         out.push_str(&crate::i18n::status_build(
             crate::config::Config::GIT_COMMIT,
         ));

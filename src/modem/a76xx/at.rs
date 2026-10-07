@@ -1,6 +1,6 @@
 //! Raw AT send/receive over a UART-like byte port.
 
-use crate::modem::{AtResponse, ModemDiagnostics, ModemError};
+use crate::modem::{AtResponse, ModemDiagnostics, ModemError, PdnEvent};
 use std::time::{Duration, Instant};
 
 /// FreeRTOS ticks to block waiting for a byte.
@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 const UART_READ_TICKS: u32 = 10;
 
 const CMD_TIMEOUT: Duration = Duration::from_secs(5);
+// A76XX status queries can take up to 9 s according to the AT command manual.
+const STATUS_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 const SMS_STORAGE_TIMEOUT: Duration = Duration::from_secs(20);
 const SMS_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 const READLINE_TIMEOUT: Duration = Duration::from_millis(500);
@@ -37,6 +39,20 @@ fn command_timeout(cmd: &str) -> Duration {
         SMS_STORAGE_TIMEOUT
     } else if cmd == "+CMGF=0" || cmd.starts_with("+CNMI") {
         SMS_SETUP_TIMEOUT
+    } else if matches!(
+        cmd,
+        "+CSQ"
+            | "+CREG?"
+            | "+CGREG?"
+            | "+CEREG?"
+            | "+COPS?"
+            | "+CPSI?"
+            | "+CGATT?"
+            | "+CGACT?"
+            | "+CGDCONT?"
+            | "+CIREG?"
+    ) {
+        STATUS_QUERY_TIMEOUT
     } else {
         CMD_TIMEOUT
     }
@@ -485,8 +501,10 @@ impl<U: UartPort> AtPort<U> {
         if line.starts_with("+CGEV:") && line.contains("PDN DEACT") {
             self.diagnostics.pdn_deactivations =
                 self.diagnostics.pdn_deactivations.saturating_add(1);
+            self.diagnostics.last_pdn_deactivation = PdnEvent::parse(line);
         } else if line.starts_with("+CGEV:") && line.contains("PDN ACT") {
             self.diagnostics.pdn_activations = self.diagnostics.pdn_activations.saturating_add(1);
+            self.diagnostics.last_pdn_activation = PdnEvent::parse(line);
         }
     }
 
@@ -712,7 +730,27 @@ mod tests {
         }
         assert_eq!(command_timeout("+CNMI?"), SMS_SETUP_TIMEOUT);
         assert_eq!(command_timeout("+CMGF=0"), SMS_SETUP_TIMEOUT);
-        assert_eq!(command_timeout("+CSQ"), CMD_TIMEOUT);
-        assert_eq!(command_timeout("+CREG?"), CMD_TIMEOUT);
+    }
+
+    #[test]
+    fn status_query_timeouts_allow_the_documented_response_window() {
+        assert!(STATUS_QUERY_TIMEOUT >= Duration::from_secs(9));
+        for command in [
+            "+CSQ",
+            "+CREG?",
+            "+CGREG?",
+            "+CEREG?",
+            "+COPS?",
+            "+CPSI?",
+            "+CGATT?",
+            "+CGACT?",
+            "+CGDCONT?",
+            "+CIREG?",
+        ] {
+            assert_eq!(command_timeout(command), STATUS_QUERY_TIMEOUT);
+        }
+        for command in ["", "+CREG=0", "+COPS=?", "+CGATT=1", "+CGACT=0,1"] {
+            assert_eq!(command_timeout(command), CMD_TIMEOUT);
+        }
     }
 }

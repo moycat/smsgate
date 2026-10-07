@@ -11,7 +11,9 @@
 //!
 //! Concrete implementations live under `a76xx/`.
 
+mod status;
 pub mod urc;
+pub use status::{PdnEvent, RegistrationDomain, RegistrationQuery};
 
 #[cfg(any(feature = "esp32", feature = "testing"))]
 pub mod a76xx;
@@ -55,6 +57,8 @@ pub struct ModemDiagnostics {
     pub overlong_lines: u32,
     pub pdn_activations: u32,
     pub pdn_deactivations: u32,
+    pub last_pdn_activation: Option<PdnEvent>,
+    pub last_pdn_deactivation: Option<PdnEvent>,
 }
 
 impl ModemDiagnostics {
@@ -71,6 +75,12 @@ impl ModemDiagnostics {
     }
 
     pub fn accumulate(&mut self, other: Self) {
+        if other.pdn_activations > 0 {
+            self.last_pdn_activation = other.last_pdn_activation;
+        }
+        if other.pdn_deactivations > 0 {
+            self.last_pdn_deactivation = other.last_pdn_deactivation;
+        }
         self.dropped_urcs = self.dropped_urcs.saturating_add(other.dropped_urcs);
         self.dropped_response_lines = self
             .dropped_response_lines
@@ -90,12 +100,11 @@ pub struct ModemStatus {
     pub csq: u8,
     /// Why CSQ is unavailable, if the query failed instead of returning 99.
     pub csq_error: Option<String>,
+    pub csq_elapsed_ms: u32,
     /// Operator name.
     pub operator: String,
-    /// Registration status: true = registered.
-    pub registered: bool,
-    /// A failed or malformed registration query is not proof of deregistration.
-    pub registration_error: Option<String>,
+    /// Circuit-domain registration, retaining SMS-only and unknown states.
+    pub registration: RegistrationQuery,
 }
 
 /// CSQ value representing "unknown signal".
@@ -106,26 +115,22 @@ impl Default for ModemStatus {
         ModemStatus {
             csq: CSQ_UNKNOWN,
             csq_error: None,
+            csq_elapsed_ms: 0,
             operator: String::new(),
-            registered: false,
-            registration_error: Some("not queried".into()),
+            registration: RegistrationQuery::default(),
         }
     }
 }
 
 /// Parse a +CREG? response body for registration status.
-/// Returns true when stat is 1 (home) or 5 (roaming).
+/// Includes SMS-only registration (stat 6/7), without implying voice availability.
 pub fn creg_registered(body: &str) -> bool {
     creg_registration_status(body).unwrap_or(false)
 }
 
 /// Return a registration state only when the modem supplied a numeric status.
 pub fn creg_registration_status(body: &str) -> Option<bool> {
-    body.lines()
-        .find_map(|line| line.trim().strip_prefix("+CREG:"))
-        .and_then(|fields| fields.split(',').nth(1))
-        .and_then(|stat| stat.trim().parse::<u8>().ok())
-        .map(|stat| matches!(stat, 1 | 5))
+    status::parse_registration_stat(body, "+CREG:").and_then(status::registered_for_stat)
 }
 
 /// Whether the modem still routes stored SMS notifications to the UART.
@@ -218,6 +223,7 @@ pub trait ModemPort: AtTransport {
     /// Query CSQ, operator name, and registration status from the modem.
     fn update_status(&mut self) -> ModemStatus {
         let mut s = ModemStatus::default();
+        let csq_started = std::time::Instant::now();
         match self.send_at("+CSQ") {
             Ok(r) if r.ok => {
                 match r
@@ -236,6 +242,7 @@ pub trait ModemPort: AtTransport {
             }
             Err(e) => s.csq_error = Some(e.to_string()),
         }
+        s.csq_elapsed_ms = status::elapsed_ms(csq_started.elapsed());
         if let Ok(r) = self.send_at("+COPS?") {
             if let Some(line) = r
                 .body
@@ -249,18 +256,15 @@ pub trait ModemPort: AtTransport {
                 }
             }
         }
-        match self.send_at("+CREG?") {
-            Ok(r) if r.ok => match creg_registration_status(&r.body) {
-                Some(registered) => {
-                    s.registered = registered;
-                    s.registration_error = None;
-                }
-                None => s.registration_error = Some("invalid +CREG response".into()),
-            },
-            Ok(r) => s.registration_error = Some(format!("AT+CREG? rejected: {}", r.body.trim())),
-            Err(error) => s.registration_error = Some(error.to_string()),
-        }
+        s.registration = self.query_registration(RegistrationDomain::Circuit);
         s
+    }
+
+    /// Read one registration domain without changing URC reporting or attachment.
+    fn query_registration(&mut self, domain: RegistrationDomain) -> RegistrationQuery {
+        let started = std::time::Instant::now();
+        let response = self.send_at(domain.command());
+        RegistrationQuery::from_response(domain, response, started.elapsed())
     }
 
     /// Query modem RTC time. A76xx exposes network-updated local time via CCLK

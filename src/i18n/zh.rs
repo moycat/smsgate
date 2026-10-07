@@ -158,7 +158,10 @@ pub fn status_reg_no() -> &'static str {
     "未注册"
 }
 pub fn status_reg_unknown() -> &'static str {
-    "无法查询"
+    "未知"
+}
+pub fn status_sms_only_notice() -> &'static str {
+    "📩 当前仅短信业务已注册\n"
 }
 pub fn status_fwd_on() -> &'static str {
     "已启用"

@@ -56,6 +56,55 @@ fn hidden_at_command_rejects_invalid_or_non_diagnostic_inputs() {
 }
 
 #[test]
+fn hidden_at_command_accepts_context_and_ims_registration_queries() {
+    for (command, suffix, response) in [
+        (
+            "/at AT+CGDCONT?",
+            "+CGDCONT?",
+            "+CGDCONT: 1,\"IP\",\"apn.example\",\"0.0.0.0\",0,0",
+        ),
+        ("/at AT+CIREG?", "+CIREG?", "+CIREG: 0,1"),
+        ("/at at+cireg?", "+cireg?", "+CIREG: 0,1"),
+    ] {
+        let parsed = parse_hidden_at_command(command).unwrap().unwrap();
+        assert_eq!(parsed, suffix);
+        let mut modem = ScriptedModem::new().expect(suffix, response, true);
+
+        let reply = execute_at_command(parsed, &mut modem);
+
+        modem.check_consumed();
+        assert!(reply.succeeded);
+        assert_eq!(reply.text, format!("{response}\nOK"));
+    }
+}
+
+#[test]
+fn hidden_at_command_rejects_context_and_ims_writes_and_data_session_mutations() {
+    for command in [
+        "AT+CGDCONT=1,\"IP\",\"apn.example\"",
+        "AT+CGDCONT=1",
+        "AT+CGDCONT=?",
+        "AT+CGDCONT",
+        "AT+CIREG=0",
+        "AT+CIREG=1",
+        "AT+CIREG=2",
+        "AT+CIREG=?",
+        "AT+CIREG",
+        "at+cireg=1",
+        "AT+CGATT=0",
+        "AT+CGACT=1,1",
+        "AT+NETOPEN",
+        "AT+NETCLOSE",
+    ] {
+        assert_eq!(
+            parse_hidden_at_command(&format!("/at {command}")),
+            Some(Err(AtRequestError::UnsupportedCommand)),
+            "unexpectedly accepted {command}"
+        );
+    }
+}
+
+#[test]
 fn at_command_returns_body_and_terminal_result() {
     let mut modem = ScriptedModem::new().expect("+CREG?", "+CREG: 0,1", true);
     let reply = execute_at_command("+CREG?", &mut modem);
@@ -80,6 +129,6 @@ fn at_command_bounds_large_telegram_reply() {
     modem.check_consumed();
     assert!(reply.succeeded);
     assert!(reply.text.len() < 4096);
-    assert!(reply.text.contains("[response truncated]"));
+    assert!(reply.text.contains(smsgate::i18n::at_response_truncated()));
     assert!(reply.text.ends_with("\nOK"));
 }
