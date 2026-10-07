@@ -375,7 +375,6 @@ fn main() {
         let (storage_result, stored_result) = {
             let mut md = lock!(modem);
             let storage = md.send_at("+CPMS=\"ME\",\"ME\",\"ME\"");
-            log::info!("[main] sweeping ME storage…");
             (storage, scan_stored_sms_indices("ME", &mut *md))
         };
         if let Some(detail) = at_command_failure(&storage_result) {
@@ -409,7 +408,6 @@ fn main() {
                         ),
                     );
                 }
-                log::info!("[main] boot SMS sweep queued {} slots", scan.indices.len());
                 pending_sweep_indices.extend(scan.indices);
             }
             Err(e) => {
@@ -638,7 +636,6 @@ fn main() {
     const SMS_SWEEP_INTERVAL_MS: u32 = 5 * 60 * 1000;
     const NOTIFICATION_CHECK_INTERVAL_MS: u32 = 10 * 60 * 1000;
     const FAULT_LOG_INTERVAL_MS: u32 = 5 * 60 * 1000;
-    const PDN_EVENT_LOG_INTERVAL_MS: u32 = 60 * 60 * 1000;
     const SWEEP_ERROR_LOG_INTERVAL_MS: u32 = 60 * 60 * 1000;
     let mut last_sms_sweep = now_ms();
     let mut last_notification_check = now_ms();
@@ -652,7 +649,6 @@ fn main() {
     let mut pending_sms_reads: VecDeque<PendingSmsRead> = VecDeque::new();
     let mut pending_modem_diagnostics = ModemDiagnostics::default();
     let mut last_modem_diagnostics_log: Option<u32> = None;
-    let mut last_pdn_event_log: Option<u32> = None;
     // +CMT direct delivery is two lines: header then raw PDU hex.
     // This flag is set when the header arrives so the next poll_urc() line
     // is treated as the PDU rather than a new URC.
@@ -885,17 +881,6 @@ fn main() {
                         elapsed_since(boot_ms, now_ms()),
                         LogEvent::network("signal", &detail, false),
                     );
-                } else if last_signal_state.is_some() {
-                    record_event(
-                        &mut log,
-                        &log_clock,
-                        elapsed_since(boot_ms, now_ms()),
-                        LogEvent::network(
-                            "signal",
-                            &format!("CSQ available: {}", modem_status.csq),
-                            true,
-                        ),
-                    );
                 }
                 last_signal_state = Some(signal_state);
             }
@@ -903,23 +888,17 @@ fn main() {
             let query_failed = registration.error.is_some();
             let registration_changed = query_failed != registration_query_failed
                 || (!query_failed && last_registration_stat != registration.stat);
-            if registration_changed {
+            if registration_changed && registration.registered() != Some(true) {
                 use smsgate::modem::RegistrationDomain;
-                // Sample LTE registration only on a CREG transition or query
-                // failure/recovery, not as another request on every status poll.
+                // Sample LTE registration when entering an abnormal CREG state.
                 // Release the modem lock between the normal poll and this query.
                 let eps = lock!(modem).query_registration(RegistrationDomain::Eps);
                 let summary = if query_failed {
                     "registration query unavailable"
-                } else if registration.sms_only() {
-                    "SMS-only registration"
+                } else if registration.registered() == Some(false) {
+                    "network registration unavailable"
                 } else {
-                    match registration.registered() {
-                        Some(true) if registration_query_failed => "registration query recovered",
-                        Some(true) => "network registration available",
-                        Some(false) => "network registration unavailable",
-                        None => "registration state unknown",
-                    }
+                    "registration state unknown"
                 };
                 record_event(
                     &mut log,
@@ -933,7 +912,7 @@ fn main() {
                             registration.diagnostic(),
                             eps.diagnostic()
                         ),
-                        registration.registered() == Some(true),
+                        false,
                     ),
                 );
             }
@@ -1022,16 +1001,6 @@ fn main() {
                         &mut log,
                         &log_timestamp,
                     );
-                    record_event(
-                        &mut log,
-                        &log_clock,
-                        uptime_ms,
-                        LogEvent::network(
-                            "signal",
-                            &format!("restored CSQ {}", modem_status.csq),
-                            true,
-                        ),
-                    );
                 }
             }
 
@@ -1046,16 +1015,6 @@ fn main() {
                     "operator changed",
                     &mut log,
                     &log_timestamp,
-                );
-                record_event(
-                    &mut log,
-                    &log_clock,
-                    uptime_ms,
-                    LogEvent::network(
-                        "operator",
-                        &format!("{} -> {}", last_operator, modem_status.operator),
-                        true,
-                    ),
                 );
             }
             if !modem_status.operator.is_empty() {
@@ -1135,12 +1094,6 @@ fn main() {
                 let Some(urc) = md.poll_urc() else {
                     break;
                 };
-                if urc.starts_with("+CGEV:") {
-                    log::debug!("[main] URC: {:?}", urc);
-                } else {
-                    log::info!("[main] URC: {:?}", urc);
-                }
-
                 // +CMT two-line protocol: header sets the flag, next line is the PDU.
                 // Direct delivery has no modem slot — nothing to delete afterwards.
                 if cmt_pdu_pending {
@@ -1201,7 +1154,7 @@ fn main() {
         };
 
         pending_modem_diagnostics.accumulate(modem_diagnostics);
-        if !pending_modem_diagnostics.receive_faults_empty()
+        if !pending_modem_diagnostics.is_empty()
             && last_modem_diagnostics_log
                 .is_none_or(|previous| elapsed_since(previous, now) >= FAULT_LOG_INTERVAL_MS)
         {
@@ -1223,38 +1176,6 @@ fn main() {
                         faults.overlong_lines
                     ),
                     false,
-                ),
-            );
-        }
-        if !pending_modem_diagnostics.pdn_events_empty()
-            && last_pdn_event_log
-                .is_none_or(|previous| elapsed_since(previous, now) >= PDN_EVENT_LOG_INTERVAL_MS)
-        {
-            let activations = pending_modem_diagnostics.pdn_activations;
-            let deactivations = pending_modem_diagnostics.pdn_deactivations;
-            let last_activation = pending_modem_diagnostics.last_pdn_activation;
-            let last_deactivation = pending_modem_diagnostics.last_pdn_deactivation;
-            let interval_secs = elapsed_since(last_pdn_event_log.unwrap_or(boot_ms), now) / 1000;
-            pending_modem_diagnostics.pdn_activations = 0;
-            pending_modem_diagnostics.pdn_deactivations = 0;
-            pending_modem_diagnostics.last_pdn_activation = None;
-            pending_modem_diagnostics.last_pdn_deactivation = None;
-            last_pdn_event_log = Some(now);
-            record_event(
-                &mut log,
-                &log_clock,
-                uptime_ms,
-                LogEvent::network(
-                    "modem PDN",
-                    &format!(
-                        "context events over {}s: activated={}, deactivated={}; last ACT: {}; last DEACT: {}",
-                        interval_secs,
-                        activations,
-                        deactivations,
-                        last_activation.map(|event| event.to_string()).unwrap_or_else(|| "none/unknown".into()),
-                        last_deactivation.map(|event| event.to_string()).unwrap_or_else(|| "none/unknown".into())
-                    ),
-                    deactivations == 0,
                 ),
             );
         }
@@ -2386,7 +2307,6 @@ fn sync_log_clock_from_modem(
                 uptime_ms,
                 LogEvent::system("time", &format!("synced from modem: {}", time.format())),
             );
-            log::info!("[time] log clock synced from modem: {}", time.format());
         }
         Err(e) if log_failure => {
             record_event(
@@ -2402,9 +2322,7 @@ fn sync_log_clock_from_modem(
             );
             log::warn!("[time] modem time unavailable: {}", e);
         }
-        Err(e) => {
-            log::debug!("[time] modem time still unavailable: {}", e);
-        }
+        Err(_) => {}
     }
 }
 

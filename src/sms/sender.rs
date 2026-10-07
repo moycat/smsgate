@@ -167,13 +167,6 @@ impl SmsSender {
         entry.attempts += 1;
         let attempt = entry.attempts;
 
-        log::info!(
-            "[sender] attempt {} for {} ({}..)",
-            attempt,
-            entry.phone,
-            crate::text::char_prefix(&entry.body, 20).0
-        );
-
         let pdus = build_sms_submit_pdus(&entry.phone, &entry.body, super::MAX_SMS_PARTS, false);
         if pdus.is_empty() {
             log::error!("[sender] PDU build failed for {} — dropping", entry.phone);
@@ -183,15 +176,10 @@ impl SmsSender {
 
         let mut success = true;
         for pdu in &pdus {
-            match modem.send_pdu_sms(&pdu.hex, pdu.tpdu_len) {
-                Ok(_mr) => {
-                    log::info!("[sender] part sent ok");
-                }
-                Err(e) => {
-                    log::warn!("[sender] send failed: {}", e);
-                    success = false;
-                    break;
-                }
+            if let Err(e) = modem.send_pdu_sms(&pdu.hex, pdu.tpdu_len) {
+                log::warn!("[sender] send failed: {}", e);
+                success = false;
+                break;
             }
         }
 

@@ -13,7 +13,7 @@
 
 mod status;
 pub mod urc;
-pub use status::{PdnEvent, RegistrationDomain, RegistrationQuery};
+pub use status::{RegistrationDomain, RegistrationQuery};
 
 #[cfg(any(feature = "esp32", feature = "testing"))]
 pub mod a76xx;
@@ -55,41 +55,19 @@ pub struct ModemDiagnostics {
     pub dropped_urcs: u32,
     pub dropped_response_lines: u32,
     pub overlong_lines: u32,
-    pub pdn_activations: u32,
-    pub pdn_deactivations: u32,
-    pub last_pdn_activation: Option<PdnEvent>,
-    pub last_pdn_deactivation: Option<PdnEvent>,
 }
 
 impl ModemDiagnostics {
     pub fn is_empty(self) -> bool {
-        self.receive_faults_empty() && self.pdn_events_empty()
-    }
-
-    pub fn receive_faults_empty(self) -> bool {
         self.dropped_urcs == 0 && self.dropped_response_lines == 0 && self.overlong_lines == 0
     }
 
-    pub fn pdn_events_empty(self) -> bool {
-        self.pdn_activations == 0 && self.pdn_deactivations == 0
-    }
-
     pub fn accumulate(&mut self, other: Self) {
-        if other.pdn_activations > 0 {
-            self.last_pdn_activation = other.last_pdn_activation;
-        }
-        if other.pdn_deactivations > 0 {
-            self.last_pdn_deactivation = other.last_pdn_deactivation;
-        }
         self.dropped_urcs = self.dropped_urcs.saturating_add(other.dropped_urcs);
         self.dropped_response_lines = self
             .dropped_response_lines
             .saturating_add(other.dropped_response_lines);
         self.overlong_lines = self.overlong_lines.saturating_add(other.overlong_lines);
-        self.pdn_activations = self.pdn_activations.saturating_add(other.pdn_activations);
-        self.pdn_deactivations = self
-            .pdn_deactivations
-            .saturating_add(other.pdn_deactivations);
     }
 }
 

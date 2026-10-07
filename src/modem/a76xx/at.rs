@@ -1,6 +1,6 @@
 //! Raw AT send/receive over a UART-like byte port.
 
-use crate::modem::{AtResponse, ModemDiagnostics, ModemError, PdnEvent};
+use crate::modem::{AtResponse, ModemDiagnostics, ModemError};
 use std::time::{Duration, Instant};
 
 /// FreeRTOS ticks to block waiting for a byte.
@@ -223,7 +223,6 @@ impl<U: UartPort> AtPort<U> {
                 }
                 continue;
             }
-            self.note_pdn_event(&line);
             return Some(line);
         }
     }
@@ -477,7 +476,6 @@ impl<U: UartPort> AtPort<U> {
     }
 
     fn queue_urc(&mut self, line: String) {
-        self.note_pdn_event(&line);
         // +CGEV can flap rapidly. Keep only its newest value and reserve queue
         // space for SMS and call notifications, which cannot be reconstructed.
         if line.starts_with("+CGEV:") {
@@ -494,17 +492,6 @@ impl<U: UartPort> AtPort<U> {
         } else {
             self.diagnostics.dropped_urcs = self.diagnostics.dropped_urcs.saturating_add(1);
             log::warn!("[at] URC queue full — discarding: {}", line);
-        }
-    }
-
-    fn note_pdn_event(&mut self, line: &str) {
-        if line.starts_with("+CGEV:") && line.contains("PDN DEACT") {
-            self.diagnostics.pdn_deactivations =
-                self.diagnostics.pdn_deactivations.saturating_add(1);
-            self.diagnostics.last_pdn_deactivation = PdnEvent::parse(line);
-        } else if line.starts_with("+CGEV:") && line.contains("PDN ACT") {
-            self.diagnostics.pdn_activations = self.diagnostics.pdn_activations.saturating_add(1);
-            self.diagnostics.last_pdn_activation = PdnEvent::parse(line);
         }
     }
 

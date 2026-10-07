@@ -57,9 +57,6 @@ impl Board for TA7670X {
             modem_power_on_sequence()?;
             // No post-PWRKEY sleep: the AT probe loop in A76xxModem::init()
             // retries for up to 30 s, so it acts as the wait.
-            log::info!("[board] cold boot — modem power-on sequence complete");
-        } else {
-            log::info!("[board] warm reboot — modem already powered, skipping power-on sequence");
         }
 
         // Keep poweron pin driven HIGH for the entire program lifetime.

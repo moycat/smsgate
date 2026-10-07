@@ -2,7 +2,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use smsgate::modem::{
-    creg_registration_status, urc, AtResponse, PdnEvent, RegistrationDomain, RegistrationQuery,
+    creg_registration_status, urc, AtResponse, RegistrationDomain, RegistrationQuery,
 };
 use smsgate::sms::codec::{parse_clip_line, parse_sms_pdu};
 use std::time::Duration;
@@ -12,7 +12,6 @@ fuzz_target!(|data: &[u8]| {
         let _ = parse_clip_line(s);
         let _ = urc::is_urc(s);
         let _ = urc::parse_urc(s);
-        let _ = PdnEvent::parse(s);
         let _ = creg_registration_status(s);
         for domain in [RegistrationDomain::Circuit, RegistrationDomain::Eps] {
             let query = RegistrationQuery::from_response(

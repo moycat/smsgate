@@ -1,4 +1,4 @@
-//! Bounded evidence for registration queries and PDN context events.
+//! Bounded evidence for registration queries.
 
 use super::{AtResponse, ModemError};
 use std::time::Duration;
@@ -158,55 +158,5 @@ pub(super) fn registered_for_stat(stat: u8) -> Option<bool> {
         1 | 5 | 6 | 7 => Some(true),
         0 | 2 | 3 | 11 => Some(false),
         _ => None,
-    }
-}
-
-/// The most recent event of each kind; counters still include all contexts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PdnEvent {
-    pub cid: u8,
-    /// Defined only for ME PDN ACT; NW's optional field is WLAN offload.
-    pub reason: Option<u8>,
-    pub network_initiated: bool,
-}
-
-impl PdnEvent {
-    pub fn parse(line: &str) -> Option<Self> {
-        let event = line.trim().strip_prefix("+CGEV:")?.trim();
-        let (network_initiated, event) = if let Some(event) = event.strip_prefix("ME ") {
-            (false, event)
-        } else {
-            (true, event.strip_prefix("NW ")?)
-        };
-        let (activation, fields) = if let Some(fields) = event.strip_prefix("PDN ACT ") {
-            (true, fields)
-        } else {
-            (false, event.strip_prefix("PDN DEACT ")?)
-        };
-        let mut fields = fields.split(',');
-        Some(Self {
-            cid: fields.next()?.trim().parse().ok()?,
-            reason: if activation && !network_initiated {
-                fields.next().and_then(|field| field.trim().parse().ok())
-            } else {
-                None
-            },
-            network_initiated,
-        })
-    }
-}
-
-impl std::fmt::Display for PdnEvent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} cid={}",
-            if self.network_initiated { "NW" } else { "ME" },
-            self.cid
-        )?;
-        if let Some(reason) = self.reason {
-            write!(f, " reason={reason}")?;
-        }
-        Ok(())
     }
 }

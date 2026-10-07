@@ -27,10 +27,7 @@ pub fn ensure_sim_unlocked<T: AtTransport + ?Sized>(
     validate_sim_pin(sim_pin)?;
 
     match query_sim_pin_status(modem)? {
-        SimPinStatus::Ready => {
-            log::info!("[sim] SIM ready");
-            Ok(())
-        }
+        SimPinStatus::Ready => Ok(()),
         SimPinStatus::PinRequired => unlock_with_pin(modem, sim_pin),
         SimPinStatus::PukRequired => Err(ModemError::AtError(
             "SIM requires PUK; refusing PIN unlock".into(),
@@ -56,15 +53,10 @@ fn unlock_with_pin<T: AtTransport + ?Sized>(
     if !response.ok {
         return Err(ModemError::AtError("SIM PIN unlock rejected".into()));
     }
-    log::info!("[sim] SIM PIN accepted; waiting for READY");
-
     let deadline = Instant::now() + SIM_READY_TIMEOUT;
     loop {
         match query_sim_pin_status(modem)? {
-            SimPinStatus::Ready => {
-                log::info!("[sim] SIM ready after PIN unlock");
-                return Ok(());
-            }
+            SimPinStatus::Ready => return Ok(()),
             SimPinStatus::PukRequired => {
                 return Err(ModemError::AtError(
                     "SIM requires PUK after PIN unlock attempt".into(),

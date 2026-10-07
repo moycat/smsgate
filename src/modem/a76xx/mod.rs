@@ -42,7 +42,6 @@ impl A76xxModem {
         loop {
             let r = self.send_at(""); // sends "AT\r" — basic liveness check
             if r.is_ok() {
-                log::info!("[a76xx] modem responded to AT probe");
                 break;
             }
             if std::time::Instant::now() > probe_deadline {
@@ -53,25 +52,21 @@ impl A76xxModem {
         }
 
         let r = self.send_at("E0")?;
-        if r.ok {
-            log::info!("[a76xx] init ATE0 OK");
-        } else {
+        if !r.ok {
             log::warn!("[a76xx] init ATE0 ERROR: {}", r.body.trim());
         }
 
         sim::ensure_sim_unlocked(self, sim_pin)?;
 
         match self.send_at("+CTZU=1") {
-            Ok(r) if r.ok => log::info!("[a76xx] network time update enabled (CTZU=1)"),
+            Ok(r) if r.ok => {}
             Ok(r) => log::warn!("[a76xx] CTZU=1 ERROR: {}", r.body.trim()),
             Err(e) => log::warn!("[a76xx] CTZU=1 failed: {}", e),
         }
 
         for cmd in &["+CMGF=0", "+CLIP=1"] {
             let r = self.send_at(cmd)?;
-            if r.ok {
-                log::info!("[a76xx] init AT{} OK", cmd);
-            } else {
+            if !r.ok {
                 log::warn!("[a76xx] init AT{} ERROR: {}", cmd, r.body.trim());
             }
         }
@@ -82,10 +77,7 @@ impl A76xxModem {
         let cnmi_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             match self.send_at("+CNMI=2,1,0,0,0") {
-                Ok(r) if r.ok => {
-                    log::info!("[a76xx] CNMI set OK");
-                    break;
-                }
+                Ok(r) if r.ok => break,
                 Ok(r) => log::warn!("[a76xx] CNMI ERROR: {} — retrying", r.body.trim()),
                 Err(e) => log::warn!("[a76xx] CNMI timeout: {} — retrying", e),
             }
@@ -100,17 +92,15 @@ impl A76xxModem {
 
         // Verify CNMI setting was accepted
         match self.send_at("+CNMI?") {
-            Ok(r) if r.ok => log::info!("[a76xx] CNMI: {}", r.body.trim()),
+            Ok(r) if r.ok => {}
             Ok(r) => log::warn!("[a76xx] CNMI? error: {}", r.body.trim()),
             Err(_) => log::warn!("[a76xx] CNMI? timed out"),
         }
 
         // Query active storage for diagnostics. Non-fatal; some SIM/modem combos
         // return +CMS ERROR here if SMS management isn't supported.
-        match self.send_at("+CPMS?") {
-            Ok(r) if r.ok => log::info!("[a76xx] CPMS: {}", r.body.trim()),
-            Ok(r) => log::debug!("[a76xx] CPMS? not supported: {}", r.body.trim()),
-            Err(_) => log::debug!("[a76xx] CPMS? timed out"),
+        if let Err(error) = self.send_at("+CPMS?") {
+            log::warn!("[a76xx] CPMS? failed: {}", error);
         }
 
         // Wait for network registration (up to 30 s)
@@ -118,7 +108,6 @@ impl A76xxModem {
         loop {
             let r = self.send_at("+CREG?")?;
             if creg_registered(&r.body) {
-                log::info!("[a76xx] network registered");
                 break;
             }
             if std::time::Instant::now() > deadline {

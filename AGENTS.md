@@ -454,7 +454,9 @@ sdkconfig), so deleting the cache is required for changes to take effect.
 
 ## Boot Sequence Timing
 
-Milestones below are for the reference board (T-A7670X) on a cold start; exact timings vary by board and modem:
+These hardware timing milestones are for the reference board (T-A7670X) on a cold start;
+exact timings vary by board and modem. Verify boot using `smsgate starting` with the build
+hash, `smsgate ready`, and any warning/error output.
 - `t≈645ms`: smsgate starting
 - `t≈3545ms`: RESET_PIN configured
 - `t≈6745ms`: Board power-on sequence complete (modem booted)
@@ -464,7 +466,7 @@ Milestones below are for the reference board (T-A7670X) on a cold start; exact t
 - `t≈21000ms`: Sweeping existing SMS
 - `t≈22000ms`: smsgate ready
 
-If network registration doesn't appear within 30s, a warning is logged and boot continues.
+If the modem does not register within 30s, a warning is logged and boot continues.
 SMS delivery still works — the modem registers in the background.
 
 ## Modem Driver Notes

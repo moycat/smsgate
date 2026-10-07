@@ -243,12 +243,9 @@ pub fn read_new_sms_pdu(
     index: u16,
     modem: &mut dyn ModemPort,
 ) -> Result<StoredSms, SmsReadError> {
-    log::info!("[sms_handler] +CMTI: mem={} index={}", mem, index);
-
     ensure_pdu_mode(modem)?;
     select_storage(mem, modem)?;
     let resp = checked_at(modem, &format!("+CMGR={}", index)).map_err(SmsReadError::ReadSlot)?;
-    log::info!("[sms_handler] AT+CMGR={} body: {:?}", index, resp.body);
     parse_cmgr_response(mem, index, &resp.body).ok_or(SmsReadError::MalformedSlot)
 }
 
@@ -293,13 +290,7 @@ pub fn read_stored_sms_with_report(
 ) -> Result<StoredSmsScan, SmsReadError> {
     ensure_pdu_mode(modem)?;
     select_storage(mem, modem)?;
-    let (cmd, resp) = list_stored_sms(mem, modem)?;
-    log::info!(
-        "[sms_handler] sweep {} AT{} body: {:?}",
-        mem,
-        cmd,
-        resp.body
-    );
+    let resp = list_stored_sms(mem, modem)?;
 
     let mut stored = Vec::new();
     let mut current: Option<PendingListEntry> = None;
@@ -332,15 +323,12 @@ pub fn read_stored_sms_with_report(
     })
 }
 
-fn list_stored_sms(
-    mem: &str,
-    modem: &mut dyn ModemPort,
-) -> Result<(&'static str, AtResponse), SmsReadError> {
+fn list_stored_sms(mem: &str, modem: &mut dyn ModemPort) -> Result<AtResponse, SmsReadError> {
     const PDU_LIST: &str = "+CMGL=4";
     const TEXT_LIST: &str = "+CMGL=\"ALL\"";
 
     match checked_at(modem, PDU_LIST) {
-        Ok(response) => Ok((PDU_LIST, response)),
+        Ok(response) => Ok(response),
         Err(error) if error.contains("Invalid text mode parameter") => {
             log::warn!(
                 "[sms_handler] sweep {} AT{} failed: {}",
@@ -348,14 +336,12 @@ fn list_stored_sms(
                 PDU_LIST,
                 error
             );
-            checked_at(modem, TEXT_LIST)
-                .map(|response| (TEXT_LIST, response))
-                .map_err(|fallback| {
-                    SmsReadError::ListStorage(format!(
-                        "AT{}: {}; AT{}: {}",
-                        PDU_LIST, error, TEXT_LIST, fallback
-                    ))
-                })
+            checked_at(modem, TEXT_LIST).map_err(|fallback| {
+                SmsReadError::ListStorage(format!(
+                    "AT{}: {}; AT{}: {}",
+                    PDU_LIST, error, TEXT_LIST, fallback
+                ))
+            })
         }
         Err(error) => Err(SmsReadError::ListStorage(format!(
             "AT{}: {}",
@@ -748,7 +734,6 @@ fn flush_list_entry(
     match header {
         ListHeader::Pdu { index } => {
             if !body.is_empty() {
-                log::info!("[sms_handler] sweep found SMS in {} slot {}", mem, index);
                 stored.push(StoredSms::pdu(mem, index, body));
                 true
             } else {
@@ -760,7 +745,6 @@ fn flush_list_entry(
             sender,
             timestamp,
         } => {
-            log::info!("[sms_handler] sweep found SMS in {} slot {}", mem, index);
             stored.push(StoredSms::decoded(
                 mem,
                 index,
