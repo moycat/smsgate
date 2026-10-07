@@ -1,6 +1,5 @@
 //! Telegram Bot API backend.
 
-#[cfg(feature = "esp32")]
 pub mod http;
 pub mod types;
 #[cfg(feature = "esp32")]

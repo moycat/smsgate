@@ -5,58 +5,71 @@ use super::{
     types::{ApiResult, TelegramFile},
 };
 use anyhow::Context;
-use esp_idf_svc::tls::{Config as TlsConfig, EspTls, InternalSocket, KeepAliveConfig, X509};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+#[cfg(feature = "esp32")]
+mod esp;
+#[cfg(feature = "esp32")]
+pub use esp::TelegramHttpClient;
 
 const HOST: &str = "api.telegram.org";
-const PORT: u16 = 443;
 const READ_TIMEOUT: Duration = Duration::from_secs(55);
+// Retire idle sockets before attempting an infrequent outbound notification.
+// TCP keepalive does not prevent the peer from closing an idle HTTP connection.
+const MAX_CONNECTION_IDLE: Duration = Duration::from_secs(30);
 const FILE_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_HEADER_BYTES: usize = 2 * 1024;
 const MAX_BODY_BYTES: usize = 24 * 1024;
 const STREAM_BUF_BYTES: usize = 4096;
 
-/// TLS-backed HTTPS client for api.telegram.org.
-pub struct TelegramHttpClient {
-    tls: Option<EspTls<InternalSocket>>,
-    ca_bundle: Option<&'static [u8]>,
+/// Connection operations shared by ESP TLS and scripted host tests.
+pub trait HttpTransport {
+    fn reconnect(&mut self) -> anyhow::Result<()>;
+    fn close(&mut self);
+    fn write_all(&mut self, bytes: &[u8]) -> anyhow::Result<()>;
+    fn read(&mut self, buf: &mut [u8]) -> anyhow::Result<usize>;
+}
+
+/// Bounded HTTP client for api.telegram.org, independent of the TLS backend.
+pub struct HttpClient<T: HttpTransport> {
+    transport: T,
+    last_used: Option<Instant>,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum TelegramHttpError {
-    #[error("request was not sent: {0}")]
+    #[error("request was not sent: {0:#}")]
     NotSent(#[source] anyhow::Error),
-    #[error("request outcome is unknown: {0}")]
+    #[error("request outcome is unknown: {0:#}")]
     OutcomeUnknown(#[source] anyhow::Error),
 }
 
-impl TelegramHttpClient {
-    /// Create a new client with optional CA bundle for server verification.
-    pub fn new(ca_bundle: Option<&'static [u8]>) -> anyhow::Result<Self> {
-        let conf = Self::tls_config(ca_bundle);
-        log::debug!("[http] connecting TLS to {}:{}", HOST, PORT);
-        let mut tls = EspTls::new().context("tls client allocation failed")?;
-        tls.connect(HOST, PORT, &conf)
-            .with_context(|| format!("tls connect {}:{} failed", HOST, PORT))?;
-        log::debug!("[http] TLS connected to {}:{}", HOST, PORT);
-        Ok(TelegramHttpClient {
-            tls: Some(tls),
-            ca_bundle,
+impl<T: HttpTransport> HttpClient<T> {
+    pub fn connect(mut transport: T) -> anyhow::Result<Self> {
+        transport.reconnect()?;
+        Ok(Self {
+            transport,
+            last_used: Some(Instant::now()),
         })
     }
 
-    fn tls_config(ca_bundle: Option<&'static [u8]>) -> TlsConfig<'static> {
-        TlsConfig {
-            ca_cert: ca_bundle.map(X509::pem_until_nul),
-            timeout_ms: READ_TIMEOUT.as_millis() as u32,
-            keep_alive_cfg: Some(KeepAliveConfig {
-                enable: true,
-                idle: Duration::from_secs(60),
-                interval: Duration::from_secs(10),
-                count: 5,
-            }),
-            ..Default::default()
+    fn connection_expired_at(&self, now: Instant) -> bool {
+        self.last_used
+            .is_none_or(|last| now.duration_since(last) >= MAX_CONNECTION_IDLE)
+    }
+
+    fn ensure_connected(&mut self) -> anyhow::Result<()> {
+        if self.connection_expired_at(Instant::now()) {
+            self.close();
+            self.transport.reconnect()?;
+            self.last_used = Some(Instant::now());
         }
+        Ok(())
+    }
+
+    fn close(&mut self) {
+        self.last_used = None;
+        self.transport.close();
     }
 
     /// POST JSON to a Telegram Bot API path; returns the response body.
@@ -65,15 +78,28 @@ impl TelegramHttpClient {
     /// have accepted a side-effecting request such as sendMessage.
     pub fn post(&mut self, path: &str, json_body: &str) -> Result<String, TelegramHttpError> {
         let method = bot_api_method(path);
-        if self.tls.is_none() {
-            self.reconnect().map_err(TelegramHttpError::NotSent)?;
-        }
-        match self.do_post(path, json_body) {
-            Ok(body) => Ok(body),
-            Err(e) => {
-                log::warn!("[http] {} request failed: {:#}", method, e);
-                self.tls.take();
-                Err(TelegramHttpError::OutcomeUnknown(e))
+        self.ensure_connected()
+            .map_err(TelegramHttpError::NotSent)?;
+        let mut retried = false;
+        loop {
+            match self.do_post(path, json_body) {
+                Ok(body) => return Ok(body),
+                Err(error) => {
+                    self.close();
+                    if !retried && matches!(error, TelegramHttpError::NotSent(_)) {
+                        log::warn!(
+                            "[http] {} failed before body write; reconnecting once: {:#}",
+                            method,
+                            error
+                        );
+                        retried = true;
+                        self.ensure_connected()
+                            .map_err(TelegramHttpError::NotSent)?;
+                    } else {
+                        log::warn!("[http] {} request failed: {:#}", method, error);
+                        return Err(error);
+                    }
+                }
             }
         }
     }
@@ -129,7 +155,10 @@ impl TelegramHttpClient {
              \r\n",
             path, HOST
         );
-        self.tls_mut()?
+        self.ensure_connected()?;
+        // Downloads request connection closure and never reuse this socket.
+        self.last_used = None;
+        self.transport
             .write_all(request.as_bytes())
             .context("file download request write failed")?;
 
@@ -167,7 +196,7 @@ impl TelegramHttpClient {
                 anyhow::bail!("file download idle timeout");
             }
             let n = self
-                .tls_mut()?
+                .transport
                 .read(&mut buf)
                 .context("file download body read failed")?;
             if n == 0 {
@@ -193,7 +222,7 @@ impl TelegramHttpClient {
         Ok(received)
     }
 
-    fn do_post(&mut self, path: &str, json_body: &str) -> anyhow::Result<String> {
+    fn do_post(&mut self, path: &str, json_body: &str) -> Result<String, TelegramHttpError> {
         let method = bot_api_method(path);
         let body_bytes = json_body.as_bytes();
         log::debug!(
@@ -213,12 +242,32 @@ impl TelegramHttpClient {
             body_bytes.len()
         );
 
-        let tls = self.tls_mut()?;
-        tls.write_all(request_head.as_bytes())
-            .with_context(|| format!("{} header write failed", method))?;
-        tls.write_all(body_bytes)
-            .with_context(|| format!("{} body write failed", method))?;
+        self.transport
+            .write_all(request_head.as_bytes())
+            .with_context(|| format!("{} header write failed", method))
+            .map_err(|error| {
+                // Headers and JSON must stay separate writes: even a partially
+                // written header cannot execute a request whose body is missing.
+                // Empty-body requests do not have this safe replay boundary.
+                if body_bytes.is_empty() {
+                    TelegramHttpError::OutcomeUnknown(error)
+                } else {
+                    TelegramHttpError::NotSent(error)
+                }
+            })?;
+        self.transport
+            .write_all(body_bytes)
+            .with_context(|| format!("{} body write failed", method))
+            .map_err(TelegramHttpError::OutcomeUnknown)?;
 
+        // A failed TLS write can have sent some bytes before returning an error.
+        // Once body writing starts, neither write nor response failures are safe
+        // to replay automatically.
+        self.read_json_response()
+            .map_err(TelegramHttpError::OutcomeUnknown)
+    }
+
+    fn read_json_response(&mut self) -> anyhow::Result<String> {
         let headers = self.read_binary_headers()?;
         let close_after_response = headers.connection_close;
         let deadline = std::time::Instant::now() + READ_TIMEOUT;
@@ -247,7 +296,9 @@ impl TelegramHttpClient {
             anyhow::bail!("HTTP {} from Telegram", headers.status);
         }
         if close_after_response {
-            self.tls.take();
+            self.close();
+        } else {
+            self.last_used = Some(Instant::now());
         }
         Ok(body)
     }
@@ -264,7 +315,7 @@ impl TelegramHttpClient {
         }
         let mut buf = [0u8; 1024];
         let n = self
-            .tls_mut()?
+            .transport
             .read(&mut buf)
             .context("HTTP body read failed")?;
         if n == 0 {
@@ -334,7 +385,7 @@ impl TelegramHttpClient {
                 anyhow::bail!("header read timeout");
             }
             let n = self
-                .tls_mut()?
+                .transport
                 .read(&mut buf)
                 .context("HTTP response header read failed")?;
             if n == 0 {
@@ -351,27 +402,10 @@ impl TelegramHttpClient {
             }
         }
     }
-
-    fn reconnect(&mut self) -> anyhow::Result<()> {
-        drop(self.tls.take());
-        let conf = Self::tls_config(self.ca_bundle);
-        let mut tls = EspTls::new().context("tls client allocation failed")?;
-        log::debug!("[http] reconnecting TLS to {}:{}", HOST, PORT);
-        tls.connect(HOST, PORT, &conf)
-            .with_context(|| format!("tls reconnect {}:{} failed", HOST, PORT))?;
-        self.tls = Some(tls);
-        log::debug!("[http] TLS reconnect complete");
-        Ok(())
-    }
-
-    fn tls_mut(&mut self) -> anyhow::Result<&mut EspTls<InternalSocket>> {
-        self.tls
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("TLS client not connected"))
-    }
 }
 
 fn reset_current_task_watchdog() {
+    #[cfg(feature = "esp32")]
     // SAFETY: ESP-IDF only touches the current task's watchdog subscription.
     unsafe {
         let _ = esp_idf_sys::esp_task_wdt_reset();
@@ -433,4 +467,60 @@ fn parse_headers(header: &str, remainder: Vec<u8>) -> anyhow::Result<ResponseHea
         connection_close,
         remainder,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct MemoryTransport {
+        connections: usize,
+        closes: usize,
+    }
+
+    impl HttpTransport for MemoryTransport {
+        fn reconnect(&mut self) -> anyhow::Result<()> {
+            self.connections += 1;
+            Ok(())
+        }
+
+        fn close(&mut self) {
+            self.closes += 1;
+        }
+
+        fn write_all(&mut self, _: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn read(&mut self, buf: &mut [u8]) -> anyhow::Result<usize> {
+            let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}";
+            buf[..response.len()].copy_from_slice(response);
+            Ok(response.len())
+        }
+    }
+
+    #[test]
+    fn idle_connection_expires_at_thirty_seconds() {
+        let client = HttpClient::connect(MemoryTransport::default()).unwrap();
+        let last = client.last_used.unwrap();
+        assert!(!client.connection_expired_at(last + Duration::from_millis(29_999)));
+        assert!(client.connection_expired_at(last + Duration::from_millis(30_000)));
+        assert!(client.connection_expired_at(last + Duration::from_millis(30_001)));
+    }
+
+    #[test]
+    fn post_reconnects_after_idle_and_refreshes_reuse_window() {
+        let mut client = HttpClient::connect(MemoryTransport::default()).unwrap();
+        client.last_used = Some(Instant::now() - Duration::from_secs(31));
+        let request_started = Instant::now();
+        assert_eq!(client.post("/bot-test/sendMessage", "{}").unwrap(), "{}");
+        assert_eq!(client.transport.connections, 2);
+        assert_eq!(client.transport.closes, 1);
+        assert!(client.last_used.unwrap() >= request_started);
+
+        assert_eq!(client.post("/bot-test/sendMessage", "{}").unwrap(), "{}");
+        assert_eq!(client.transport.connections, 2);
+        assert_eq!(client.transport.closes, 1);
+    }
 }
