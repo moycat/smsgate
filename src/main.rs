@@ -39,6 +39,7 @@ use smsgate::{
     log_ring::LogRing,
     log_ring::{LogEvent, LogKind},
     modem::{
+        a76xx::data::{enforce_packet_data_disabled, PacketDataOutcome},
         cnmi_store_notifications_enabled,
         urc::{parse_urc, Urc},
         AtResponse, ModemDiagnostics, ModemError, ModemPort,
@@ -649,6 +650,12 @@ fn main() {
     let mut pending_sms_reads: VecDeque<PendingSmsRead> = VecDeque::new();
     let mut pending_modem_diagnostics = ModemDiagnostics::default();
     let mut last_modem_diagnostics_log: Option<u32> = None;
+    const PACKET_DATA_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+    const PACKET_DATA_EVENT_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(5);
+    let mut last_packet_data_check: Option<std::time::Instant> = None;
+    let mut packet_data_check_requested = true;
+    let mut last_packet_data_error: Option<String> = None;
+    let mut last_packet_data_error_log: Option<u32> = None;
     // +CMT direct delivery is two lines: header then raw PDU hex.
     // This flag is set when the header arrives so the next poll_urc() line
     // is treated as the PDU rather than a new URC.
@@ -1102,6 +1109,14 @@ fn main() {
                     continue;
                 }
 
+                if urc
+                    .strip_prefix("+CGEV:")
+                    .is_some_and(|event| event.split_ascii_whitespace().any(|token| token == "ACT"))
+                {
+                    // Defer the AT exchange until SMS/call URCs are serviced.
+                    packet_data_check_requested = true;
+                }
+
                 match parse_urc(&urc) {
                     Urc::NewSms { mem, index } => {
                         if !pending_sms_reads
@@ -1326,6 +1341,66 @@ fn main() {
                 &mut *store,
                 &log_timestamp,
             );
+        }
+
+        // Keep this independent of status polling and after SMS/call handling.
+        // A modem reset can restore attachment without an observed PDN event;
+        // periodic readback also covers coalesced/lost +CGEV notifications.
+        let packet_data_check_due = last_packet_data_check.is_none_or(|last| {
+            last.elapsed() >= PACKET_DATA_CHECK_INTERVAL
+                || (packet_data_check_requested && last.elapsed() >= PACKET_DATA_EVENT_COOLDOWN)
+        });
+        if packet_data_check_due && !cmt_pdu_pending {
+            packet_data_check_requested = false;
+            let result = {
+                let mut md = lock!(modem);
+                enforce_packet_data_disabled(&mut *md)
+            };
+            // Start the cooldown after completion, even when an AT command was slow.
+            last_packet_data_check = Some(std::time::Instant::now());
+            let completed_at = now_ms();
+            match result {
+                Ok(outcome) => {
+                    let recovered = last_packet_data_error.take().is_some();
+                    last_packet_data_error_log = None;
+                    if outcome == PacketDataOutcome::Detached || recovered {
+                        let detail = if outcome == PacketDataOutcome::Detached {
+                            "packet data detach reapplied and verified"
+                        } else {
+                            "packet data disable verified after previous failure"
+                        };
+                        log::warn!("[data] {}", detail);
+                        record_event(
+                            &mut log,
+                            &log_clock,
+                            elapsed_since(boot_ms, completed_at),
+                            LogEvent::network("packet-data", detail, true),
+                        );
+                    }
+                }
+                Err(error) => {
+                    let detail = error.to_string();
+                    if last_packet_data_error.as_deref() != Some(detail.as_str())
+                        || last_packet_data_error_log.is_none_or(|last| {
+                            elapsed_since(last, completed_at) >= FAULT_LOG_INTERVAL_MS
+                        })
+                    {
+                        log::error!("[data] packet data disable not verified: {}", detail);
+                        record_event(
+                            &mut log,
+                            &log_clock,
+                            elapsed_since(boot_ms, completed_at),
+                            LogEvent::network(
+                                "packet-data",
+                                &format!("disable not verified; will retry: {}", detail),
+                                false,
+                            ),
+                        );
+                        last_packet_data_error_log = Some(completed_at);
+                    }
+                    last_packet_data_error = Some(detail);
+                }
+            }
         }
 
         // Recover stored messages whose +CMTI was lost or whose first read

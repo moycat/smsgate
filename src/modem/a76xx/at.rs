@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 const UART_READ_TICKS: u32 = 10;
 
 const CMD_TIMEOUT: Duration = Duration::from_secs(5);
-// A76XX status queries can take up to 9 s according to the AT command manual.
+// A76XX status queries and packet detach can take up to 9 s in the AT manual.
 const STATUS_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 const SMS_STORAGE_TIMEOUT: Duration = Duration::from_secs(20);
 const SMS_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -48,6 +48,7 @@ fn command_timeout(cmd: &str) -> Duration {
             | "+COPS?"
             | "+CPSI?"
             | "+CGATT?"
+            | "+CGATT=0"
             | "+CGACT?"
             | "+CGDCONT?"
             | "+CIREG?"
@@ -730,6 +731,7 @@ mod tests {
             "+COPS?",
             "+CPSI?",
             "+CGATT?",
+            "+CGATT=0",
             "+CGACT?",
             "+CGDCONT?",
             "+CIREG?",

@@ -1,6 +1,7 @@
 //! A76xx modem driver — ESP32 / UART implementation.
 
 pub mod at;
+pub mod data;
 pub mod sim;
 
 #[cfg(feature = "esp32")]
@@ -34,7 +35,7 @@ impl A76xxModem {
     }
 
     /// Run the initialisation sequence:
-    /// - Echo off, unlock SIM if needed, PDU mode, enable CMT URCs, wait for network registration.
+    /// - Echo off, unlock SIM if needed, detach packet data, configure SMS, and wait for registration.
     pub fn init(&mut self, sim_pin: &str) -> Result<(), ModemError> {
         // Probe until the modem responds to AT (up to 15 s).
         // A7670G typically takes 5-10 s after power-on to become responsive.
@@ -57,6 +58,18 @@ impl A76xxModem {
         }
 
         sim::ensure_sim_unlocked(self, sim_pin)?;
+
+        // Packet attachment is modem state, independent of the ESP32 WiFi
+        // interface. Reapply on every boot without changing APN/IMS definitions.
+        // Keep command failures recoverable: resetting the modem here would
+        // repeatedly restore its default attachment state before retrying.
+        match data::disable_packet_data(self) {
+            Ok(()) => log::info!("[a76xx] packet data detached and verified"),
+            Err(error) => log::error!(
+                "[a76xx] packet data disable failed: {}; runtime guard will retry",
+                error
+            ),
+        }
 
         match self.send_at("+CTZU=1") {
             Ok(r) if r.ok => {}
@@ -115,6 +128,14 @@ impl A76xxModem {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+
+        // Registration may have changed attachment after the initial detach.
+        if let Err(error) = data::enforce_packet_data_disabled(self) {
+            log::error!(
+                "[a76xx] packet data verification after registration failed: {}",
+                error
+            );
         }
 
         Ok(())

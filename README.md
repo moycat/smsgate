@@ -81,6 +81,19 @@ of read-only modem diagnostics, such as `AT+SIMCOMATI` and `AT+CSQ`.
 It also allows `AT+CGDCONT?` to inspect context definitions and `AT+CIREG?`
 to inspect IMS registration; configuration writes remain rejected.
 
+The A76xx driver disables cellular packet data on every startup with
+`AT+CGATT=0` and verifies `AT+CGATT?` reports `0`. This policy applies on home
+and roaming networks. A runtime guard checks every 30 seconds and also after
+packet activation events, with a five-second cooldown between event checks.
+It reapplies detach after unexpected attachment and records verification
+failures in `/log`; a failed command is never reported as successful disablement.
+APN and IMS context definitions and NVS runtime configuration are preserved.
+Packet detach may prevent LTE/IMS SMS and calls on some networks, so verify SMS
+forwarding and `/status` on the actual SIM and modem after installing an image.
+This modem policy cannot guarantee zero traffic before the first detach or
+between an unexpected reattachment and the next check; carrier-side data barring
+is needed for a billing guarantee.
+
 Modem fault logs distinguish a failed query, an unknown state, and confirmed
 deregistration. CREG states 6 and 7 mean SMS-only registration and count as
 registered for this SMS bridge. Abnormal state changes include the CREG reply
