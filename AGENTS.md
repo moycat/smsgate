@@ -306,9 +306,14 @@ and SMS reply dispatch.
 
 The checked-in CI workflow is `.github/workflows/ci.yml`, which runs `rustfmt`,
 `clippy -D warnings`, and host tests, then builds English and Chinese software-only
-OTA images in a dependent matrix job. Its `smsgate-ota-software-only-en` and
-`smsgate-ota-software-only-zh` artifacts contain credential-free ESP app images
-that preserve NVS runtime config; the OTA build does not read GitHub Secrets.
+OTA images in a dependent matrix job. Its `smsgate-ota-software-only-<locale>-<commit>`
+artifacts and `.bin` filenames include the short build commit ID and contain
+credential-free ESP app images that preserve NVS runtime config; the OTA build
+does not read GitHub Secrets. Both locales share tool, Cargo download, and
+ESP-IDF/build caches. Keep build cache restore prefixes scoped to compatible
+runner images, absolute paths, Python/Rust/toolchain versions, and SDK/build
+configuration. Always regenerate `config.toml` and run the firmware build after
+restoring caches so locale selection and the embedded commit ID are refreshed.
 
 Production workflows that use `.github/scripts/gen_config.py` should provide these GitHub
 Secrets (Settings -> Secrets and variables -> Actions). Empty credential values build a

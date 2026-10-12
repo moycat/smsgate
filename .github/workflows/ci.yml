@@ -34,27 +34,93 @@ jobs:
       matrix:
         locale: [en, zh]
     env:
+      ESP_TOOLCHAIN_VERSION: "1.97.0.0"
+      ESPFLASH_VERSION: "4.6.0"
       UI_LOCALE: ${{ matrix.locale }}
       SMSGATE_APPLY_COMPILED_CONFIG: "0"
       ESPFLASH_SKIP_UPDATE_CHECK: "true"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Identify build and cache environment
+        id: build-info
+        run: |
+          printf 'commit=%s\n' "$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          environment_id=$(
+            {
+              printf '%s\n' "${ImageOS:-ubuntu24}" "${ImageVersion:-unknown}" "$HOME" "$GITHUB_WORKSPACE"
+              rustc +stable --version --verbose
+              python3 -c 'import os, sys; print(os.path.realpath(sys.executable)); print(sys.version)'
+            } | sha256sum | cut -d ' ' -f 1
+          )
+          printf 'environment=%s\n' "$environment_id" >> "$GITHUB_OUTPUT"
+      - name: Cache OTA tools
+        id: ota-tools
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.rustup/toolchains/esp
+            ~/.cargo/bin/ldproxy
+            ~/.cargo/bin/espflash
+            ~/exports
+          key: ${{ runner.os }}-${{ runner.arch }}-ota-tools-v1-${{ steps.build-info.outputs.environment }}-esp${{ env.ESP_TOOLCHAIN_VERSION }}-espflash${{ env.ESPFLASH_VERSION }}
+      - name: Cache Cargo downloads
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+          key: ${{ runner.os }}-${{ runner.arch }}-ota-cargo-v1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-ota-cargo-v1-
       - name: Install Xtensa toolchain
+        if: steps.ota-tools.outputs.cache-hit != 'true'
         uses: esp-rs/xtensa-toolchain@v1.7.0
         with:
-          version: "1.97.0.0"
+          version: ${{ env.ESP_TOOLCHAIN_VERSION }}
           buildtargets: esp32
           ldproxy: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
+      - name: Restore cached Xtensa environment
+        if: steps.ota-tools.outputs.cache-hit == 'true'
+        run: |
+          source "$HOME/exports"
+          printf '%s\n' "$PATH" >> "$GITHUB_PATH"
+          printf 'LIBCLANG_PATH=%s\n' "$LIBCLANG_PATH" >> "$GITHUB_ENV"
+          printf 'CLANG_PATH=%s\n' "$CLANG_PATH" >> "$GITHUB_ENV"
       - name: Install espflash
-        run: cargo +stable install espflash --version 4.6.0 --locked
+        if: steps.ota-tools.outputs.cache-hit != 'true'
+        run: cargo +stable install espflash --version "$ESPFLASH_VERSION" --locked
+      - name: Verify OTA tools
+        run: |
+          cargo +esp --version
+          ldproxy --version
+          espflash --version
+      # Both locales share dependencies. Always regenerate config and build to
+      # select the current locale and refresh the embedded Git commit.
+      - name: Cache ESP-IDF SDK
+        uses: actions/cache@v5
+        with:
+          path: .embuild/espressif
+          key: ${{ runner.os }}-${{ runner.arch }}-ota-sdk-v1-${{ steps.build-info.outputs.environment }}-esp${{ env.ESP_TOOLCHAIN_VERSION }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', '.cargo/config.toml', 'sdkconfig.defaults', 'partitions_ota.csv') }}
+      - name: Cache firmware build
+        uses: actions/cache@v5
+        with:
+          path: target
+          key: ${{ runner.os }}-${{ runner.arch }}-ota-build-v1-${{ steps.build-info.outputs.environment }}-esp${{ env.ESP_TOOLCHAIN_VERSION }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', '.cargo/config.toml', 'sdkconfig.defaults', 'partitions_ota.csv') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-ota-build-v1-${{ steps.build-info.outputs.environment }}-esp${{ env.ESP_TOOLCHAIN_VERSION }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', '.cargo/config.toml', 'sdkconfig.defaults', 'partitions_ota.csv') }}-
       - name: Generate credential-free build config
         run: python3 .github/scripts/gen_config.py > config.toml
       - name: Build firmware
         run: cargo +esp build --release --locked --target xtensa-esp32-espidf
       - name: Generate OTA app image
+        env:
+          OTA_COMMIT: ${{ steps.build-info.outputs.commit }}
         run: |
           mkdir -p dist
           espflash save-image \
@@ -63,10 +129,10 @@ jobs:
             --partition-table partitions_ota.csv \
             --target-app-partition ota_0 \
             target/xtensa-esp32-espidf/release/smsgate \
-            "dist/smsgate-ota-software-only-${UI_LOCALE}.bin"
+            "dist/smsgate-ota-software-only-${UI_LOCALE}-${OTA_COMMIT}.bin"
       - name: Upload OTA firmware
         uses: actions/upload-artifact@v6
         with:
-          name: smsgate-ota-software-only-${{ matrix.locale }}
-          path: dist/smsgate-ota-software-only-${{ matrix.locale }}.bin
+          name: smsgate-ota-software-only-${{ matrix.locale }}-${{ steps.build-info.outputs.commit }}
+          path: dist/smsgate-ota-software-only-${{ matrix.locale }}-${{ steps.build-info.outputs.commit }}.bin
           if-no-files-found: error

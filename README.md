@@ -94,11 +94,20 @@ and the firmware periodically retries WiFi.
 
 GitHub Actions builds English and Chinese software-only OTA images after the CI
 formatting, lint, and host test checks pass, on pushes to `main` and pull requests
-targeting `main`. Download `smsgate-ota-software-only-en` or
-`smsgate-ota-software-only-zh` from the workflow run's artifacts, then send the
-included `.bin` with caption `/ota`. These images preserve the device's existing
+targeting `main`. Download `smsgate-ota-software-only-en-<commit>` or
+`smsgate-ota-software-only-zh-<commit>` from the workflow run's artifacts. Both the
+artifact and its included `.bin` filename contain the short build commit ID.
+Send the `.bin` with caption `/ota`. These images preserve the device's existing
 NVS runtime configuration and contain no WiFi or Telegram credentials; no GitHub
 Secrets are required. A fresh device still needs serial provisioning.
+
+The OTA jobs share caches for Xtensa/espflash tools, Cargo downloads, and the
+ESP-IDF SDK and compiled dependencies. Build caches are scoped to the runner
+image, absolute paths, Python/host Rust versions, Xtensa version, and SDK/build
+configuration; each commit can restore a compatible earlier build. Both locales
+always regenerate their build configuration and compile the current firmware.
+The first run, or a run after the environment or SDK configuration changes, fills
+the caches again.
 
 Telegram and OTA are WiFi-only. The hidden `/at` command accepts a fixed set
 of read-only modem diagnostics, such as `AT+SIMCOMATI` and `AT+CSQ`.
