@@ -98,7 +98,7 @@ jobs:
       - name: Verify OTA tools
         run: |
           cargo +esp --version
-          ldproxy --version
+          command -v ldproxy
           espflash --version
       # Both locales share dependencies. Always regenerate config and build to
       # select the current locale and refresh the embedded Git commit.

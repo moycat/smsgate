@@ -156,7 +156,8 @@ After installing the host Rust toolchain, verify the ESP tools before building:
 ```bash
 cargo +esp --version
 espflash --version
-ldproxy --version
+# ldproxy is a linker proxy and has no --version option.
+command -v ldproxy # Linux/macOS; use Get-Command ldproxy on Windows.
 ```
 
 The first `cargo +esp build --release --target xtensa-esp32-espidf` can take several
