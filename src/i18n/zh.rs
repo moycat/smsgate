@@ -58,6 +58,12 @@ pub fn ota_failed(error: &str) -> String {
 pub fn ota_ignored_stale(name: &str) -> String {
     format!("已忽略较旧的 OTA 文件：{name}。本批次将使用最新的 OTA 文件。")
 }
+pub fn ota_url_name() -> &'static str {
+    "固件链接"
+}
+pub fn ota_usage() -> &'static str {
+    "发送固件 .bin 文件并附注 /ota，或发送 /ota https://example.com/firmware.bin。仅支持一条 HTTP 或 HTTPS 链接。"
+}
 pub fn at_usage() -> &'static str {
     "用法：/at AT+CSQ"
 }

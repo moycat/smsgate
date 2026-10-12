@@ -58,6 +58,12 @@ pub fn ota_failed(error: &str) -> String {
 pub fn ota_ignored_stale(name: &str) -> String {
     format!("Ignored older OTA file: {name}. The newest OTA file in this batch will be used.")
 }
+pub fn ota_url_name() -> &'static str {
+    "firmware URL"
+}
+pub fn ota_usage() -> &'static str {
+    "Send a firmware .bin document with caption /ota, or send /ota https://example.com/firmware.bin. Use one HTTP or HTTPS URL."
+}
 pub fn at_usage() -> &'static str {
     "Usage: /at AT+CSQ"
 }

@@ -73,8 +73,32 @@ The script writes:
   and bridge runtime configuration into NVS.
 
 Send the chosen `.bin` to the configured Telegram chat with caption `/ota`.
-OTA downloads use WiFi HTTPS. With WiFi unavailable, SMS storage stays active
+Alternatively, send a firmware download URL without attaching a document:
+
+```text
+/ota https://example.com/smsgate-ota-software-only-en.bin
+```
+
+URL updates support HTTP and HTTPS, including up to five redirects with absolute
+or relative `Location` URLs. HTTPS certificates are verified. The URL must return
+the raw ESP app `.bin`, rather than a web page, ELF, or artifact ZIP. GitHub Actions
+artifact download pages require authentication; extract and host the `.bin` at a
+direct download URL before using URL OTA. Signed download URLs are supported, and
+their query parameters are omitted from OTA notifications and event logs.
+When a Telegram batch contains multiple OTA documents or URLs, only the newest
+valid request is used. Download errors, oversized or truncated images, and failed
+ESP image validation leave the current boot slot selected.
+
+OTA downloads use WiFi. With WiFi unavailable, SMS storage stays active
 and the firmware periodically retries WiFi.
+
+GitHub Actions builds English and Chinese software-only OTA images after the CI
+formatting, lint, and host test checks pass, on pushes to `main` and pull requests
+targeting `main`. Download `smsgate-ota-software-only-en` or
+`smsgate-ota-software-only-zh` from the workflow run's artifacts, then send the
+included `.bin` with caption `/ota`. These images preserve the device's existing
+NVS runtime configuration and contain no WiFi or Telegram credentials; no GitHub
+Secrets are required. A fresh device still needs serial provisioning.
 
 Telegram and OTA are WiFi-only. The hidden `/at` command accepts a fixed set
 of read-only modem diagnostics, such as `AT+SIMCOMATI` and `AT+CSQ`.

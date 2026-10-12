@@ -1,7 +1,7 @@
 use smsgate::im::{InboundDocument, InboundMessage};
 use smsgate::ota::{
     format_running_slot_summary, format_starting_message, is_ota_caption,
-    latest_ota_document_cursor, RunningSlotSummary,
+    latest_ota_request_cursor, parse_ota_request, parse_ota_text, OtaSource, RunningSlotSummary,
 };
 
 #[test]
@@ -23,24 +23,96 @@ fn ota_caption_rejects_other_text() {
 }
 
 #[test]
-fn latest_ota_document_cursor_selects_newest_ota_document() {
+fn latest_ota_request_cursor_selects_newest_ota_document() {
     let messages = vec![
         inbound(10, "/ota", Some(document("old.bin"))),
         inbound(11, "/status", None),
         inbound(12, "/ota", Some(document("new.bin"))),
     ];
 
-    assert_eq!(latest_ota_document_cursor(&messages), Some(12));
+    assert_eq!(latest_ota_request_cursor(&messages), Some(12));
 }
 
 #[test]
-fn latest_ota_document_cursor_ignores_non_ota_documents() {
+fn latest_ota_request_cursor_ignores_non_ota_documents() {
     let messages = vec![
         inbound(10, "/log", Some(document("notes.txt"))),
         inbound(11, "/status", None),
     ];
 
-    assert_eq!(latest_ota_document_cursor(&messages), None);
+    assert_eq!(latest_ota_request_cursor(&messages), None);
+}
+
+#[test]
+fn ota_text_accepts_http_https_and_bot_suffix() {
+    for text in [
+        "/ota http://example.com/firmware.bin",
+        "/ota@smsgate_bot https://example.com/firmware.bin?signature=secret#fragment",
+    ] {
+        let url = parse_ota_text(text).unwrap().unwrap();
+        assert!(url.as_str().starts_with("http"));
+        assert!(!url.as_str().contains('#'));
+    }
+    assert!(parse_ota_text("/status").is_none());
+    assert!(parse_ota_text("https://example.com/firmware.bin").is_none());
+}
+
+#[test]
+fn ota_text_rejects_missing_url_extra_args_and_invalid_urls() {
+    for text in [
+        "/ota",
+        "/ota https://example.com/fw.bin another-argument",
+        "/ota ftp://example.com/fw.bin",
+        "/ota https:///fw.bin",
+        "/ota https://user:password@example.com/fw.bin",
+        "/ota https://example.com/\0fw.bin",
+    ] {
+        assert!(parse_ota_text(text).unwrap().is_err(), "{text:?}");
+    }
+}
+
+#[test]
+fn ota_request_keeps_document_compatibility_and_hides_signed_url() {
+    let file = inbound(10, "/ota", Some(document("firmware.bin")));
+    let source = parse_ota_request(&file).unwrap().unwrap();
+    assert!(matches!(source, OtaSource::Document(_)));
+    assert_eq!(source.display_name(), "firmware.bin");
+    assert_eq!(source.file_size(), Some(1024));
+
+    let message = inbound(11, "/ota https://example.com/fw.bin?token=secret", None);
+    let source = parse_ota_request(&message).unwrap().unwrap();
+    assert!(matches!(source, OtaSource::Url(_)));
+    assert!(!source.display_name().contains("secret"));
+    assert_eq!(source.file_size(), None);
+}
+
+#[test]
+fn latest_ota_request_handles_mixed_sources_and_invalid_newer_request() {
+    let messages = vec![
+        inbound(10, "/ota", Some(document("old.bin"))),
+        inbound(12, "/ota http://example.com/new.bin", None),
+        inbound(11, "/ota", Some(document("middle.bin"))),
+        inbound(13, "/ota ftp://example.com/bad.bin", None),
+    ];
+    assert_eq!(latest_ota_request_cursor(&messages), Some(12));
+
+    let messages = vec![
+        inbound(10, "/ota http://example.com/old.bin", None),
+        inbound(12, "/ota", Some(document("new.bin"))),
+    ];
+    assert_eq!(latest_ota_request_cursor(&messages), Some(12));
+}
+
+#[test]
+fn ota_callbacks_are_not_download_requests() {
+    let mut message = inbound(10, "/ota https://example.com/firmware.bin", None);
+    message.callback = Some(smsgate::im::InboundCallback {
+        id: "callback".into(),
+        data: message.text.clone(),
+        message_id: 100,
+    });
+    assert!(parse_ota_request(&message).is_none());
+    assert_eq!(latest_ota_request_cursor(&[message]), None);
 }
 
 #[test]

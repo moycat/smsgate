@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -20,3 +23,50 @@ jobs:
         run: cargo clippy --no-default-features --features testing --all-targets -- -D warnings
       - name: Test
         run: cargo test --no-default-features --features testing
+
+  ota:
+    name: OTA firmware (${{ matrix.locale }})
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        locale: [en, zh]
+    env:
+      UI_LOCALE: ${{ matrix.locale }}
+      SMSGATE_APPLY_COMPILED_CONFIG: "0"
+      ESPFLASH_SKIP_UPDATE_CHECK: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Xtensa toolchain
+        uses: esp-rs/xtensa-toolchain@v1.7.0
+        with:
+          version: "1.97.0.0"
+          buildtargets: esp32
+          ldproxy: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Install espflash
+        run: cargo +stable install espflash --version 4.6.0 --locked
+      - name: Generate credential-free build config
+        run: python3 .github/scripts/gen_config.py > config.toml
+      - name: Build firmware
+        run: cargo +esp build --release --locked --target xtensa-esp32-espidf
+      - name: Generate OTA app image
+        run: |
+          mkdir -p dist
+          espflash save-image \
+            --chip esp32 \
+            --flash-size 4mb \
+            --partition-table partitions_ota.csv \
+            --target-app-partition ota_0 \
+            target/xtensa-esp32-espidf/release/smsgate \
+            "dist/smsgate-ota-software-only-${UI_LOCALE}.bin"
+      - name: Upload OTA firmware
+        uses: actions/upload-artifact@v6
+        with:
+          name: smsgate-ota-software-only-${{ matrix.locale }}
+          path: dist/smsgate-ota-software-only-${{ matrix.locale }}.bin
+          if-no-files-found: error

@@ -1689,39 +1689,37 @@ fn main() {
                 tg_messages.len(),
                 document_count
             );
-            let latest_ota_cursor = smsgate::ota::latest_ota_document_cursor(&tg_messages);
-            for msg in tg_messages.iter().filter(|m| m.document.is_some()) {
-                if let Some(document) = msg.document.as_ref() {
-                    log::info!(
-                        "[main] Telegram document message: cursor={} text_len={} file_name={} mime={} size={:?}",
-                        msg.cursor,
-                        msg.text.len(),
-                        document.file_name.as_deref().unwrap_or("<none>"),
-                        document.mime_type.as_deref().unwrap_or("<none>"),
-                        document.file_size
-                    );
-                    if smsgate::ota::is_ota_caption(&msg.text)
-                        && latest_ota_cursor.is_some()
-                        && Some(msg.cursor) != latest_ota_cursor
-                    {
-                        let name = document.file_name.as_deref().unwrap_or("firmware image");
+            let latest_ota_cursor = smsgate::ota::latest_ota_request_cursor(&tg_messages);
+            for msg in &tg_messages {
+                if let Some(request) = smsgate::ota::parse_ota_request(msg) {
+                    let source = match request {
+                        Ok(source) => source,
+                        Err(_) => {
+                            let _ = send_ota_message(
+                                &mut messenger,
+                                "invalid_request",
+                                smsgate::i18n::ota_usage(),
+                            );
+                            drain_tg_send!();
+                            continue;
+                        }
+                    };
+                    if Some(msg.cursor) != latest_ota_cursor {
                         log::warn!(
-                            "[ota] ignoring stale OTA document: cursor={} latest_cursor={:?} file_name={}",
+                            "[ota] ignoring stale request: cursor={} latest_cursor={:?}",
                             msg.cursor,
-                            latest_ota_cursor,
-                            name
+                            latest_ota_cursor
                         );
                         let _ = send_ota_message(
                             &mut messenger,
                             "ignored_stale",
-                            &smsgate::i18n::ota_ignored_stale(name),
+                            &smsgate::i18n::ota_ignored_stale(source.display_name()),
                         );
                         drain_tg_send!();
                         continue;
                     }
-                    handle_ota_document(
-                        &msg.text,
-                        document,
+                    handle_ota_request(
+                        source,
                         &mut messenger,
                         &creds.bot_token,
                         &mut log,
@@ -1734,6 +1732,9 @@ fn main() {
             }
             let mut dispatch_messages = Vec::new();
             for msg in tg_messages {
+                if smsgate::ota::is_ota_request(&msg) {
+                    continue;
+                }
                 if msg.document.is_none() && msg.callback.is_none() {
                     if let Some(request) = parse_hidden_at_command(&msg.text) {
                         let (reply, succeeded, detail) = match request {
@@ -2467,9 +2468,8 @@ fn recover_wifi_after_telegram_failure(
 
 #[cfg(feature = "esp32")]
 #[allow(clippy::too_many_arguments)] // OTA uses main-owned clients and flash state synchronously.
-fn handle_ota_document(
-    caption: &str,
-    document: &smsgate::im::InboundDocument,
+fn handle_ota_request(
+    source: smsgate::ota::OtaSource<'_>,
     messenger: &mut dyn smsgate::im::MessageSink,
     bot_token: &str,
     log: &mut LogRing,
@@ -2490,24 +2490,16 @@ fn handle_ota_document(
         };
     }
 
+    let name = source.display_name();
     log::info!(
-        "[ota] document handler entered: caption_len={} file_name={} mime={} size={:?}",
-        caption.len(),
-        document.file_name.as_deref().unwrap_or("<none>"),
-        document.mime_type.as_deref().unwrap_or("<none>"),
-        document.file_size
+        "[ota] request accepted: name={} size={:?}",
+        name,
+        source.file_size()
     );
-    log::debug!("[ota] document caption raw: {}", caption);
-    if !smsgate::ota::is_ota_caption(caption) {
-        log::info!("[ota] document ignored: caption is not /ota");
-        return;
-    }
-    log::info!("[ota] caption accepted");
-    let name = document.file_name.as_deref().unwrap_or("firmware image");
     let progress_message_id = send_ota_message(
         messenger,
         "starting",
-        &smsgate::i18n::ota_starting(name, document.file_size),
+        &smsgate::i18n::ota_starting(name, source.file_size()),
     );
     drain_ota_send!();
     record_event(
@@ -2517,51 +2509,36 @@ fn handle_ota_document(
         LogEvent::ota("telegram", &format!("OTA started: {}", name), true),
     );
 
-    log::info!("[ota] creating WiFi Telegram HTTP client");
-    let mut http = match TelegramHttpClient::new(None) {
-        Ok(http) => http,
-        Err(e) => {
-            log::error!("[ota] HTTP client init failed: {}", e);
-            let _ = send_ota_message(
-                messenger,
-                "http_init_failed",
-                &smsgate::i18n::ota_failed(&e.to_string()),
-            );
-            drain_ota_send!();
-            record_event(
-                log,
-                log_clock,
-                elapsed_since(boot_ms, now_ms()),
-                LogEvent::ota("telegram", &format!("OTA HTTP init failed: {}", e), false),
-            );
-            return;
-        }
-    };
-
     const OTA_PROGRESS_STEP_BYTES: usize = 128 * 1024;
     let mut last_reported = 0usize;
-    log::info!("[ota] starting Telegram document update");
-    let result =
-        smsgate::ota::perform_telegram_update(&mut http, bot_token, document, |written, total| {
-            let complete = total.is_some_and(|total| written >= total);
-            if complete || written.saturating_sub(last_reported) >= OTA_PROGRESS_STEP_BYTES {
-                last_reported = written;
-                log::info!(
-                    "[ota] progress report: written={} total={:?}",
-                    written,
-                    total
+    let on_progress = |written: usize, total: Option<usize>| {
+        let complete = total.is_some_and(|total| written >= total);
+        if complete || written.saturating_sub(last_reported) >= OTA_PROGRESS_STEP_BYTES {
+            last_reported = written;
+            log::info!(
+                "[ota] progress report: written={} total={:?}",
+                written,
+                total
+            );
+            if let Some(message_id) = progress_message_id {
+                edit_ota_message(
+                    messenger,
+                    "progress",
+                    message_id,
+                    &smsgate::i18n::ota_progress(written, total),
                 );
-                if let Some(message_id) = progress_message_id {
-                    edit_ota_message(
-                        messenger,
-                        "progress",
-                        message_id,
-                        &smsgate::i18n::ota_progress(written, total),
-                    );
-                    drain_ota_send!();
-                }
+                drain_ota_send!();
             }
-        });
+        }
+    };
+    let result = match &source {
+        smsgate::ota::OtaSource::Document(document) => TelegramHttpClient::new(None)
+            .map_err(|error| smsgate::ota::OtaError::Http(error.to_string()))
+            .and_then(|mut http| {
+                smsgate::ota::perform_telegram_update(&mut http, bot_token, document, on_progress)
+            }),
+        smsgate::ota::OtaSource::Url(url) => smsgate::ota::perform_url_update(url, on_progress),
+    };
 
     match result {
         Ok(()) => {

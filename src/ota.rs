@@ -1,11 +1,18 @@
 //! OTA (Over-The-Air) firmware update support.
 //!
-//! ESP32 builds stream a Telegram file download directly into the inactive
+//! ESP32 builds stream a Telegram file or HTTP(S) download into the inactive
 //! ESP-IDF OTA slot. Host builds keep only small pure helpers for tests.
 
-use crate::im::InboundMessage;
+pub mod download;
 #[cfg(feature = "esp32")]
-use crate::im::{telegram::http::TelegramHttpClient, InboundDocument};
+mod url_update;
+#[cfg(feature = "esp32")]
+pub use url_update::perform_url_update;
+
+#[cfg(feature = "esp32")]
+use crate::im::telegram::http::TelegramHttpClient;
+use crate::im::{InboundDocument, InboundMessage};
+use download::DownloadUrl;
 #[cfg(feature = "esp32")]
 use esp_idf_svc::ota::EspOta;
 #[cfg(feature = "esp32")]
@@ -73,15 +80,78 @@ pub fn is_ota_caption(caption: &str) -> bool {
     command == "ota"
 }
 
-/// Return the newest valid OTA document cursor in a Telegram batch.
+#[derive(Debug)]
+pub enum OtaSource<'a> {
+    Document(&'a InboundDocument),
+    Url(DownloadUrl),
+}
+
+impl OtaSource<'_> {
+    /// Describe the update without exposing signed URL query parameters.
+    pub fn display_name(&self) -> &str {
+        match self {
+            Self::Document(document) => document.file_name.as_deref().unwrap_or("firmware image"),
+            Self::Url(_) => crate::i18n::ota_url_name(),
+        }
+    }
+
+    pub fn file_size(&self) -> Option<u64> {
+        match self {
+            Self::Document(document) => document.file_size,
+            Self::Url(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum OtaCommandError {
+    #[error("send /ota with a firmware document or one HTTP(S) URL")]
+    Usage,
+    #[error("{0}")]
+    InvalidUrl(#[from] download::DownloadError),
+}
+
+/// Parse a text-only OTA command, including the optional Telegram bot suffix.
+pub fn parse_ota_text(text: &str) -> Option<Result<DownloadUrl, OtaCommandError>> {
+    if !is_ota_caption(text) {
+        return None;
+    }
+    let mut args = text.split_whitespace().skip(1);
+    let Some(url) = args.next() else {
+        return Some(Err(OtaCommandError::Usage));
+    };
+    if args.next().is_some() {
+        return Some(Err(OtaCommandError::Usage));
+    }
+    Some(DownloadUrl::parse(url).map_err(OtaCommandError::from))
+}
+
+/// Identify OTA before ordinary command and SMS reply dispatch.
+pub fn is_ota_request(message: &InboundMessage) -> bool {
+    message.callback.is_none() && is_ota_caption(&message.text)
+}
+
+pub fn parse_ota_request(
+    message: &InboundMessage,
+) -> Option<Result<OtaSource<'_>, OtaCommandError>> {
+    if !is_ota_request(message) {
+        return None;
+    }
+    if let Some(document) = &message.document {
+        return Some(Ok(OtaSource::Document(document)));
+    }
+    parse_ota_text(&message.text).map(|result| result.map(OtaSource::Url))
+}
+
+/// Return the newest valid OTA request cursor in a Telegram batch.
 ///
 /// A batch may contain stale firmware files from earlier attempts. Only the
-/// newest `/ota` document should be flashed; older ones are considered
+/// newest document or URL should be flashed; older ones are considered
 /// acknowledged by the persisted cursor and must be ignored.
-pub fn latest_ota_document_cursor(messages: &[InboundMessage]) -> Option<i64> {
+pub fn latest_ota_request_cursor(messages: &[InboundMessage]) -> Option<i64> {
     messages
         .iter()
-        .filter(|message| message.document.is_some() && is_ota_caption(&message.text))
+        .filter(|message| matches!(parse_ota_request(message), Some(Ok(_))))
         .map(|message| message.cursor)
         .max()
 }

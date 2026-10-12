@@ -13,6 +13,10 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let _ = parse_hidden_at_command(s);
+    let _ = smsgate::ota::parse_ota_text(s);
+    if let Ok(url) = smsgate::ota::download::DownloadUrl::parse("https://example.com/firmware.bin") {
+        let _ = url.resolve(s);
+    }
 
     let mut reg = CommandRegistry::new();
     reg.register(Box::new(HelpCommand {

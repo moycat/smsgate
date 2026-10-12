@@ -293,10 +293,22 @@ while preserving existing NVS runtime config. Send `smsgate-ota-with-config.bin`
 caption `/ota` to update firmware software and overwrite NVS runtime config with the
 compiled `config.toml` WiFi, Telegram, modem/SIM, and bridge runtime values.
 
+Text-only `/ota <http-or-https-url>` downloads the ESP app image directly over WiFi.
+URL OTA follows at most five redirects, resolves relative `Location` references,
+verifies HTTPS certificates, and rejects non-200 final responses and oversized,
+empty, or truncated images. Preserve streaming writes and full ESP image validation
+before changing the boot slot. Never log signed URL query parameters or forward
+Telegram credentials to firmware download hosts. The newest valid document or URL
+request in a Telegram batch takes precedence; OTA requests bypass ordinary command
+and SMS reply dispatch.
+
 ### CI / Release Notes
 
 The checked-in CI workflow is `.github/workflows/ci.yml`, which runs `rustfmt`,
-`clippy -D warnings`, and host tests.
+`clippy -D warnings`, and host tests, then builds English and Chinese software-only
+OTA images in a dependent matrix job. Its `smsgate-ota-software-only-en` and
+`smsgate-ota-software-only-zh` artifacts contain credential-free ESP app images
+that preserve NVS runtime config; the OTA build does not read GitHub Secrets.
 
 Production workflows that use `.github/scripts/gen_config.py` should provide these GitHub
 Secrets (Settings -> Secrets and variables -> Actions). Empty credential values build a
